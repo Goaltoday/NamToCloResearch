@@ -7,6 +7,9 @@ param(
 
     [string]$Exe,
 
+    [ValidateSet("data", "file")]
+    [string]$Mode = "data",
+
     [int]$Timeout = 180,
 
     [switch]$KeepTemp,
@@ -33,10 +36,11 @@ if (-not $Output) {
 }
 $Output = [System.IO.Path]::GetFullPath($Output)
 
-$argsList = @($Nam, $Output, "--timeout", "$Timeout")
+$argsList = @($Nam, $Output, "--mode", $Mode, "--timeout", "$Timeout")
 if ($KeepTemp) { $argsList += "--keep-temp" }
 if ($VerboseLog) { $argsList += "--verbose" }
 
 Write-Host "Running: $Exe"
+Write-Host "Mode:    $Mode"
 & $Exe @argsList
 exit $LASTEXITCODE

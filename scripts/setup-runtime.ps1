@@ -3,10 +3,15 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$AmperoDir,
 
-    [string]$Destination = (Join-Path $PSScriptRoot "..\runtime")
+    [string]$Destination
 )
 
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($Destination)) {
+    $Destination = Join-Path $PSScriptRoot "..\runtime"
+}
+
 $AmperoDir = (Resolve-Path $AmperoDir).Path
 $Destination = [System.IO.Path]::GetFullPath($Destination)
 New-Item -ItemType Directory -Force -Path $Destination | Out-Null

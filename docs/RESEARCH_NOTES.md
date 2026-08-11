@@ -1,83 +1,80 @@
-# Research notes
+# Research notes - v0.2
 
-This repository is intentionally a **research probe**, not yet a claim that the external converter is fully solved.
+## Confirmed
 
-## Confirmed from the supplied Ampero II package
+### Valeton side
 
-- `HTUSBTools.dll` is PE32+ / Windows x86-64.
-- The DLL exports:
-  - `namConvertClo`
-  - `namConvertCloData`
-  - `getNormalWav`
-  - `initWithWaveDicPath`
-  - `initWithWaveDicPathJson`
-  - `InitDartApiDL`
-- In the analyzed DLL, `namConvertClo` is exported at RVA `0xCA830` and `namConvertCloData` at RVA `0xCA600`.
-- `namConvertClo` reads five Windows-x64 ABI arguments: RCX, RDX, R8, R9 and the fifth stack argument at `[original RSP+0x28]`.
-- The first argument is explicitly nullable: the function checks it before dereferencing fields at offsets `+0x138` and `+0x148`.
-- `namConvertClo` returns `0x2288` in EAX after scheduling the internal operation.
-- `namConvertCloData` also returns `0x2288`.
-- The DLL contains the strings `VTSI`, `VTSIL`, `/Temporary.wav`, `[NAM] outputFile:` and `namConvertClo`.
-- The analyzed `nam_input_wav.wav` has SHA-256:
+- GP-200 NAM -> CLO conversion is local on the PC.
+- The final CLO size observed is fixed at `0x2288` / 8840 bytes.
+- The post-NAM stage is real DSP/identification work, not simple WAV packaging.
+
+### Ampero package
+
+- `HTUSBTools.dll` is Windows x64.
+- It exports `namConvertClo`, `namConvertCloData`, `getNormalWav`, `initWithWaveDicPath`, `initWithWaveDicPathJson`, and `InitDartApiDL`.
+- The bundled `nam_input_wav.wav` SHA-256 matches the Valeton stimulus previously measured:
   `9bb6c1b136dfbeb7538a6060499d98c89342b76ec568b76836e36ab98b29aa1a`.
-- That stimulus hash is the same one previously measured in the Valeton GP-200 editor research.
+- `namConvertClo` and `namConvertCloData` contain the `0x2288` result/size constant.
 
-## Confirmed from the prior Valeton GP-200 investigation
+### Dynamic v0.1 experiment
 
-- The Valeton pipeline produces a fixed-size CLO of `8840` bytes (`0x2288`).
-- The file is written as `0x2000 + 0x288` bytes.
-- Valeton first prepares the known stimulus, runs NeuralAmpModelerCore to obtain the model response, then executes a proprietary identification/clone stage before serializing the CLO.
-- This means the difficult part is not merely packaging a WAV; using an existing compatible encoder is substantially preferable to reimplementing that stage.
-
-## Strong inference used by this probe
-
-The current five-argument hypothesis is:
-
-```cpp
-uint32_t namConvertClo(
-    void* context,
-    const char* inputWavPath,
-    const char* outputWavPath,
-    const char* namPath,
-    const char* cloPath);
-```
-
-The probe calls it as:
+An external process successfully called `namConvertClo` with:
 
 ```text
 arg1 = nullptr
-arg2 = staged nam_input_wav.wav
-arg3 = staged outputFile.wav
-arg4 = staged input.nam
-arg5 = staged output.clo
+arg2 = supplied nam_input_wav.wav
+arg3 = outputFile.wav
+arg4 = input.nam
+arg5 = output.clo path
 ```
 
-The argument count and nullable first argument are directly supported by the disassembly. The exact semantic names assigned to arguments 2-5 are still a **strong inference pending dynamic validation**.
+Hotone's own log confirmed:
 
-## Why the worker process exists
+```text
+namConvertClo
+startThread
+NamConvertThread-----
+[NAM] convertType=1
+[NAM] namFile: ...input.nam
+[NAM] inputFile: ...nam_input_wav.wav
+[NAM] outputFile: ...outputFile.wav
+[NAM] model sampleRate: 48000 in_channels=1 out_channels=1
+[NAM] audioread: fs=48000 samples=3360000
+[NAM] audiowrite done: ...outputFile.wav
+[NAM] ========== getNamOutput end ==========
+```
 
-A wrong reverse-engineered ABI can raise an access violation. The public CLI therefore stages the files and launches itself in an internal `--worker` mode. A crash is contained in the child process and becomes useful evidence instead of terminating the user's shell or a larger host application.
+The generated WAV was 70 s / 48 kHz / stereo PCM16 with identical L/R channels. The worker then ended with `0xC0000409`, and the file CLO remained empty.
 
-## Deliberately not done yet
+Therefore arguments 2-4 are no longer merely guessed: their meaning is confirmed by the DLL's own diagnostic log.
 
-The first probe intentionally does **not** call:
+## Strongly supported but not yet dynamically proven
 
-- `InitDartApiDL`
-- `initWithWaveDicPath`
-- `initWithWaveDicPathJson`
+Static analysis of `namConvertCloData` supports:
 
-The experiment is designed to answer whether the actual NAM/CLO conversion can run with `context == nullptr` and without Dart/hardware initialization. If no output is produced, those initialization paths become the next investigation target.
+```cpp
+uint32_t namConvertCloData(
+    void* context,
+    const char* inputWav,
+    const char* outputWav,
+    const char* inputNam,
+    void* outputBuffer,
+    uint64_t arg6);
+```
 
-## Experimental decision tree
+The fifth argument is used by the CLO-data path as a destination for a fixed-size `0x2288` copy. v0.2 therefore supplies a parent-owned shared-memory buffer there.
 
-1. `--check-runtime` succeeds.
-2. Call `namConvertClo` in the isolated worker.
-3. Observe whether `outputFile.wav` appears.
-4. Observe whether an `0x2288` CLO appears.
-5. If a CLO appears, inspect its magic and compare it against a Valeton-generated CLO from the same NAM.
-6. Only after binary compatibility looks plausible, test the Ampero-generated CLO on a GP-200.
-7. If conversion fails before a CLO appears, capture ProcMon/x64dbg evidence and refine initialization or argument semantics.
+## Still unknown
 
-## Compatibility is not yet proven
+- Exact meaning of `arg6` in `namConvertCloData`.
+- Whether `arg1` becomes mandatory only after `getNamOutput`.
+- Whether Dart is required for the CLO stage or only for progress/completion callbacks.
+- Whether Ampero-generated VTSI data is functionally accepted by GP-200 hardware.
 
-The common stimulus, common `0x2288` size, `VTSI` strings and exported converter make compatibility a strong hypothesis. They do **not** by themselves prove that a CLO generated by this DLL is accepted by a GP-200. That must be tested experimentally.
+## v0.2 experiment
+
+The parent creates a named Windows file mapping of 8840 bytes, fills it with `0xCC`, and launches a worker. The worker opens the mapping and passes it as arg5 to `namConvertCloData`, with arg6 set to zero.
+
+The parent owns the mapping, so its contents remain readable even if the worker fast-fails. The parent always stores the final mapping as `captured-buffer.bin`. A `VTSI` prefix causes the complete 8840-byte buffer to be materialized as `output.clo`.
+
+The legacy `namConvertClo` route remains available through `--mode file` as a control.
