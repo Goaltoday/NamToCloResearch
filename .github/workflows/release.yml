@@ -1,0 +1,52 @@
+name: Release Windows x64
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -S . -B build -A x64
+
+      - name: Build Release
+        run: cmake --build build --config Release --parallel
+
+      - name: Smoke test CLI
+        shell: pwsh
+        run: .\build\Release\NamToClo.exe --version
+
+      - name: Install staging package
+        run: cmake --install build --config Release --prefix stage
+
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path stage\* -DestinationPath dist\NamToCloResearch-windows-x64.zip -Force
+
+      - name: Create or update GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag "dist\NamToCloResearch-windows-x64.zip" --clobber
+          } else {
+            gh release create $tag `
+              "dist\NamToCloResearch-windows-x64.zip" `
+              --title "NamToCloResearch $tag" `
+              --generate-notes
+          }
