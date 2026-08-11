@@ -5,9 +5,20 @@ param(
     [string]$Exe = ".\NamToClo.exe"
 )
 $ErrorActionPreference = 'Stop'
+$StartDir = (Get-Location).ProviderPath
 $Nam = (Resolve-Path $Nam).Path
 $Exe = (Resolve-Path $Exe).Path
+
+# Resolve OutputDir against the directory from which this script was launched.
+# Do this before invoking NamToClo.exe: native code/DLLs may change the process
+# current directory, which must never affect where matrix files are read/written.
+if ([IO.Path]::IsPathRooted($OutputDir)) {
+    $OutputDir = [IO.Path]::GetFullPath($OutputDir)
+} else {
+    $OutputDir = [IO.Path]::GetFullPath((Join-Path $StartDir $OutputDir))
+}
 New-Item -ItemType Directory -Force $OutputDir | Out-Null
+$OutputDir = (Resolve-Path $OutputDir).Path
 $cases = @(
     @{Name='normal';   Args=@()},
     @{Name='size';     Args=@('--gp200-size')},
@@ -16,8 +27,8 @@ $cases = @(
 )
 $rows = @()
 foreach ($c in $cases) {
-    $out = Join-Path $OutputDir ($c.Name + '.clo')
-    $log = Join-Path $OutputDir ($c.Name + '.log.txt')
+    $out = [IO.Path]::GetFullPath((Join-Path $OutputDir ($c.Name + '.clo')))
+    $log = [IO.Path]::GetFullPath((Join-Path $OutputDir ($c.Name + '.log.txt')))
     $args = @($Nam, $out, '--mode','data','--keep-temp','--verbose') + $c.Args
     & $Exe @args 2>&1 | Tee-Object -FilePath $log
     $exit = $LASTEXITCODE
@@ -40,3 +51,4 @@ $csv = Join-Path $OutputDir 'matrix-summary.csv'
 $rows | Export-Csv -NoTypeInformation -Encoding UTF8 $csv
 $rows | Format-Table -AutoSize
 Write-Host "Summary: $csv"
+Write-Host "Output directory: $OutputDir"

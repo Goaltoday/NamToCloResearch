@@ -219,4 +219,85 @@ bool copyFileCreatingParents(const fs::path& source, const fs::path& destination
     return true;
 }
 
+
+static std::uint16_t crc16Modbus(const std::uint8_t* data, std::size_t size) {
+    std::uint16_t crc = 0xFFFFu;
+    for (std::size_t i = 0; i < size; ++i) {
+        crc ^= static_cast<std::uint16_t>(data[i]);
+        for (int bit = 0; bit < 8; ++bit) {
+            crc = (crc & 1u) ? static_cast<std::uint16_t>((crc >> 1) ^ 0xA001u)
+                             : static_cast<std::uint16_t>(crc >> 1);
+        }
+    }
+    return crc;
+}
+
+bool makeGp200CompactClo(const fs::path& source, const fs::path& destination, std::string& error) {
+    std::ifstream in(source, std::ios::binary);
+    if (!in) {
+        error = "Cannot open source CLO: " + pathToUtf8(source);
+        return false;
+    }
+    std::vector<std::uint8_t> data(static_cast<std::size_t>(kExpectedCloSize));
+    in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    if (static_cast<std::size_t>(in.gcount()) != data.size()) {
+        error = "Source CLO is not exactly 0x2288 bytes.";
+        return false;
+    }
+    if (!(data[0] == 'V' && data[1] == 'T' && data[2] == 'S' && data[3] == 'I')) {
+        error = "Source CLO magic is not VTSI.";
+        return false;
+    }
+    auto readLe32 = [&](std::size_t off) -> std::uint32_t {
+        return static_cast<std::uint32_t>(data[off])
+             | (static_cast<std::uint32_t>(data[off+1]) << 8)
+             | (static_cast<std::uint32_t>(data[off+2]) << 16)
+             | (static_cast<std::uint32_t>(data[off+3]) << 24);
+    };
+    auto writeLe32 = [&](std::size_t off, std::uint32_t v) {
+        data[off] = static_cast<std::uint8_t>(v & 0xFFu);
+        data[off+1] = static_cast<std::uint8_t>((v >> 8) & 0xFFu);
+        data[off+2] = static_cast<std::uint8_t>((v >> 16) & 0xFFu);
+        data[off+3] = static_cast<std::uint8_t>((v >> 24) & 0xFFu);
+    };
+
+    // The compact GP-200 shape inferred from same-NAM Valeton captures is:
+    // 0x88-byte header + 128 float32 values + 1024 float32 values = 0x1288 useful bytes.
+    // The Ampero normal VTSI uses the same offsets but serializes 2048 values in block B.
+    if (readLe32(0x84) != 0x800u) {
+        error = "Expected normal Ampero model-field 0x800 before compact serialization.";
+        return false;
+    }
+
+    writeLe32(0x04, 0x1288u);
+    writeLe32(0x14, 0x1200u);
+    writeLe32(0x84, 0x0400u);
+    std::fill(data.begin() + 0x1288, data.end(), 0u);
+
+    // HTUSBTools stores CRC16/MODBUS with bytes swapped, over [0x0C, declaredSize).
+    const std::uint16_t crc = crc16Modbus(data.data() + 0x0C, 0x1288u - 0x0Cu);
+    data[0x08] = static_cast<std::uint8_t>((crc >> 8) & 0xFFu);
+    data[0x09] = static_cast<std::uint8_t>(crc & 0xFFu);
+
+    std::error_code ec;
+    if (destination.has_parent_path()) {
+        fs::create_directories(destination.parent_path(), ec);
+        if (ec) {
+            error = "Cannot create compact CLO output directory: " + ec.message();
+            return false;
+        }
+    }
+    std::ofstream out(destination, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        error = "Cannot create compact CLO: " + pathToUtf8(destination);
+        return false;
+    }
+    out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    if (!out) {
+        error = "Failed writing compact CLO: " + pathToUtf8(destination);
+        return false;
+    }
+    return true;
+}
+
 } // namespace ntc

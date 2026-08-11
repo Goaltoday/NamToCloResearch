@@ -129,3 +129,29 @@ Experimental switches:
 - `--gp200-probe`: legacy alias for `--gp200-size`.
 
 These are in-memory patches only; `HTUSBTools.dll` on disk is never modified.
+
+## v0.6: corrected VTSI block layout and compact-serialization hypothesis
+
+Matrix results for the same NAM showed:
+
+- normal Ampero: `model-field=0x800`
+- size patch: `model-field=0x400`
+- rate patch: `model-field=0x800`
+- combined patch: `model-field=0x400`
+- Valeton reference: `model-field=0x400`, declared `0x1288`, payload `0x1200`
+
+Following the serializer disassembly corrected an earlier assumption. The `model-field` block begins at `0x288`, not `0x88`:
+
+1. VTSI header = `0x88` bytes.
+2. Block A begins at `0x88`, length 128 float32 values (`0x200` bytes).
+3. Block B begins at `0x288`, length given by header field `0x84`.
+
+For the same NAM:
+
+- normal Ampero block A vs Valeton: correlation ~0.99975
+- first 1024 values of normal Ampero block B vs Valeton block B: correlation ~0.99091, MAE ~0.00253
+- recalculating Ampero with the 1024-size DSP patch made both blocks less similar.
+
+This motivates the v0.6 hypothesis: GP-200 may use a compact serialization of a longer internal fit rather than fitting directly at 1024 coefficients.
+
+Checksum analysis also matched the serializer: CRC16/MODBUS initialized to `0xFFFF`, calculated from offset `0x0C` to the declared end, with the final two CRC bytes stored swapped at offsets `0x08..0x09`.

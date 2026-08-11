@@ -58,6 +58,7 @@ struct ConvertOptions {
     std::uint64_t arg6 = 0;
     bool gp200Size = false;
     bool gp200Rate = false;
+    bool gp200Compact = false;
 };
 
 struct WorkerOptions {
@@ -127,6 +128,7 @@ OPTIONS
   --gp200-rate           Patch only the CLO-stage sample-rate load: 44100.0f -> 48000.0f.
   --gp200-combined       Apply both GP-200 experimental patches.
   --gp200-probe          Legacy alias for --gp200-size (v0.4 behaviour).
+  --gp200-compact        Keep normal 2048-coefficient DSP, serialize GP-200 compact shape.
   --keep-temp            Preserve staged files and captured-buffer.bin.
   --verbose              Print additional research diagnostics.
 
@@ -139,7 +141,7 @@ RUNTIME DISCOVERY
     5. runtime/ in the current working directory
 
 IMPORTANT
-  v0.5 defaults to namConvertCloData. Static analysis and live testing confirm
+  v0.6 defaults to namConvertCloData. Static analysis and live testing confirm
   arg5 can receive a complete VTSI 0x2288-byte buffer. arg6 remains experimental
   and can now be varied with --arg6. The worker remains isolated so a DLL fast-fail
   cannot terminate the parent process. The proprietary Hotone DLL and WAV are not
@@ -849,6 +851,11 @@ int convert(const ConvertOptions& options) {
         return kExitUsage;
     }
 
+    if (options.gp200Compact && (options.gp200Size || options.gp200Rate)) {
+        std::cerr << "ERROR: --gp200-compact intentionally uses the normal Ampero DSP and cannot be combined with --gp200-size/--gp200-rate.\n";
+        return kExitUsage;
+    }
+
     const RuntimePaths runtime = resolveRuntime(options);
     if (!validateRuntimeFiles(runtime)) {
         return kExitRuntimeMissing;
@@ -859,6 +866,9 @@ int convert(const ConvertOptions& options) {
     std::cout << "Runtime stimulus: " << ntc::pathToUtf8(runtime.stimulus) << "\n";
     if (options.mode == ConvertMode::Data) {
         std::cout << "arg6:             " << options.arg6 << " (0x" << std::hex << std::uppercase << options.arg6 << std::dec << ")\n";
+    }
+    if (options.gp200Compact) {
+        std::cout << "GP-200 compact:   ON (normal DSP, compact serializer)\n";
     }
 
     const fs::path work = makeWorkDirectory();
@@ -905,7 +915,19 @@ int convert(const ConvertOptions& options) {
         return kExitConversionBadSize;
     }
 
-    if (!ntc::copyFileCreatingParents(worker.outputClo, options.outputClo, error)) {
+    if (options.gp200Compact) {
+        std::cout << "Applying GP-200 compact serialization (no DSP patch):\n"
+                  << "  declared-size 0x2288 -> 0x1288\n"
+                  << "  payload-size  0x2200 -> 0x1200\n"
+                  << "  model-field   0x0800 -> 0x0400\n"
+                  << "  keep block A (128 floats) + first 1024 floats of block B\n"
+                  << "  zero trailing 0x1000 bytes and recalculate CRC16\n";
+        if (!ntc::makeGp200CompactClo(worker.outputClo, options.outputClo, error)) {
+            std::cerr << "ERROR: compact serialization failed: " << error << "\n";
+            std::cerr << "Research files kept at: " << ntc::pathToUtf8(work) << "\n";
+            return kExitCopyFailure;
+        }
+    } else if (!ntc::copyFileCreatingParents(worker.outputClo, options.outputClo, error)) {
         std::cerr << "ERROR: " << error << "\n";
         std::cerr << "Research files kept at: " << ntc::pathToUtf8(work) << "\n";
         return kExitCopyFailure;
@@ -1013,6 +1035,10 @@ bool parseCommonRuntimeOption(const std::wstring& arg, int& i, int argc, wchar_t
     if (arg == L"--gp200-combined") {
         out.gp200Size = true;
         out.gp200Rate = true;
+        return true;
+    }
+    if (arg == L"--gp200-compact") {
+        out.gp200Compact = true;
         return true;
     }
     if (arg == L"--keep-temp") {

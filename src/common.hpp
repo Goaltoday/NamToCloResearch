@@ -11,7 +11,7 @@ namespace fs = std::filesystem;
 
 inline constexpr std::uint64_t kExpectedCloSize = 0x2288;
 inline constexpr std::uint32_t kExpectedApiReturn = 0x2288;
-inline constexpr wchar_t kVersion[] = L"0.5.0";
+inline constexpr wchar_t kVersion[] = L"0.6.0";
 
 struct CloInfo {
     bool exists = false;
@@ -36,5 +36,6 @@ std::string hexBytes(const std::vector<std::uint8_t>& bytes);
 CloInfo inspectClo(const fs::path& path, std::size_t prefixBytes = 16);
 void printCloInfo(const fs::path& path, const CloInfo& info);
 bool copyFileCreatingParents(const fs::path& source, const fs::path& destination, std::string& error);
+bool makeGp200CompactClo(const fs::path& source, const fs::path& destination, std::string& error);
 
 } // namespace ntc

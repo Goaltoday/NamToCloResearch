@@ -320,3 +320,33 @@ Run all four cases automatically:
 ```
 
 The script writes `normal.clo`, `size.clo`, `rate.clo`, `combined.clo`, per-case logs, and `matrix-summary.csv`.
+
+## v0.6 experiment: GP-200 compact serialization
+
+The matrix experiment showed that forcing the DSP model length from 2048 to 1024 changes the fitted model and makes it *less* similar to the Valeton reference. Static analysis of the VTSI serializer clarified the layout:
+
+- header: `0x0000..0x0087` (`0x88` bytes)
+- block A: 128 float32 values at `0x0088..0x0287`
+- block B: `model-field` float32 values beginning at `0x0288`
+
+Normal Ampero output uses block B length `0x800` (2048 floats), while the GP-200 reference uses `0x400` (1024 floats). For the same NAM, the normal Ampero block is substantially closer to the GP-200 reference than the DSP-recalculated `--gp200-size` result.
+
+`--gp200-compact` therefore leaves the Ampero DSP untouched and post-processes the normal VTSI into the observed GP-200 container shape:
+
+- declared size `0x2288 -> 0x1288`
+- payload size `0x2200 -> 0x1200`
+- model field `0x800 -> 0x400`
+- retain block A and the first 1024 floats of block B
+- zero physical padding `0x1288..0x2287`
+- recalculate the same CRC16/MODBUS checksum used by `HTUSBTools.dll`
+
+This remains an experimental compatibility probe. It is not yet proven that the resulting CLO is accepted or sounds correct on GP-200 hardware.
+
+Example:
+
+```powershell
+.\NamToClo.exe .\modelo.nam .\gp200-compact.clo --gp200-compact --keep-temp --verbose
+.\NamToClo.exe --inspect .\gp200-compact.clo
+```
+
+Do not combine `--gp200-compact` with `--gp200-size` or `--gp200-rate`; the point of the compact experiment is to preserve the normal 2048-coefficient fit and only change serialization.
