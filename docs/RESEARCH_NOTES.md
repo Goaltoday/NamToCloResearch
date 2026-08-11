@@ -102,3 +102,30 @@ The experimental `--gp200-probe` option patches the loaded DLL image in the disp
 The DLL file on disk is never modified. The patch is guarded: if the original float is not exactly 2048.0f the conversion is aborted, preventing use against an unknown DLL layout.
 
 Expected research result: determine whether the DSP stage naturally recalculates a 1024-coefficient model (`CLO+0x84 == 0x400`). The serializer still has hard-coded Ampero container sizes (`0x2288` / `0x2200`), so a successful probe may still need a later container-size/checksum adaptation.
+
+## v0.5 targeted CLO-stage sample-rate experiment
+
+Static analysis of the analyzed `HTUSBTools.dll` build shows the constants `2048.0f`, `44100.0f`, and `48000.0f` in the same read-only constant table. The v0.4 size experiment proved that changing the model-length source constant at RVA `0x2DEAF0` from `2048.0f` to `1024.0f` changes the generated VTSI model field from `0x800` to `0x400`.
+
+A more specific sample-rate use was then located inside the function that builds the VTSI, copies model data, writes `VTSI`/`0x2288`, and calculates the final checksum. At RVA `0xA001D`, the instruction:
+
+```
+F3 0F 10 35 FB EA 23 00   movss xmm6,[rip+...] ; 44100.0f @ RVA 0x2DEB20
+```
+
+feeds `44100.0f` into two calls operating on the coefficient/model data before serialization. v0.5 can retarget only that instruction to the adjacent `48000.0f` constant at RVA `0x2DEB24`:
+
+```
+F3 0F 10 35 FF EA 23 00   ; 48000.0f
+```
+
+This is intentionally narrower than modifying the global `44100.0f` constant, because other references are clearly involved in ordinary audio sample-rate detection/resampling.
+
+Experimental switches:
+
+- `--gp200-size`: 2048 -> 1024 model-length source (proven to yield `modelField=0x400`).
+- `--gp200-rate`: only the VTSI-stage 44100 -> 48000 load at RVA `0xA001D`.
+- `--gp200-combined`: both patches.
+- `--gp200-probe`: legacy alias for `--gp200-size`.
+
+These are in-memory patches only; `HTUSBTools.dll` on disk is never modified.

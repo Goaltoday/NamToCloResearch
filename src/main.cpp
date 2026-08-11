@@ -56,7 +56,8 @@ struct ConvertOptions {
     bool verbose = false;
     ConvertMode mode = ConvertMode::Data;
     std::uint64_t arg6 = 0;
-    bool gp200Probe = false;
+    bool gp200Size = false;
+    bool gp200Rate = false;
 };
 
 struct WorkerOptions {
@@ -70,7 +71,8 @@ struct WorkerOptions {
     bool verbose = false;
     ConvertMode mode = ConvertMode::Data;
     std::uint64_t arg6 = 0;
-    bool gp200Probe = false;
+    bool gp200Size = false;
+    bool gp200Rate = false;
 };
 
 struct SharedBuffer {
@@ -121,8 +123,10 @@ OPTIONS
   --timeout <seconds>    Conversion timeout. Default: 180.
   --arg6 <value>         Experimental 6th argument for namConvertCloData.
                          Accepts decimal or 0x-prefixed hexadecimal. Default: 0.
-  --gp200-probe          Patch the loaded DLL in memory so the DSP model length
-                         constant changes from 2048.0f to 1024.0f. Experimental.
+  --gp200-size           Patch only the DSP model length: 2048.0f -> 1024.0f.
+  --gp200-rate           Patch only the CLO-stage sample-rate load: 44100.0f -> 48000.0f.
+  --gp200-combined       Apply both GP-200 experimental patches.
+  --gp200-probe          Legacy alias for --gp200-size (v0.4 behaviour).
   --keep-temp            Preserve staged files and captured-buffer.bin.
   --verbose              Print additional research diagnostics.
 
@@ -135,7 +139,7 @@ RUNTIME DISCOVERY
     5. runtime/ in the current working directory
 
 IMPORTANT
-  v0.4 defaults to namConvertCloData. Static analysis and live testing confirm
+  v0.5 defaults to namConvertCloData. Static analysis and live testing confirm
   arg5 can receive a complete VTSI 0x2288-byte buffer. arg6 remains experimental
   and can now be varied with --arg6. The worker remains isolated so a DLL fast-fail
   cannot terminate the parent process. The proprietary Hotone DLL and WAV are not
@@ -363,7 +367,8 @@ bool stageInputFiles(const RuntimePaths& runtime,
     worker.verbose = options.verbose;
     worker.mode = options.mode;
     worker.arg6 = options.arg6;
-    worker.gp200Probe = options.gp200Probe;
+    worker.gp200Size = options.gp200Size;
+    worker.gp200Rate = options.gp200Rate;
 
     if (!ntc::copyFileCreatingParents(runtime.stimulus, worker.inputWav, error)) {
         return false;
@@ -416,7 +421,8 @@ std::wstring makeWorkerCommandLine(const WorkerOptions& worker) {
         args.push_back(worker.mappingName);
         args.push_back(L"--arg6");
         args.push_back(std::to_wstring(worker.arg6));
-        if (worker.gp200Probe) args.push_back(L"--gp200-probe");
+        if (worker.gp200Size) args.push_back(L"--gp200-size");
+        if (worker.gp200Rate) args.push_back(L"--gp200-rate");
     }
     if (worker.verbose) {
         args.push_back(L"--verbose");
@@ -670,29 +676,63 @@ int observeWorkerOutput(const WorkerOptions& options, std::uint8_t* mappedData) 
 }
 
 
-bool patchGp200ModelLength(HMODULE module, bool verbose) {
-    constexpr std::uintptr_t kModelLengthFloatRva = 0x2DEAF0;
-    auto* target = reinterpret_cast<std::uint8_t*>(module) + kModelLengthFloatRva;
-    const float expected = 2048.0f;
-    const float replacement = 1024.0f;
-    float current = 0.0f;
-    std::memcpy(&current, target, sizeof(current));
-    if (current != expected) {
-        std::cerr << "[worker] ERROR GP200 probe patch expected 2048.0f at RVA 0x2DEAF0 but found "
-                  << current << ". DLL version/layout does not match the analyzed build.\n";
+bool patchBytes(HMODULE module, std::uintptr_t rva,
+                const std::uint8_t* expected, const std::uint8_t* replacement,
+                std::size_t size, const char* label, bool verbose) {
+    auto* target = reinterpret_cast<std::uint8_t*>(module) + rva;
+    if (std::memcmp(target, expected, size) != 0) {
+        std::cerr << "[worker] ERROR " << label << " patch validation failed at RVA 0x"
+                  << std::hex << std::uppercase << rva << std::dec
+                  << ". DLL version/layout does not match the analyzed build.\n";
         return false;
     }
     DWORD oldProtect = 0;
-    if (!VirtualProtect(target, sizeof(float), PAGE_READWRITE, &oldProtect)) {
-        std::cerr << "[worker] ERROR VirtualProtect for GP200 probe patch failed.\n";
+    if (!VirtualProtect(target, size, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+        std::cerr << "[worker] ERROR VirtualProtect for " << label << " patch failed.\n";
         return false;
     }
-    std::memcpy(target, &replacement, sizeof(replacement));
-    FlushInstructionCache(GetCurrentProcess(), target, sizeof(replacement));
+    std::memcpy(target, replacement, size);
+    FlushInstructionCache(GetCurrentProcess(), target, size);
     DWORD ignored = 0;
-    VirtualProtect(target, sizeof(float), oldProtect, &ignored);
+    VirtualProtect(target, size, oldProtect, &ignored);
     if (verbose) {
-        std::cout << "[worker] GP200 probe patch: HTUSBTools.dll+0x2DEAF0 2048.0f -> 1024.0f\n";
+        std::cout << "[worker] " << label << " patch applied at HTUSBTools.dll+0x"
+                  << std::hex << std::uppercase << rva << std::dec << "\n";
+    }
+    return true;
+}
+
+bool patchGp200ModelLength(HMODULE module, bool verbose) {
+    constexpr std::uintptr_t kModelLengthFloatRva = 0x2DEAF0;
+    const float expectedFloat = 2048.0f;
+    const float replacementFloat = 1024.0f;
+    std::uint8_t expected[sizeof(float)]{};
+    std::uint8_t replacement[sizeof(float)]{};
+    std::memcpy(expected, &expectedFloat, sizeof(float));
+    std::memcpy(replacement, &replacementFloat, sizeof(float));
+    if (!patchBytes(module, kModelLengthFloatRva, expected, replacement, sizeof(float),
+                    "GP200 size 2048.0f -> 1024.0f", verbose)) {
+        return false;
+    }
+    if (verbose) {
+        std::cout << "[worker] GP200 size detail: model-count source constant 2048.0f -> 1024.0f\n";
+    }
+    return true;
+}
+
+bool patchGp200CloRate(HMODULE module, bool verbose) {
+    // In the VTSI-building function, RVA 0xA001D loads 44100.0f from RVA 0x2DEB20.
+    // Retarget only this RIP-relative MOVSS to the adjacent 48000.0f at RVA 0x2DEB24.
+    // This avoids altering unrelated 44.1 kHz comparisons/resampling code elsewhere.
+    constexpr std::uintptr_t kRateLoadInstructionRva = 0xA001D;
+    constexpr std::uint8_t expected[] = {0xF3,0x0F,0x10,0x35,0xFB,0xEA,0x23,0x00};
+    constexpr std::uint8_t replacement[] = {0xF3,0x0F,0x10,0x35,0xFF,0xEA,0x23,0x00};
+    if (!patchBytes(module, kRateLoadInstructionRva, expected, replacement, sizeof(expected),
+                    "GP200 CLO-rate 44100.0f -> 48000.0f", verbose)) {
+        return false;
+    }
+    if (verbose) {
+        std::cout << "[worker] GP200 rate detail: VTSI-stage MOVSS retargeted RVA 0x2DEB20 -> 0x2DEB24\n";
     }
     return true;
 }
@@ -707,7 +747,10 @@ int runWorker(const WorkerOptions& options) {
         return kExitDllLoad;
     }
 
-    if (options.gp200Probe && !patchGp200ModelLength(module, options.verbose)) {
+    if (options.gp200Size && !patchGp200ModelLength(module, options.verbose)) {
+        return kExitStageFailure;
+    }
+    if (options.gp200Rate && !patchGp200CloRate(module, options.verbose)) {
         return kExitStageFailure;
     }
 
@@ -756,7 +799,8 @@ int runWorker(const WorkerOptions& options) {
                       << reinterpret_cast<std::uintptr_t>(mappedData) << std::dec << "\n"
                       << "  arg6 unknown      = " << options.arg6 << " (0x" << std::hex << std::uppercase
                       << options.arg6 << std::dec << ") experimental\n"
-                      << "  gp200Probe        = " << (options.gp200Probe ? "ON (2048->1024 model-length patch)" : "off") << "\n";
+                      << "  gp200Size         = " << (options.gp200Size ? "ON (2048->1024 model-length patch)" : "off") << "\n"
+                      << "  gp200Rate         = " << (options.gp200Rate ? "ON (CLO-stage 44100->48000 patch)" : "off") << "\n";
         }
 
         exceptionCode = invokeDataWithSeh(fn, inputWav.c_str(), outputWav.c_str(), inputNam.c_str(),
@@ -908,8 +952,13 @@ bool parseWorkerOptions(int argc, wchar_t** argv, WorkerOptions& out) {
             const auto parsed = parseUint64(argv[++i]);
             if (!parsed) return false;
             out.arg6 = *parsed;
-        } else if (arg == L"--gp200-probe") {
-            out.gp200Probe = true;
+        } else if (arg == L"--gp200-size" || arg == L"--gp200-probe") {
+            out.gp200Size = true;
+        } else if (arg == L"--gp200-rate") {
+            out.gp200Rate = true;
+        } else if (arg == L"--gp200-combined") {
+            out.gp200Size = true;
+            out.gp200Rate = true;
         } else if (arg == L"--verbose") {
             out.verbose = true;
         } else {
@@ -953,8 +1002,17 @@ bool parseCommonRuntimeOption(const std::wstring& arg, int& i, int argc, wchar_t
         out.arg6 = *parsed;
         return true;
     }
-    if (arg == L"--gp200-probe") {
-        out.gp200Probe = true;
+    if (arg == L"--gp200-size" || arg == L"--gp200-probe") {
+        out.gp200Size = true;
+        return true;
+    }
+    if (arg == L"--gp200-rate") {
+        out.gp200Rate = true;
+        return true;
+    }
+    if (arg == L"--gp200-combined") {
+        out.gp200Size = true;
+        out.gp200Rate = true;
         return true;
     }
     if (arg == L"--keep-temp") {

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(NamToCloResearch VERSION 0.4.0 LANGUAGES CXX)
+project(NamToCloResearch VERSION 0.5.0 LANGUAGES CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "NamToCloResearch currently targets Windows x64 because HTUSBTools.dll is a Windows x64 DLL.")

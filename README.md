@@ -294,3 +294,29 @@ Then inspect:
 The key field is `model-field @0x84`. The desired experimental result is `0x400` instead of the normal Ampero `0x800`.
 
 Do **not** load the experimental file into hardware yet. Even if the model field becomes `0x400`, the Ampero serializer still writes its normal `0x2288/0x2200` container sizes. The next step would be to compare the recalculated coefficients against a Valeton CLO from the exact same NAM before adapting the container header/checksum.
+
+
+## v0.5: targeted GP-200 DSP matrix
+
+The v0.5 experiment separates the two currently identified DSP differences:
+
+```powershell
+# Known v0.4 experiment: model length only
+.\NamToClo.exe .\modelo.nam .\size.clo --gp200-size --keep-temp --verbose
+
+# New: only the CLO-stage 44.1 kHz -> 48 kHz load
+.\NamToClo.exe .\modelo.nam .\rate.clo --gp200-rate --keep-temp --verbose
+
+# Both together
+.\NamToClo.exe .\modelo.nam .\combined.clo --gp200-combined --keep-temp --verbose
+```
+
+`--gp200-rate` is a targeted in-memory code patch at RVA `0xA001D`. It retargets one `MOVSS` in the VTSI-building path from the `44100.0f` constant at RVA `0x2DEB20` to the adjacent `48000.0f` constant at RVA `0x2DEB24`. It does **not** globally replace 44.1 kHz references.
+
+Run all four cases automatically:
+
+```powershell
+.\scripts\run-gp200-matrix.ps1 -Nam .\modelo.nam
+```
+
+The script writes `normal.clo`, `size.clo`, `rate.clo`, `combined.clo`, per-case logs, and `matrix-summary.csv`.
