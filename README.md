@@ -4,6 +4,33 @@ Experimental Windows x64 project for calling the NAM -> CLO conversion code alre
 
 > Status: **research / ABI probe v0.2**. This is not yet a validated public API or a finished converter.
 
+## v0.3: arg6 experiments
+
+The successful v0.2 live test confirmed that `namConvertCloData` can generate a complete `VTSI` buffer of `0x2288` bytes outside the Ampero II editor. v0.3 exposes the still-unknown sixth native argument so its effect can be measured without changing the confirmed path arguments or output buffer.
+
+Single-value test:
+
+```powershell
+.\NamToClo.exe .\modelo.nam .\arg6_1.clo --mode data --arg6 1 --keep-temp --verbose
+```
+
+Inspect the structural fields relevant to the Valeton comparison:
+
+```powershell
+.\NamToClo.exe --inspect .\arg6_1.clo
+```
+
+The inspector reports the physical size plus little-endian fields at `0x04`, `0x14`, `0x84`, and the last non-zero byte. The current Ampero-shaped result is `0x2288 / 0x2200 / 0x0800`; the observed GP-200 target shape is `0x1288 / 0x1200 / 0x0400` inside the same physical `0x2288` allocation.
+
+Automated sweep:
+
+```powershell
+.\scripts\sweep-arg6.ps1 -Nam .\modelo.nam -Start 0 -End 15
+```
+
+The script creates one CLO and one log per value plus `sweep-summary.csv`. Use a smaller range such as `0..3` first if desired. Each conversion still runs through the isolated worker.
+
+
 ## Current evidence
 
 Confirmed experimentally with the v0.1 probe:

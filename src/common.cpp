@@ -144,6 +144,38 @@ CloInfo inspectClo(const fs::path& path, const std::size_t prefixBytes) {
             ch = '.';
         }
     }
+
+    auto readLe32 = [](const std::vector<std::uint8_t>& data, std::size_t offset) -> std::uint32_t {
+        if (offset + 4 > data.size()) return 0;
+        return static_cast<std::uint32_t>(data[offset])
+             | (static_cast<std::uint32_t>(data[offset + 1]) << 8)
+             | (static_cast<std::uint32_t>(data[offset + 2]) << 16)
+             | (static_cast<std::uint32_t>(data[offset + 3]) << 24);
+    };
+
+    std::vector<std::uint8_t> header(0x88);
+    stream.clear();
+    stream.seekg(0, std::ios::beg);
+    stream.read(reinterpret_cast<char*>(header.data()), static_cast<std::streamsize>(header.size()));
+    header.resize(static_cast<std::size_t>(stream.gcount()));
+    info.declaredSize = readLe32(header, 0x04);
+    info.payloadSize = readLe32(header, 0x14);
+    info.modelField = readLe32(header, 0x84);
+
+    stream.clear();
+    stream.seekg(0, std::ios::beg);
+    std::vector<std::uint8_t> all(static_cast<std::size_t>(info.size));
+    if (!all.empty()) {
+        stream.read(reinterpret_cast<char*>(all.data()), static_cast<std::streamsize>(all.size()));
+        const auto count = static_cast<std::size_t>(stream.gcount());
+        for (std::size_t i = count; i > 0; --i) {
+            if (all[i - 1] != 0) {
+                info.lastNonZero = static_cast<std::uint64_t>(i - 1);
+                info.hasLastNonZero = true;
+                break;
+            }
+        }
+    }
     return info;
 }
 
@@ -158,6 +190,16 @@ void printCloInfo(const fs::path& path, const CloInfo& info) {
     std::cout << "  magic:  " << info.magic << "\n";
     std::cout << "  prefix: " << hexBytes(info.prefix) << "\n";
     std::cout << "  expected-size: " << (info.size == kExpectedCloSize ? "yes" : "NO") << "\n";
+    if (info.magic == "VTSI") {
+        std::cout << "  declared-size @0x04: 0x" << std::uppercase << std::hex << info.declaredSize << std::dec << "\n";
+        std::cout << "  payload-size  @0x14: 0x" << std::uppercase << std::hex << info.payloadSize << std::dec << "\n";
+        std::cout << "  model-field   @0x84: 0x" << std::uppercase << std::hex << info.modelField << std::dec << "\n";
+        if (info.hasLastNonZero) {
+            std::cout << "  last-nonzero:        0x" << std::uppercase << std::hex << info.lastNonZero << std::dec << "\n";
+        } else {
+            std::cout << "  last-nonzero:        none\n";
+        }
+    }
 }
 
 bool copyFileCreatingParents(const fs::path& source, const fs::path& destination, std::string& error) {

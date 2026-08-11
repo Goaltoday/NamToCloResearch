@@ -78,3 +78,8 @@ The parent creates a named Windows file mapping of 8840 bytes, fills it with `0x
 The parent owns the mapping, so its contents remain readable even if the worker fast-fails. The parent always stores the final mapping as `captured-buffer.bin`. A `VTSI` prefix causes the complete 8840-byte buffer to be materialized as `output.clo`.
 
 The legacy `namConvertClo` route remains available through `--mode file` as a control.
+
+
+## v0.3 arg6 experiment
+
+Confirmed live result from v0.2: `namConvertCloData(nullptr, inputWav, outputWav, inputNam, outputBuffer, 0)` generated a stable `VTSI`-shaped 8840-byte buffer externally. Comparing the same NAM against Valeton showed Ampero-shaped fields `0x2288 / 0x2200 / 0x0800` versus Valeton `0x1288 / 0x1200 / 0x0400`. v0.3 exposes arg6 and adds a controlled sweep. The hypothesis that arg6 selects model capacity/target remains unconfirmed until the sweep changes these fields or other output characteristics.

@@ -55,6 +55,7 @@ struct ConvertOptions {
     bool keepTemp = false;
     bool verbose = false;
     ConvertMode mode = ConvertMode::Data;
+    std::uint64_t arg6 = 0;
 };
 
 struct WorkerOptions {
@@ -67,6 +68,7 @@ struct WorkerOptions {
     int timeoutSeconds = 180;
     bool verbose = false;
     ConvertMode mode = ConvertMode::Data;
+    std::uint64_t arg6 = 0;
 };
 
 struct SharedBuffer {
@@ -115,6 +117,8 @@ OPTIONS
   --dll <path>           Explicit path to HTUSBTools.dll.
   --stimulus <path>      Explicit path to nam_input_wav.wav.
   --timeout <seconds>    Conversion timeout. Default: 180.
+  --arg6 <value>         Experimental 6th argument for namConvertCloData.
+                         Accepts decimal or 0x-prefixed hexadecimal. Default: 0.
   --keep-temp            Preserve staged files and captured-buffer.bin.
   --verbose              Print additional research diagnostics.
 
@@ -127,9 +131,9 @@ RUNTIME DISCOVERY
     5. runtime/ in the current working directory
 
 IMPORTANT
-  v0.2 defaults to namConvertCloData. Static analysis strongly supports arg5 as
-  a caller-owned 0x2288-byte destination buffer. arg6 is still experimental and
-  is intentionally passed as zero. The worker remains isolated so a DLL fast-fail
+  v0.3 defaults to namConvertCloData. Static analysis and live testing confirm
+  arg5 can receive a complete VTSI 0x2288-byte buffer. arg6 remains experimental
+  and can now be varied with --arg6. The worker remains isolated so a DLL fast-fail
   cannot terminate the parent process. The proprietary Hotone DLL and WAV are not
   distributed by this repository.
 )HELP";
@@ -147,6 +151,19 @@ std::optional<int> parsePositiveInt(const std::wstring& text) {
             return std::nullopt;
         }
         return value;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<std::uint64_t> parseUint64(const std::wstring& text) {
+    try {
+        std::size_t used = 0;
+        const auto value = std::stoull(text, &used, 0);
+        if (used != text.size()) {
+            return std::nullopt;
+        }
+        return static_cast<std::uint64_t>(value);
     } catch (...) {
         return std::nullopt;
     }
@@ -341,6 +358,7 @@ bool stageInputFiles(const RuntimePaths& runtime,
     worker.timeoutSeconds = options.timeoutSeconds;
     worker.verbose = options.verbose;
     worker.mode = options.mode;
+    worker.arg6 = options.arg6;
 
     if (!ntc::copyFileCreatingParents(runtime.stimulus, worker.inputWav, error)) {
         return false;
@@ -391,6 +409,8 @@ std::wstring makeWorkerCommandLine(const WorkerOptions& worker) {
     if (worker.mode == ConvertMode::Data) {
         args.push_back(L"--mapping");
         args.push_back(worker.mappingName);
+        args.push_back(L"--arg6");
+        args.push_back(std::to_wstring(worker.arg6));
     }
     if (worker.verbose) {
         args.push_back(L"--verbose");
@@ -696,11 +716,12 @@ int runWorker(const WorkerOptions& options) {
                       << "  arg4 inputNam     = " << inputNam << "\n"
                       << "  arg5 outputBuffer = shared mapping @ 0x" << std::hex << std::uppercase
                       << reinterpret_cast<std::uintptr_t>(mappedData) << std::dec << "\n"
-                      << "  arg6 unknown      = 0 (experimental)\n";
+                      << "  arg6 unknown      = " << options.arg6 << " (0x" << std::hex << std::uppercase
+                      << options.arg6 << std::dec << ") experimental\n";
         }
 
         exceptionCode = invokeDataWithSeh(fn, inputWav.c_str(), outputWav.c_str(), inputNam.c_str(),
-                                          mappedData, 0, &apiReturn);
+                                          mappedData, options.arg6, &apiReturn);
     } else {
         auto fn = reinterpret_cast<NamConvertCloFn>(GetProcAddress(module, "namConvertClo"));
         if (!fn) {
@@ -753,6 +774,9 @@ int convert(const ConvertOptions& options) {
     std::cout << "Mode:             " << modeName(options.mode) << "\n";
     std::cout << "Runtime DLL:      " << ntc::pathToUtf8(runtime.dll) << "\n";
     std::cout << "Runtime stimulus: " << ntc::pathToUtf8(runtime.stimulus) << "\n";
+    if (options.mode == ConvertMode::Data) {
+        std::cout << "arg6:             " << options.arg6 << " (0x" << std::hex << std::uppercase << options.arg6 << std::dec << ")\n";
+    }
 
     const fs::path work = makeWorkDirectory();
     if (work.empty()) {
@@ -841,6 +865,10 @@ bool parseWorkerOptions(int argc, wchar_t** argv, WorkerOptions& out) {
             const auto parsed = parsePositiveInt(argv[++i]);
             if (!parsed) return false;
             out.timeoutSeconds = *parsed;
+        } else if (arg == L"--arg6" && hasValue(i, argc)) {
+            const auto parsed = parseUint64(argv[++i]);
+            if (!parsed) return false;
+            out.arg6 = *parsed;
         } else if (arg == L"--verbose") {
             out.verbose = true;
         } else {
@@ -876,6 +904,12 @@ bool parseCommonRuntimeOption(const std::wstring& arg, int& i, int argc, wchar_t
         const auto parsed = parsePositiveInt(argv[++i]);
         if (!parsed) return false;
         out.timeoutSeconds = *parsed;
+        return true;
+    }
+    if (arg == L"--arg6" && hasValue(i, argc)) {
+        const auto parsed = parseUint64(argv[++i]);
+        if (!parsed) return false;
+        out.arg6 = *parsed;
         return true;
     }
     if (arg == L"--keep-temp") {

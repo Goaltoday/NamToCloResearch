@@ -12,6 +12,8 @@ param(
 
     [int]$Timeout = 180,
 
+    [UInt64]$Arg6 = 0,
+
     [switch]$KeepTemp,
     [switch]$VerboseLog
 )
@@ -37,10 +39,12 @@ if (-not $Output) {
 $Output = [System.IO.Path]::GetFullPath($Output)
 
 $argsList = @($Nam, $Output, "--mode", $Mode, "--timeout", "$Timeout")
+if ($Mode -eq "data") { $argsList += @("--arg6", "$Arg6") }
 if ($KeepTemp) { $argsList += "--keep-temp" }
 if ($VerboseLog) { $argsList += "--verbose" }
 
 Write-Host "Running: $Exe"
 Write-Host "Mode:    $Mode"
+if ($Mode -eq "data") { Write-Host "arg6:    $Arg6" }
 & $Exe @argsList
 exit $LASTEXITCODE
