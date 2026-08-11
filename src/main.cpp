@@ -111,6 +111,7 @@ USAGE
   NamToClo.exe input.nam output.clo [options]
   NamToClo.exe --check-runtime [options]
   NamToClo.exe --inspect file.clo
+  NamToClo.exe --compare-gp200 candidate.clo reference.clo
   NamToClo.exe --help
   NamToClo.exe --version
 
@@ -141,7 +142,7 @@ RUNTIME DISCOVERY
     5. runtime/ in the current working directory
 
 IMPORTANT
-  v0.6 defaults to namConvertCloData. Static analysis and live testing confirm
+  v0.6.1 defaults to namConvertCloData. Static analysis and live testing confirm
   arg5 can receive a complete VTSI 0x2288-byte buffer. arg6 remains experimental
   and can now be varied with --arg6. The worker remains isolated so a DLL fast-fail
   cannot terminate the parent process. The proprietary Hotone DLL and WAV are not
@@ -1100,6 +1101,17 @@ int wmain(int argc, wchar_t** argv) {
     if (first == L"--version") {
         printBanner();
         return kExitOk;
+    }
+    if (first == L"--compare-gp200") {
+        if (argc != 4) {
+            std::cerr << "Usage: NamToClo.exe --compare-gp200 candidate.clo reference.clo\n";
+            return kExitUsage;
+        }
+        const fs::path a = argv[2];
+        const fs::path b = argv[3];
+        const ntc::Gp200CompareResult result = ntc::compareGp200Clo(a, b);
+        ntc::printGp200Compare(a, b, result);
+        return result.ok ? kExitOk : kExitUsage;
     }
     if (first == L"--inspect") {
         if (argc != 3) {

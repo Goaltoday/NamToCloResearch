@@ -5,6 +5,9 @@
 #include <algorithm>
 #include <fstream>
 #include <iomanip>
+#include <cmath>
+#include <cstring>
+#include <limits>
 #include <iostream>
 #include <sstream>
 #include <system_error>
@@ -298,6 +301,178 @@ bool makeGp200CompactClo(const fs::path& source, const fs::path& destination, st
         return false;
     }
     return true;
+}
+
+
+static bool readWholeFile(const fs::path& path, std::vector<std::uint8_t>& data, std::string& error) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) {
+        error = "Cannot open file: " + pathToUtf8(path);
+        return false;
+    }
+    const auto end = in.tellg();
+    if (end < 0) {
+        error = "Cannot determine file size: " + pathToUtf8(path);
+        return false;
+    }
+    data.resize(static_cast<std::size_t>(end));
+    in.seekg(0, std::ios::beg);
+    if (!data.empty()) {
+        in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        if (static_cast<std::size_t>(in.gcount()) != data.size()) {
+            error = "Short read: " + pathToUtf8(path);
+            return false;
+        }
+    }
+    return true;
+}
+
+static std::uint32_t readLe32Raw(const std::vector<std::uint8_t>& data, std::size_t off) {
+    if (off + 4 > data.size()) return 0;
+    return static_cast<std::uint32_t>(data[off])
+         | (static_cast<std::uint32_t>(data[off + 1]) << 8)
+         | (static_cast<std::uint32_t>(data[off + 2]) << 16)
+         | (static_cast<std::uint32_t>(data[off + 3]) << 24);
+}
+
+static float readLeFloatRaw(const std::vector<std::uint8_t>& data, std::size_t off) {
+    const std::uint32_t bits = readLe32Raw(data, off);
+    float value = 0.0f;
+    static_assert(sizeof(value) == sizeof(bits));
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static BlockCompareStats compareFloatBlock(const std::vector<std::uint8_t>& a,
+                                           const std::vector<std::uint8_t>& b,
+                                           std::size_t offset,
+                                           std::size_t count) {
+    BlockCompareStats out;
+    if (offset + count * 4 > a.size() || offset + count * 4 > b.size()) {
+        return out;
+    }
+    out.count = count;
+    long double sumA = 0.0L, sumB = 0.0L;
+    long double sumAA = 0.0L, sumBB = 0.0L, sumAB = 0.0L;
+    long double sumAbs = 0.0L, sumSq = 0.0L;
+    double maxAbs = 0.0;
+    for (std::size_t i = 0; i < count; ++i) {
+        const std::size_t off = offset + i * 4;
+        const std::uint32_t bitsA = readLe32Raw(a, off);
+        const std::uint32_t bitsB = readLe32Raw(b, off);
+        if (bitsA == bitsB) ++out.exactFloatMatches;
+        const double va = static_cast<double>(readLeFloatRaw(a, off));
+        const double vb = static_cast<double>(readLeFloatRaw(b, off));
+        const double d = va - vb;
+        const double ad = std::abs(d);
+        maxAbs = std::max(maxAbs, ad);
+        sumA += va; sumB += vb;
+        sumAA += va * va; sumBB += vb * vb; sumAB += va * vb;
+        sumAbs += ad; sumSq += d * d;
+    }
+    const long double n = static_cast<long double>(count);
+    const long double covN = n * sumAB - sumA * sumB;
+    const long double varAN = n * sumAA - sumA * sumA;
+    const long double varBN = n * sumBB - sumB * sumB;
+    const long double denom = std::sqrt(std::max(0.0L, varAN * varBN));
+    out.correlation = denom > std::numeric_limits<long double>::epsilon()
+        ? static_cast<double>(covN / denom) : 0.0;
+    out.mae = static_cast<double>(sumAbs / n);
+    out.rmse = std::sqrt(static_cast<double>(sumSq / n));
+    out.maxAbsError = maxAbs;
+    return out;
+}
+
+static void crcInfo(const std::vector<std::uint8_t>& data, bool& valid,
+                    std::uint16_t& stored, std::uint16_t& calculated) {
+    valid = false; stored = 0; calculated = 0;
+    if (data.size() < 0x0C) return;
+    const std::uint32_t declared = readLe32Raw(data, 0x04);
+    if (declared < 0x0C || declared > data.size()) return;
+    stored = static_cast<std::uint16_t>((static_cast<std::uint16_t>(data[0x08]) << 8) | data[0x09]);
+    calculated = crc16Modbus(data.data() + 0x0C, declared - 0x0C);
+    valid = stored == calculated;
+}
+
+Gp200CompareResult compareGp200Clo(const fs::path& aPath, const fs::path& bPath) {
+    Gp200CompareResult result;
+    result.a = inspectClo(aPath, 32);
+    result.b = inspectClo(bPath, 32);
+    std::vector<std::uint8_t> a, b;
+    if (!readWholeFile(aPath, a, result.error)) return result;
+    if (!readWholeFile(bPath, b, result.error)) return result;
+    if (a.size() != kExpectedCloSize || b.size() != kExpectedCloSize) {
+        result.error = "Both files must be exactly 0x2288 bytes.";
+        return result;
+    }
+    if (a.size() < 4 || b.size() < 4 || std::memcmp(a.data(), "VTSI", 4) != 0 || std::memcmp(b.data(), "VTSI", 4) != 0) {
+        result.error = "Both files must have VTSI magic.";
+        return result;
+    }
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (a[i] == b[i]) ++result.byteMatches;
+        else ++result.byteDifferences;
+    }
+    constexpr std::size_t usefulEnd = 0x1288;
+    for (std::size_t i = 0; i < usefulEnd; ++i) {
+        if (a[i] != b[i]) ++result.usefulByteDifferences;
+    }
+    for (std::size_t i = usefulEnd; i < a.size(); ++i) {
+        if (a[i] != b[i]) ++result.paddingByteDifferences;
+    }
+    crcInfo(a, result.crcAValid, result.storedCrcA, result.calculatedCrcA);
+    crcInfo(b, result.crcBValid, result.storedCrcB, result.calculatedCrcB);
+    // GP-200 structure inferred from same-NAM captures:
+    // block A: 128 float32 at 0x88; block B: 1024 float32 at 0x288.
+    result.blockA = compareFloatBlock(a, b, 0x88, 128);
+    result.blockB = compareFloatBlock(a, b, 0x288, 1024);
+    result.ok = true;
+    return result;
+}
+
+static void printBlockStats(const char* name, const BlockCompareStats& s) {
+    std::cout << "  " << name << ":\n";
+    std::cout << "    floats:        " << s.count << "\n";
+    std::cout << "    exact matches: " << s.exactFloatMatches << "/" << s.count << "\n";
+    std::cout << std::fixed << std::setprecision(9);
+    std::cout << "    correlation:   " << s.correlation << "\n";
+    std::cout << "    MAE:           " << s.mae << "\n";
+    std::cout << "    RMSE:          " << s.rmse << "\n";
+    std::cout << "    max abs error: " << s.maxAbsError << "\n";
+    std::cout.unsetf(std::ios::floatfield);
+}
+
+void printGp200Compare(const fs::path& aPath, const fs::path& bPath, const Gp200CompareResult& r) {
+    std::cout << "GP-200 CLO comparison\n";
+    std::cout << "  A: " << pathToUtf8(aPath) << "\n";
+    std::cout << "  B: " << pathToUtf8(bPath) << "\n";
+    if (!r.ok) {
+        std::cout << "  ERROR: " << r.error << "\n";
+        return;
+    }
+    std::cout << "\nStructure\n";
+    std::cout << "  A declared/payload/model: 0x" << std::hex << std::uppercase << r.a.declaredSize
+              << " / 0x" << r.a.payloadSize << " / 0x" << r.a.modelField << std::dec << "\n";
+    std::cout << "  B declared/payload/model: 0x" << std::hex << std::uppercase << r.b.declaredSize
+              << " / 0x" << r.b.payloadSize << " / 0x" << r.b.modelField << std::dec << "\n";
+    std::cout << "  A GP200 shape: " << ((r.a.declaredSize == 0x1288 && r.a.payloadSize == 0x1200 && r.a.modelField == 0x400) ? "yes" : "NO") << "\n";
+    std::cout << "  B GP200 shape: " << ((r.b.declaredSize == 0x1288 && r.b.payloadSize == 0x1200 && r.b.modelField == 0x400) ? "yes" : "NO") << "\n";
+
+    std::cout << "\nCRC16/MODBUS\n";
+    std::cout << "  A stored/calculated: 0x" << std::hex << std::uppercase << r.storedCrcA
+              << " / 0x" << r.calculatedCrcA << std::dec << " -> " << (r.crcAValid ? "valid" : "INVALID") << "\n";
+    std::cout << "  B stored/calculated: 0x" << std::hex << std::uppercase << r.storedCrcB
+              << " / 0x" << r.calculatedCrcB << std::dec << " -> " << (r.crcBValid ? "valid" : "INVALID") << "\n";
+
+    std::cout << "\nByte comparison\n";
+    std::cout << "  equal:              " << r.byteMatches << "/" << kExpectedCloSize << "\n";
+    std::cout << "  different:          " << r.byteDifferences << "/" << kExpectedCloSize << "\n";
+    std::cout << "  different <0x1288:  " << r.usefulByteDifferences << "\n";
+    std::cout << "  different padding:  " << r.paddingByteDifferences << "\n";
+
+    std::cout << "\nFloat blocks\n";
+    printBlockStats("Block A @0x88, 128 float32", r.blockA);
+    printBlockStats("Block B @0x288, 1024 float32", r.blockB);
 }
 
 } // namespace ntc

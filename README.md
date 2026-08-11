@@ -350,3 +350,21 @@ Example:
 ```
 
 Do not combine `--gp200-compact` with `--gp200-size` or `--gp200-rate`; the point of the compact experiment is to preserve the normal 2048-coefficient fit and only change serialization.
+
+## Built-in GP-200 comparison (v0.6.1)
+
+Python is no longer required to compare a compact candidate against a Valeton reference. Use:
+
+```powershell
+.\NamToClo.exe --compare-gp200 ".\gp200-compact.clo" ".\namClo.clo"
+```
+
+The executable reports:
+
+- GP-200 structure fields (`0x1288 / 0x1200 / 0x400`);
+- CRC16/MODBUS validation for both files;
+- total equal/different bytes and padding differences;
+- Block A (`0x88`, 128 `float32`) Pearson correlation, MAE, RMSE and maximum absolute error;
+- Block B (`0x288`, 1024 `float32`) the same metrics.
+
+This replaces the Python helper for normal Windows testing. The Python tool remains only as an optional research utility.

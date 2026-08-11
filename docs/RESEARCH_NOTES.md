@@ -155,3 +155,7 @@ For the same NAM:
 This motivates the v0.6 hypothesis: GP-200 may use a compact serialization of a longer internal fit rather than fitting directly at 1024 coefficients.
 
 Checksum analysis also matched the serializer: CRC16/MODBUS initialized to `0xFFFF`, calculated from offset `0x0C` to the declared end, with the final two CRC bytes stored swapped at offsets `0x08..0x09`.
+
+## v0.6.1
+
+Added a built-in `--compare-gp200` command so Windows test systems do not need Python. It validates GP-200 structure and CRC and compares the two inferred float blocks: Block A at `0x88` (128 float32) and Block B at `0x288` (1024 float32), including Pearson correlation, MAE, RMSE, max absolute error, and exact float matches.
