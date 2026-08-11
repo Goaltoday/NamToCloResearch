@@ -56,6 +56,7 @@ struct ConvertOptions {
     bool verbose = false;
     ConvertMode mode = ConvertMode::Data;
     std::uint64_t arg6 = 0;
+    bool gp200Probe = false;
 };
 
 struct WorkerOptions {
@@ -69,6 +70,7 @@ struct WorkerOptions {
     bool verbose = false;
     ConvertMode mode = ConvertMode::Data;
     std::uint64_t arg6 = 0;
+    bool gp200Probe = false;
 };
 
 struct SharedBuffer {
@@ -119,6 +121,8 @@ OPTIONS
   --timeout <seconds>    Conversion timeout. Default: 180.
   --arg6 <value>         Experimental 6th argument for namConvertCloData.
                          Accepts decimal or 0x-prefixed hexadecimal. Default: 0.
+  --gp200-probe          Patch the loaded DLL in memory so the DSP model length
+                         constant changes from 2048.0f to 1024.0f. Experimental.
   --keep-temp            Preserve staged files and captured-buffer.bin.
   --verbose              Print additional research diagnostics.
 
@@ -131,7 +135,7 @@ RUNTIME DISCOVERY
     5. runtime/ in the current working directory
 
 IMPORTANT
-  v0.3 defaults to namConvertCloData. Static analysis and live testing confirm
+  v0.4 defaults to namConvertCloData. Static analysis and live testing confirm
   arg5 can receive a complete VTSI 0x2288-byte buffer. arg6 remains experimental
   and can now be varied with --arg6. The worker remains isolated so a DLL fast-fail
   cannot terminate the parent process. The proprietary Hotone DLL and WAV are not
@@ -359,6 +363,7 @@ bool stageInputFiles(const RuntimePaths& runtime,
     worker.verbose = options.verbose;
     worker.mode = options.mode;
     worker.arg6 = options.arg6;
+    worker.gp200Probe = options.gp200Probe;
 
     if (!ntc::copyFileCreatingParents(runtime.stimulus, worker.inputWav, error)) {
         return false;
@@ -411,6 +416,7 @@ std::wstring makeWorkerCommandLine(const WorkerOptions& worker) {
         args.push_back(worker.mappingName);
         args.push_back(L"--arg6");
         args.push_back(std::to_wstring(worker.arg6));
+        if (worker.gp200Probe) args.push_back(L"--gp200-probe");
     }
     if (worker.verbose) {
         args.push_back(L"--verbose");
@@ -663,6 +669,34 @@ int observeWorkerOutput(const WorkerOptions& options, std::uint8_t* mappedData) 
     return kExitConversionTimeout;
 }
 
+
+bool patchGp200ModelLength(HMODULE module, bool verbose) {
+    constexpr std::uintptr_t kModelLengthFloatRva = 0x2DEAF0;
+    auto* target = reinterpret_cast<std::uint8_t*>(module) + kModelLengthFloatRva;
+    const float expected = 2048.0f;
+    const float replacement = 1024.0f;
+    float current = 0.0f;
+    std::memcpy(&current, target, sizeof(current));
+    if (current != expected) {
+        std::cerr << "[worker] ERROR GP200 probe patch expected 2048.0f at RVA 0x2DEAF0 but found "
+                  << current << ". DLL version/layout does not match the analyzed build.\n";
+        return false;
+    }
+    DWORD oldProtect = 0;
+    if (!VirtualProtect(target, sizeof(float), PAGE_READWRITE, &oldProtect)) {
+        std::cerr << "[worker] ERROR VirtualProtect for GP200 probe patch failed.\n";
+        return false;
+    }
+    std::memcpy(target, &replacement, sizeof(replacement));
+    FlushInstructionCache(GetCurrentProcess(), target, sizeof(replacement));
+    DWORD ignored = 0;
+    VirtualProtect(target, sizeof(float), oldProtect, &ignored);
+    if (verbose) {
+        std::cout << "[worker] GP200 probe patch: HTUSBTools.dll+0x2DEAF0 2048.0f -> 1024.0f\n";
+    }
+    return true;
+}
+
 int runWorker(const WorkerOptions& options) {
     std::cout << "[worker] loading: " << ntc::pathToUtf8(options.dll) << "\n";
     HMODULE module = LoadLibraryExW(options.dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
@@ -671,6 +705,10 @@ int runWorker(const WorkerOptions& options) {
         std::cerr << "[worker] ERROR LoadLibraryExW: " << ntc::win32ErrorMessage(err)
                   << " (" << ntc::hex32(err) << ")\n";
         return kExitDllLoad;
+    }
+
+    if (options.gp200Probe && !patchGp200ModelLength(module, options.verbose)) {
+        return kExitStageFailure;
     }
 
     const std::string inputWav = ntc::pathToUtf8(options.inputWav);
@@ -717,7 +755,8 @@ int runWorker(const WorkerOptions& options) {
                       << "  arg5 outputBuffer = shared mapping @ 0x" << std::hex << std::uppercase
                       << reinterpret_cast<std::uintptr_t>(mappedData) << std::dec << "\n"
                       << "  arg6 unknown      = " << options.arg6 << " (0x" << std::hex << std::uppercase
-                      << options.arg6 << std::dec << ") experimental\n";
+                      << options.arg6 << std::dec << ") experimental\n"
+                      << "  gp200Probe        = " << (options.gp200Probe ? "ON (2048->1024 model-length patch)" : "off") << "\n";
         }
 
         exceptionCode = invokeDataWithSeh(fn, inputWav.c_str(), outputWav.c_str(), inputNam.c_str(),
@@ -869,6 +908,8 @@ bool parseWorkerOptions(int argc, wchar_t** argv, WorkerOptions& out) {
             const auto parsed = parseUint64(argv[++i]);
             if (!parsed) return false;
             out.arg6 = *parsed;
+        } else if (arg == L"--gp200-probe") {
+            out.gp200Probe = true;
         } else if (arg == L"--verbose") {
             out.verbose = true;
         } else {
@@ -910,6 +951,10 @@ bool parseCommonRuntimeOption(const std::wstring& arg, int& i, int argc, wchar_t
         const auto parsed = parseUint64(argv[++i]);
         if (!parsed) return false;
         out.arg6 = *parsed;
+        return true;
+    }
+    if (arg == L"--gp200-probe") {
+        out.gp200Probe = true;
         return true;
     }
     if (arg == L"--keep-temp") {

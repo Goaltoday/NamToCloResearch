@@ -83,3 +83,22 @@ The legacy `namConvertClo` route remains available through `--mode file` as a co
 ## v0.3 arg6 experiment
 
 Confirmed live result from v0.2: `namConvertCloData(nullptr, inputWav, outputWav, inputNam, outputBuffer, 0)` generated a stable `VTSI`-shaped 8840-byte buffer externally. Comparing the same NAM against Valeton showed Ampero-shaped fields `0x2288 / 0x2200 / 0x0800` versus Valeton `0x1288 / 0x1200 / 0x0400`. v0.3 exposes arg6 and adds a controlled sweep. The hypothesis that arg6 selects model capacity/target remains unconfirmed until the sweep changes these fields or other output characteristics.
+
+## v0.4 - GP-200 model-length probe
+
+Static analysis of the analyzed Ampero II `HTUSBTools.dll` found:
+
+- `namConvertClo` hard-codes internal `convertType = 1`.
+- `namConvertCloData` hard-codes internal `convertType = 0`.
+- These values select file-output vs data-buffer worker branches; `arg6` does not select the 4K/8K CLO shape in the tested range.
+- The final VTSI serializer copies the model count from internal field `HTKPA-like object + 0x20ED8` to CLO offset `0x84`.
+- That field is calculated in DSP code using a `2048.0f` constant located at RVA `0x2DEAF0` in the analyzed DLL build.
+- Ampero output has `modelField=0x800`; Valeton output from the same NAM has `modelField=0x400`.
+
+The experimental `--gp200-probe` option patches the loaded DLL image in the disposable worker process only:
+
+`2048.0f -> 1024.0f` at RVA `0x2DEAF0`.
+
+The DLL file on disk is never modified. The patch is guarded: if the original float is not exactly 2048.0f the conversion is aborted, preventing use against an unknown DLL layout.
+
+Expected research result: determine whether the DSP stage naturally recalculates a 1024-coefficient model (`CLO+0x84 == 0x400`). The serializer still has hard-coded Ampero container sizes (`0x2288` / `0x2200`), so a successful probe may still need a later container-size/checksum adaptation.

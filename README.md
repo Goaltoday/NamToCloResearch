@@ -269,3 +269,28 @@ This keeps the previous `namConvertClo` behavior unchanged as a control experime
 - The native call is undocumented and experimental.
 - Conversion is isolated in a child process because malformed ABI assumptions may trigger process termination.
 - This repository is for interoperability/research and is not integrated into GP200 Studio VST.
+
+## Experimental GP-200 length probe (v0.4)
+
+After comparing Ampero and Valeton CLO files generated from the same NAM, the current working model is:
+
+- Ampero: 0x88-byte header + 0x800 float32 coefficients + 0x200-byte tail = 0x2288 bytes.
+- Valeton: 0x88-byte header + 0x400 float32 coefficients + 0x200-byte tail = 0x1288 meaningful bytes, padded to 0x2288 on disk.
+
+The analyzed Ampero DLL computes the model-count field using a 2048.0f constant. `--gp200-probe` changes that constant to 1024.0f in the worker's loaded DLL image only.
+
+Run:
+
+```powershell
+.\NamToClo.exe ".\modelo.nam" ".\gp200-probe.clo" --mode data --gp200-probe --keep-temp --verbose
+```
+
+Then inspect:
+
+```powershell
+.\NamToClo.exe --inspect ".\gp200-probe.clo"
+```
+
+The key field is `model-field @0x84`. The desired experimental result is `0x400` instead of the normal Ampero `0x800`.
+
+Do **not** load the experimental file into hardware yet. Even if the model field becomes `0x400`, the Ampero serializer still writes its normal `0x2288/0x2200` container sizes. The next step would be to compare the recalculated coefficients against a Valeton CLO from the exact same NAM before adapting the container header/checksum.
