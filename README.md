@@ -1,6 +1,6 @@
-# NAM to CLO 1.0
+# NAM to CLO 1.1
 
-Windows GUI utility that converts a Neural Amp Model (`.nam`) into two CLO files:
+Windows GUI utility that converts one Neural Amp Model (`.nam`) or batch-converts all `.nam` files in a selected folder into two CLO files per model:
 
 - `<name>_Ampero_2048.clo` — the 2048-coefficient VTSI generated through Hotone `HTUSBTools.dll`.
 - `<name>_GP200_1024.clo` — an experimental GP-200 compact serialization using the 1024-coefficient structure observed in the official Valeton editor.
@@ -33,10 +33,13 @@ Copy `HTUSBTools.dll` and `nam_input_wav.wav` from your legally obtained Ampero 
 
 Double-click `NamToClo.exe`.
 
-1. Load or drag a `.nam` file.
-2. Choose an output folder.
-3. Click **Convert**.
-4. The application generates both CLO files automatically.
+1. For a single conversion, click **Load NAM...** or drag a `.nam` file.
+2. For batch conversion, click **Load Folder...** or drag a folder containing `.nam` files. Batch scanning is non-recursive.
+3. Choose an output folder.
+4. Click **Convert**.
+5. The application generates both CLO files for every selected NAM automatically.
+
+Batch mode continues after an individual conversion failure and shows a final success/failure summary.
 
 If a destination filename already exists, the application creates ` (1)`, ` (2)`, etc. instead of silently overwriting it.
 

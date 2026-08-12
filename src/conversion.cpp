@@ -1,6 +1,9 @@
 #include "conversion.hpp"
 #include "common.hpp"
 
+#include <algorithm>
+#include <cwctype>
+
 #include <windows.h>
 
 #include <chrono>
@@ -325,8 +328,11 @@ bool validateRuntime(const RuntimePaths& r, std::string& error) {
 ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outputDirectory,
                                   const StatusCallback& status) {
     ConversionResult result;
+    result.inputNam = inputNam;
     std::error_code ec;
-    if (!fs::exists(inputNam, ec) || ec || inputNam.extension() != L".nam") {
+    std::wstring inputExt = inputNam.extension().wstring();
+    for (auto& c : inputExt) c = static_cast<wchar_t>(towlower(c));
+    if (!fs::exists(inputNam, ec) || ec || inputExt != L".nam") {
         result.exitCode = kExitUsage;
         result.error = "Select a valid .nam file.";
         return result;
@@ -412,6 +418,55 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     result.exitCode = kExitOk;
     report(status, L"Done.");
     return result;
+}
+
+
+BatchConversionResult convertNamFolder(const fs::path& inputDirectory, const fs::path& outputDirectory,
+                                       const StatusCallback& status) {
+    BatchConversionResult batch;
+    std::error_code ec;
+    if (!fs::exists(inputDirectory, ec) || ec || !fs::is_directory(inputDirectory, ec)) {
+        return batch;
+    }
+
+    std::vector<fs::path> namFiles;
+    for (const auto& entry : fs::directory_iterator(inputDirectory, ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec) || ec) { ec.clear(); continue; }
+        std::wstring ext = entry.path().extension().wstring();
+        for (auto& c : ext) c = static_cast<wchar_t>(towlower(c));
+        if (ext == L".nam") namFiles.push_back(entry.path());
+    }
+
+    std::sort(namFiles.begin(), namFiles.end(), [](const fs::path& a, const fs::path& b) {
+        return a.filename().wstring() < b.filename().wstring();
+    });
+
+    batch.total = namFiles.size();
+    if (namFiles.empty()) return batch;
+
+    const fs::path outDir = outputDirectory.empty() ? inputDirectory : outputDirectory;
+    batch.items.reserve(namFiles.size());
+
+    for (std::size_t i = 0; i < namFiles.size(); ++i) {
+        const auto& nam = namFiles[i];
+        if (status) {
+            status(L"[" + std::to_wstring(i + 1) + L"/" + std::to_wstring(namFiles.size()) +
+                   L"] " + nam.filename().wstring());
+        }
+        auto item = convertNamToBoth(nam, outDir, [&, i, nam](const std::wstring& text) {
+            if (status) {
+                status(L"[" + std::to_wstring(i + 1) + L"/" + std::to_wstring(namFiles.size()) +
+                       L"] " + nam.filename().wstring() + L" - " + text);
+            }
+        });
+        if (item.ok) ++batch.succeeded;
+        else ++batch.failed;
+        batch.items.push_back(std::move(item));
+    }
+
+    batch.ok = batch.failed == 0 && batch.succeeded == batch.total;
+    return batch;
 }
 
 int runWorkerCommandLine(int argc, wchar_t** argv) {

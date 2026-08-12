@@ -11,31 +11,36 @@
 #include <memory>
 #include <string>
 #include <thread>
-#include <vector>
 
 namespace fs = std::filesystem;
 
 namespace {
 constexpr wchar_t kClassName[] = L"NamToCloMainWindow";
 constexpr UINT WM_APP_STATUS = WM_APP + 1;
-constexpr UINT WM_APP_DONE = WM_APP + 2;
-constexpr int IDC_NAM_PATH = 101;
-constexpr int IDC_LOAD = 102;
-constexpr int IDC_OUTPUT_PATH = 103;
-constexpr int IDC_BROWSE_OUTPUT = 104;
-constexpr int IDC_CONVERT = 105;
-constexpr int IDC_OPEN_OUTPUT = 106;
-constexpr int IDC_STATUS = 107;
+constexpr UINT WM_APP_DONE_SINGLE = WM_APP + 2;
+constexpr UINT WM_APP_DONE_BATCH = WM_APP + 3;
+constexpr int IDC_INPUT_PATH = 101;
+constexpr int IDC_LOAD_FILE = 102;
+constexpr int IDC_LOAD_FOLDER = 103;
+constexpr int IDC_OUTPUT_PATH = 104;
+constexpr int IDC_BROWSE_OUTPUT = 105;
+constexpr int IDC_CONVERT = 106;
+constexpr int IDC_OPEN_OUTPUT = 107;
+constexpr int IDC_STATUS = 108;
 
-HWND gNamEdit = nullptr;
+enum class InputMode { None, SingleNam, Folder };
+
+HWND gInputEdit = nullptr;
 HWND gOutEdit = nullptr;
-HWND gLoadButton = nullptr;
+HWND gLoadFileButton = nullptr;
+HWND gLoadFolderButton = nullptr;
 HWND gBrowseButton = nullptr;
 HWND gConvertButton = nullptr;
 HWND gOpenButton = nullptr;
 HWND gStatus = nullptr;
 HFONT gFont = nullptr;
 bool gBusy = false;
+InputMode gInputMode = InputMode::None;
 
 std::wstring getText(HWND h) {
     const int len = GetWindowTextLengthW(h);
@@ -49,23 +54,54 @@ void setText(HWND h, const std::wstring& s) { SetWindowTextW(h, s.c_str()); }
 
 void enableControls(bool enable) {
     gBusy = !enable;
-    EnableWindow(gLoadButton, enable);
+    EnableWindow(gLoadFileButton, enable);
+    EnableWindow(gLoadFolderButton, enable);
     EnableWindow(gBrowseButton, enable);
     EnableWindow(gConvertButton, enable);
     EnableWindow(gOpenButton, enable);
 }
 
-void setSelectedNam(const fs::path& p) {
-    if (p.empty()) return;
+bool isNamFile(const fs::path& p) {
     std::wstring ext = p.extension().wstring();
     for (auto& c : ext) c = static_cast<wchar_t>(towlower(c));
-    if (ext != L".nam") {
+    return ext == L".nam";
+}
+
+void setSingleNam(const fs::path& p) {
+    if (p.empty()) return;
+    if (!isNamFile(p)) {
         MessageBoxW(nullptr, L"Please select a .nam file.", L"NAM to CLO", MB_ICONWARNING | MB_OK);
         return;
     }
-    setText(gNamEdit, p.wstring());
+    gInputMode = InputMode::SingleNam;
+    setText(gInputEdit, p.wstring());
     if (getText(gOutEdit).empty()) setText(gOutEdit, p.parent_path().wstring());
-    setText(gStatus, L"Ready to convert.");
+    setText(gStatus, L"Single-file mode. Ready to convert.");
+}
+
+void setNamFolder(const fs::path& p) {
+    if (p.empty()) return;
+    std::error_code ec;
+    if (!fs::is_directory(p, ec) || ec) {
+        MessageBoxW(nullptr, L"Please select a valid folder.", L"NAM to CLO", MB_ICONWARNING | MB_OK);
+        return;
+    }
+
+    std::size_t count = 0;
+    for (const auto& entry : fs::directory_iterator(p, ec)) {
+        if (ec) break;
+        if (entry.is_regular_file(ec) && !ec && isNamFile(entry.path())) ++count;
+        ec.clear();
+    }
+    if (count == 0) {
+        MessageBoxW(nullptr, L"The selected folder contains no .nam files.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
+        return;
+    }
+
+    gInputMode = InputMode::Folder;
+    setText(gInputEdit, p.wstring());
+    if (getText(gOutEdit).empty()) setText(gOutEdit, p.wstring());
+    setText(gStatus, L"Batch mode: " + std::to_wstring(count) + L" NAM file(s) found.");
 }
 
 void chooseNam(HWND owner) {
@@ -78,7 +114,7 @@ void chooseNam(HWND owner) {
     ofn.nMaxFile = static_cast<DWORD>(std::size(file));
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     ofn.lpstrDefExt = L"nam";
-    if (GetOpenFileNameW(&ofn)) setSelectedNam(fs::path(file));
+    if (GetOpenFileNameW(&ofn)) setSingleNam(fs::path(file));
 }
 
 int CALLBACK browseCallback(HWND hwnd, UINT msg, LPARAM, LPARAM data) {
@@ -86,19 +122,32 @@ int CALLBACK browseCallback(HWND hwnd, UINT msg, LPARAM, LPARAM data) {
     return 0;
 }
 
-void chooseOutput(HWND owner) {
-    std::wstring current = getText(gOutEdit);
+bool chooseFolder(HWND owner, const wchar_t* title, const std::wstring& current, fs::path& selected) {
     BROWSEINFOW bi{};
     bi.hwndOwner = owner;
-    bi.lpszTitle = L"Select output folder";
+    bi.lpszTitle = title;
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
     bi.lpfn = browseCallback;
     bi.lParam = reinterpret_cast<LPARAM>(current.c_str());
     PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
-    if (!pidl) return;
+    if (!pidl) return false;
     wchar_t path[MAX_PATH]{};
-    if (SHGetPathFromIDListW(pidl, path)) setText(gOutEdit, path);
+    const bool ok = SHGetPathFromIDListW(pidl, path) != FALSE;
+    if (ok) selected = fs::path(path);
     CoTaskMemFree(pidl);
+    return ok;
+}
+
+void chooseNamFolder(HWND owner) {
+    fs::path selected;
+    const std::wstring current = getText(gInputEdit);
+    if (chooseFolder(owner, L"Select folder containing NAM files", current, selected)) setNamFolder(selected);
+}
+
+void chooseOutput(HWND owner) {
+    fs::path selected;
+    const std::wstring current = getText(gOutEdit);
+    if (chooseFolder(owner, L"Select output folder", current, selected)) setText(gOutEdit, selected.wstring());
 }
 
 void postStatus(HWND hwnd, const std::wstring& s) {
@@ -108,23 +157,33 @@ void postStatus(HWND hwnd, const std::wstring& s) {
 
 void startConversion(HWND hwnd) {
     if (gBusy) return;
-    const fs::path nam = getText(gNamEdit);
+    const fs::path input = getText(gInputEdit);
     const fs::path out = getText(gOutEdit);
-    if (nam.empty()) {
-        MessageBoxW(hwnd, L"Select a NAM file first.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
+    if (input.empty() || gInputMode == InputMode::None) {
+        MessageBoxW(hwnd, L"Select a NAM file or a folder containing NAM files first.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
         return;
     }
     if (out.empty()) {
         MessageBoxW(hwnd, L"Select an output folder.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
         return;
     }
+
     enableControls(false);
-    setText(gStatus, L"Starting conversion...");
-    std::thread([hwnd, nam, out] {
-        auto result = std::make_unique<ntc::ConversionResult>(
-            ntc::convertNamToBoth(nam, out, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
-        PostMessageW(hwnd, WM_APP_DONE, 0, reinterpret_cast<LPARAM>(result.release()));
-    }).detach();
+    if (gInputMode == InputMode::SingleNam) {
+        setText(gStatus, L"Starting conversion...");
+        std::thread([hwnd, input, out] {
+            auto result = std::make_unique<ntc::ConversionResult>(
+                ntc::convertNamToBoth(input, out, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
+            PostMessageW(hwnd, WM_APP_DONE_SINGLE, 0, reinterpret_cast<LPARAM>(result.release()));
+        }).detach();
+    } else {
+        setText(gStatus, L"Starting batch conversion...");
+        std::thread([hwnd, input, out] {
+            auto result = std::make_unique<ntc::BatchConversionResult>(
+                ntc::convertNamFolder(input, out, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
+            PostMessageW(hwnd, WM_APP_DONE_BATCH, 0, reinterpret_cast<LPARAM>(result.release()));
+        }).detach();
+    }
 }
 
 void openOutputFolder(HWND hwnd) {
@@ -147,18 +206,21 @@ void createUi(HWND hwnd) {
     SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(titleFont), TRUE);
     SetPropW(hwnd, L"TitleFont", titleFont);
 
-    HWND sub = CreateWindowW(L"STATIC", L"Generate Ampero 2048 and experimental GP-200 1024 CLO files from a NAM model.",
-                             WS_CHILD | WS_VISIBLE, 30, 60, 660, 24, hwnd, nullptr, nullptr, nullptr);
+    HWND sub = CreateWindowW(L"STATIC", L"Convert one NAM or batch-convert every NAM in a selected folder.",
+                             WS_CHILD | WS_VISIBLE, 30, 60, 680, 24, hwnd, nullptr, nullptr, nullptr);
     applyFont(sub);
 
-    HWND l1 = CreateWindowW(L"STATIC", L"NAM file", WS_CHILD | WS_VISIBLE, 30, 108, 150, 24, hwnd, nullptr, nullptr, nullptr);
+    HWND l1 = CreateWindowW(L"STATIC", L"Input NAM or folder", WS_CHILD | WS_VISIBLE, 30, 106, 190, 24, hwnd, nullptr, nullptr, nullptr);
     applyFont(l1);
-    gNamEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-                               30, 134, 540, 32, hwnd, reinterpret_cast<HMENU>(IDC_NAM_PATH), nullptr, nullptr);
-    applyFont(gNamEdit);
-    gLoadButton = CreateWindowW(L"BUTTON", L"Load NAM...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                582, 133, 120, 34, hwnd, reinterpret_cast<HMENU>(IDC_LOAD), nullptr, nullptr);
-    applyFont(gLoadButton);
+    gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+                                 30, 132, 440, 32, hwnd, reinterpret_cast<HMENU>(IDC_INPUT_PATH), nullptr, nullptr);
+    applyFont(gInputEdit);
+    gLoadFileButton = CreateWindowW(L"BUTTON", L"Load NAM...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                    482, 131, 105, 34, hwnd, reinterpret_cast<HMENU>(IDC_LOAD_FILE), nullptr, nullptr);
+    applyFont(gLoadFileButton);
+    gLoadFolderButton = CreateWindowW(L"BUTTON", L"Load Folder...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                                      597, 131, 120, 34, hwnd, reinterpret_cast<HMENU>(IDC_LOAD_FOLDER), nullptr, nullptr);
+    applyFont(gLoadFolderButton);
 
     HWND l2 = CreateWindowW(L"STATIC", L"Output folder", WS_CHILD | WS_VISIBLE, 30, 190, 150, 24, hwnd, nullptr, nullptr, nullptr);
     applyFont(l2);
@@ -166,13 +228,13 @@ void createUi(HWND hwnd) {
                                30, 216, 540, 32, hwnd, reinterpret_cast<HMENU>(IDC_OUTPUT_PATH), nullptr, nullptr);
     applyFont(gOutEdit);
     gBrowseButton = CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                  582, 215, 120, 34, hwnd, reinterpret_cast<HMENU>(IDC_BROWSE_OUTPUT), nullptr, nullptr);
+                                  582, 215, 135, 34, hwnd, reinterpret_cast<HMENU>(IDC_BROWSE_OUTPUT), nullptr, nullptr);
     applyFont(gBrowseButton);
 
     HWND info = CreateWindowW(L"STATIC",
-        L"Output: <name>_Ampero_2048.clo  +  <name>_GP200_1024.clo\r\n"
-        L"The GP-200 1024 file follows the compact structure confirmed in the official editor, but hardware validation is still pending.",
-        WS_CHILD | WS_VISIBLE, 30, 273, 672, 55, hwnd, nullptr, nullptr, nullptr);
+        L"For each NAM: <name>_Ampero_2048.clo + <name>_GP200_1024.clo\r\n"
+        L"Batch mode processes .nam files in the selected folder (non-recursive).",
+        WS_CHILD | WS_VISIBLE, 30, 273, 690, 55, hwnd, nullptr, nullptr, nullptr);
     applyFont(info);
 
     gConvertButton = CreateWindowW(L"BUTTON", L"Convert", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
@@ -183,11 +245,11 @@ void createUi(HWND hwnd) {
     applyFont(gOpenButton);
 
     gStatus = CreateWindowW(L"STATIC", L"Checking runtime...", WS_CHILD | WS_VISIBLE,
-                            30, 420, 672, 28, hwnd, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
+                            30, 420, 690, 28, hwnd, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
-    HWND ver = CreateWindowW(L"STATIC", L"Version 1.0.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
-                             580, 462, 122, 22, hwnd, nullptr, nullptr, nullptr);
+    HWND ver = CreateWindowW(L"STATIC", L"Version 1.1.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                             580, 462, 137, 22, hwnd, nullptr, nullptr, nullptr);
     applyFont(ver);
     DragAcceptFiles(hwnd, TRUE);
 }
@@ -198,13 +260,14 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         createUi(hwnd);
         std::string error;
         const auto rt = ntc::resolveDefaultRuntime();
-        if (ntc::validateRuntime(rt, error)) setText(gStatus, L"Runtime ready. Load a NAM file or drag it onto this window.");
+        if (ntc::validateRuntime(rt, error)) setText(gStatus, L"Runtime ready. Load a NAM, load a folder, or drag one onto this window.");
         else setText(gStatus, L"Runtime missing: " + ntc::fromUtf8(error));
         return 0;
     }
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
-        case IDC_LOAD: chooseNam(hwnd); return 0;
+        case IDC_LOAD_FILE: chooseNam(hwnd); return 0;
+        case IDC_LOAD_FOLDER: chooseNamFolder(hwnd); return 0;
         case IDC_BROWSE_OUTPUT: chooseOutput(hwnd); return 0;
         case IDC_CONVERT: startConversion(hwnd); return 0;
         case IDC_OPEN_OUTPUT: openOutputFolder(hwnd); return 0;
@@ -214,7 +277,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_DROPFILES: {
         HDROP drop = reinterpret_cast<HDROP>(wParam);
         wchar_t path[32768]{};
-        if (DragQueryFileW(drop, 0, path, static_cast<UINT>(std::size(path)))) setSelectedNam(fs::path(path));
+        if (DragQueryFileW(drop, 0, path, static_cast<UINT>(std::size(path)))) {
+            fs::path p(path);
+            std::error_code ec;
+            if (fs::is_directory(p, ec) && !ec) setNamFolder(p);
+            else setSingleNam(p);
+        }
         DragFinish(drop);
         return 0;
     }
@@ -223,12 +291,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (s) setText(gStatus, *s);
         return 0;
     }
-    case WM_APP_DONE: {
+    case WM_APP_DONE_SINGLE: {
         std::unique_ptr<ntc::ConversionResult> r(reinterpret_cast<ntc::ConversionResult*>(lParam));
         enableControls(true);
         if (r && r->ok) {
             std::wstring msg = L"Conversion complete.\r\n\r\nAmpero 2048:\r\n" + r->ampero2048.wstring()
-                             + L"\r\n\r\nGP-200 1024 experimental:\r\n" + r->gp2001024.wstring();
+                             + L"\r\n\r\nGP-200 1024:\r\n" + r->gp2001024.wstring();
             setText(gStatus, L"Done. Two CLO files were generated successfully.");
             MessageBoxW(hwnd, msg.c_str(), L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
         } else {
@@ -236,6 +304,32 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             setText(gStatus, L"Conversion failed.");
             MessageBoxW(hwnd, err.c_str(), L"Conversion failed", MB_ICONERROR | MB_OK);
         }
+        return 0;
+    }
+    case WM_APP_DONE_BATCH: {
+        std::unique_ptr<ntc::BatchConversionResult> r(reinterpret_cast<ntc::BatchConversionResult*>(lParam));
+        enableControls(true);
+        if (!r || r->total == 0) {
+            setText(gStatus, L"Batch conversion did not find any NAM files.");
+            MessageBoxW(hwnd, L"No .nam files were found in the selected folder.", L"Batch conversion", MB_ICONINFORMATION | MB_OK);
+            return 0;
+        }
+
+        std::wstring msg = L"Batch conversion complete.\r\n\r\nProcessed: " + std::to_wstring(r->total)
+                         + L"\r\nSucceeded: " + std::to_wstring(r->succeeded)
+                         + L"\r\nFailed: " + std::to_wstring(r->failed);
+        if (r->failed > 0) {
+            msg += L"\r\n\r\nFailed files:";
+            for (const auto& item : r->items) {
+                if (!item.ok) {
+                    msg += L"\r\n- " + item.inputNam.filename().wstring();
+                    if (!item.error.empty()) msg += L": " + ntc::fromUtf8(item.error);
+                }
+            }
+        }
+
+        setText(gStatus, L"Batch done: " + std::to_wstring(r->succeeded) + L" succeeded, " + std::to_wstring(r->failed) + L" failed.");
+        MessageBoxW(hwnd, msg.c_str(), L"NAM to CLO - Batch", (r->failed == 0 ? MB_ICONINFORMATION : MB_ICONWARNING) | MB_OK);
         return 0;
     }
     case WM_CLOSE:
@@ -274,9 +368,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.0",
+    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.1",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 750, 540,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 765, 540,
                                 nullptr, nullptr, instance, nullptr);
     if (!hwnd) { CoUninitialize(); return 1; }
     ShowWindow(hwnd, show);
