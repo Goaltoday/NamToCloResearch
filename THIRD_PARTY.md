@@ -1,15 +1,12 @@
-# Third-party / proprietary components
+# Third-party components
 
-This repository contains only original research glue code and documentation.
+This repository contains only original research/tooling source code and does not redistribute proprietary editor binaries or runtime assets.
 
-It does **not** include or license:
+To run the converter, the researcher must supply their own legitimate copies of:
 
-- Hotone / Ampero II software
-- `HTUSBTools.dll`
-- `nam_input_wav.wav`
-- Valeton GP-200 software
-- Neural Amp Modeler components embedded in vendor software
+- Hotone/Ampero II `HTUSBTools.dll`
+- the matching `nam_input_wav.wav`
 
-Users must obtain any vendor files from software they are entitled to use and must comply with the applicable vendor terms and local law.
+The tool dynamically loads the DLL for interoperability/research. Neural Amp Modeler code is not copied into this repository; it is present inside the user-supplied vendor runtime.
 
-The MIT License in this repository applies only to the source code and documentation that are part of this repository. It does not grant rights to redistribute or modify third-party proprietary binaries.
+Valeton GP-200 binaries/CLO captures used during reverse engineering are likewise not distributed here.

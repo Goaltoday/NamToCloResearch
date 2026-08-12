@@ -1,161 +1,36 @@
-# Research notes - v0.2
+# Research notes — active baseline v0.8.0
 
 ## Confirmed
 
-### Valeton side
+- Ampero `HTUSBTools.dll` exports `namConvertCloData` and returns `0x2288` on the successful data path.
+- The working ABI used by this tool is:
+  - arg1: `nullptr` context
+  - arg2: stimulus WAV path
+  - arg3: output WAV path
+  - arg4: NAM path
+  - arg5: caller-owned `0x2288` destination buffer
+  - arg6: fixed `0`
+- The normal VTSI shape is physical/declared `0x2288`, payload `0x2200`, Block A 128 float32 and Block B 2048 float32.
+- The GP-200 internal large VTSI also uses 2048 Block-B floats.
+- GP-200 compaction is serialization only: preserve Block A + first 1024 Block-B floats; declared `0x1288`, payload `0x1200`, model field `0x400`, zero physical tail to `0x2288`, recalculate CRC16/MODBUS.
+- Ampero and Sonicake produced byte-identical VTSI for tested NAM inputs.
+- Sonicake `cloConvertSampleRate` was successfully tested; it did not remove the Valeton/Ampero coefficient difference.
+- Patching Ampero's internal 2048 constant to 1024 recalculates a different model and does not reproduce Valeton.
 
-- GP-200 NAM -> CLO conversion is local on the PC.
-- The final CLO size observed is fixed at `0x2288` / 8840 bytes.
-- The post-NAM stage is real DSP/identification work, not simple WAV packaging.
+## Discarded probes
 
-### Ampero package
+The following are intentionally removed from the active code:
 
-- `HTUSBTools.dll` is Windows x64.
-- It exports `namConvertClo`, `namConvertCloData`, `getNormalWav`, `initWithWaveDicPath`, `initWithWaveDicPathJson`, and `InitDartApiDL`.
-- The bundled `nam_input_wav.wav` SHA-256 matches the Valeton stimulus previously measured:
-  `9bb6c1b136dfbeb7538a6060499d98c89342b76ec568b76836e36ab98b29aa1a`.
-- `namConvertClo` and `namConvertCloData` contain the `0x2288` result/size constant.
+- legacy `namConvertClo` file-mode call;
+- arg6 sweep;
+- 2048->1024 DSP constant patch;
+- 44.1->48 kHz VTSI-stage instruction patch;
+- Sonicake provider and sample-rate matrices.
 
-### Dynamic v0.1 experiment
+They remain historical research conclusions, not production paths.
 
-An external process successfully called `namConvertClo` with:
+## Current question
 
-```text
-arg1 = nullptr
-arg2 = supplied nam_input_wav.wav
-arg3 = outputFile.wav
-arg4 = input.nam
-arg5 = output.clo path
-```
+Why does Valeton's **large 2048-coefficient identification result** differ slightly from the byte-identical Ampero/Sonicake result when the NAM response WAV is effectively the same?
 
-Hotone's own log confirmed:
-
-```text
-namConvertClo
-startThread
-NamConvertThread-----
-[NAM] convertType=1
-[NAM] namFile: ...input.nam
-[NAM] inputFile: ...nam_input_wav.wav
-[NAM] outputFile: ...outputFile.wav
-[NAM] model sampleRate: 48000 in_channels=1 out_channels=1
-[NAM] audioread: fs=48000 samples=3360000
-[NAM] audiowrite done: ...outputFile.wav
-[NAM] ========== getNamOutput end ==========
-```
-
-The generated WAV was 70 s / 48 kHz / stereo PCM16 with identical L/R channels. The worker then ended with `0xC0000409`, and the file CLO remained empty.
-
-Therefore arguments 2-4 are no longer merely guessed: their meaning is confirmed by the DLL's own diagnostic log.
-
-## Strongly supported but not yet dynamically proven
-
-Static analysis of `namConvertCloData` supports:
-
-```cpp
-uint32_t namConvertCloData(
-    void* context,
-    const char* inputWav,
-    const char* outputWav,
-    const char* inputNam,
-    void* outputBuffer,
-    uint64_t arg6);
-```
-
-The fifth argument is used by the CLO-data path as a destination for a fixed-size `0x2288` copy. v0.2 therefore supplies a parent-owned shared-memory buffer there.
-
-## Still unknown
-
-- Exact meaning of `arg6` in `namConvertCloData`.
-- Whether `arg1` becomes mandatory only after `getNamOutput`.
-- Whether Dart is required for the CLO stage or only for progress/completion callbacks.
-- Whether Ampero-generated VTSI data is functionally accepted by GP-200 hardware.
-
-## v0.2 experiment
-
-The parent creates a named Windows file mapping of 8840 bytes, fills it with `0xCC`, and launches a worker. The worker opens the mapping and passes it as arg5 to `namConvertCloData`, with arg6 set to zero.
-
-The parent owns the mapping, so its contents remain readable even if the worker fast-fails. The parent always stores the final mapping as `captured-buffer.bin`. A `VTSI` prefix causes the complete 8840-byte buffer to be materialized as `output.clo`.
-
-The legacy `namConvertClo` route remains available through `--mode file` as a control.
-
-
-## v0.3 arg6 experiment
-
-Confirmed live result from v0.2: `namConvertCloData(nullptr, inputWav, outputWav, inputNam, outputBuffer, 0)` generated a stable `VTSI`-shaped 8840-byte buffer externally. Comparing the same NAM against Valeton showed Ampero-shaped fields `0x2288 / 0x2200 / 0x0800` versus Valeton `0x1288 / 0x1200 / 0x0400`. v0.3 exposes arg6 and adds a controlled sweep. The hypothesis that arg6 selects model capacity/target remains unconfirmed until the sweep changes these fields or other output characteristics.
-
-## v0.4 - GP-200 model-length probe
-
-Static analysis of the analyzed Ampero II `HTUSBTools.dll` found:
-
-- `namConvertClo` hard-codes internal `convertType = 1`.
-- `namConvertCloData` hard-codes internal `convertType = 0`.
-- These values select file-output vs data-buffer worker branches; `arg6` does not select the 4K/8K CLO shape in the tested range.
-- The final VTSI serializer copies the model count from internal field `HTKPA-like object + 0x20ED8` to CLO offset `0x84`.
-- That field is calculated in DSP code using a `2048.0f` constant located at RVA `0x2DEAF0` in the analyzed DLL build.
-- Ampero output has `modelField=0x800`; Valeton output from the same NAM has `modelField=0x400`.
-
-The experimental `--gp200-probe` option patches the loaded DLL image in the disposable worker process only:
-
-`2048.0f -> 1024.0f` at RVA `0x2DEAF0`.
-
-The DLL file on disk is never modified. The patch is guarded: if the original float is not exactly 2048.0f the conversion is aborted, preventing use against an unknown DLL layout.
-
-Expected research result: determine whether the DSP stage naturally recalculates a 1024-coefficient model (`CLO+0x84 == 0x400`). The serializer still has hard-coded Ampero container sizes (`0x2288` / `0x2200`), so a successful probe may still need a later container-size/checksum adaptation.
-
-## v0.5 targeted CLO-stage sample-rate experiment
-
-Static analysis of the analyzed `HTUSBTools.dll` build shows the constants `2048.0f`, `44100.0f`, and `48000.0f` in the same read-only constant table. The v0.4 size experiment proved that changing the model-length source constant at RVA `0x2DEAF0` from `2048.0f` to `1024.0f` changes the generated VTSI model field from `0x800` to `0x400`.
-
-A more specific sample-rate use was then located inside the function that builds the VTSI, copies model data, writes `VTSI`/`0x2288`, and calculates the final checksum. At RVA `0xA001D`, the instruction:
-
-```
-F3 0F 10 35 FB EA 23 00   movss xmm6,[rip+...] ; 44100.0f @ RVA 0x2DEB20
-```
-
-feeds `44100.0f` into two calls operating on the coefficient/model data before serialization. v0.5 can retarget only that instruction to the adjacent `48000.0f` constant at RVA `0x2DEB24`:
-
-```
-F3 0F 10 35 FF EA 23 00   ; 48000.0f
-```
-
-This is intentionally narrower than modifying the global `44100.0f` constant, because other references are clearly involved in ordinary audio sample-rate detection/resampling.
-
-Experimental switches:
-
-- `--gp200-size`: 2048 -> 1024 model-length source (proven to yield `modelField=0x400`).
-- `--gp200-rate`: only the VTSI-stage 44100 -> 48000 load at RVA `0xA001D`.
-- `--gp200-combined`: both patches.
-- `--gp200-probe`: legacy alias for `--gp200-size`.
-
-These are in-memory patches only; `HTUSBTools.dll` on disk is never modified.
-
-## v0.6: corrected VTSI block layout and compact-serialization hypothesis
-
-Matrix results for the same NAM showed:
-
-- normal Ampero: `model-field=0x800`
-- size patch: `model-field=0x400`
-- rate patch: `model-field=0x800`
-- combined patch: `model-field=0x400`
-- Valeton reference: `model-field=0x400`, declared `0x1288`, payload `0x1200`
-
-Following the serializer disassembly corrected an earlier assumption. The `model-field` block begins at `0x288`, not `0x88`:
-
-1. VTSI header = `0x88` bytes.
-2. Block A begins at `0x88`, length 128 float32 values (`0x200` bytes).
-3. Block B begins at `0x288`, length given by header field `0x84`.
-
-For the same NAM:
-
-- normal Ampero block A vs Valeton: correlation ~0.99975
-- first 1024 values of normal Ampero block B vs Valeton block B: correlation ~0.99091, MAE ~0.00253
-- recalculating Ampero with the 1024-size DSP patch made both blocks less similar.
-
-This motivates the v0.6 hypothesis: GP-200 may use a compact serialization of a longer internal fit rather than fitting directly at 1024 coefficients.
-
-Checksum analysis also matched the serializer: CRC16/MODBUS initialized to `0xFFFF`, calculated from offset `0x0C` to the declared end, with the final two CRC bytes stored swapped at offsets `0x08..0x09`.
-
-## v0.6.1
-
-Added a built-in `--compare-gp200` command so Windows test systems do not need Python. It validates GP-200 structure and CRC and compares the two inferred float blocks: Block A at `0x88` (128 float32) and Block B at `0x288` (1024 float32), including Pearson correlation, MAE, RMSE, max absolute error, and exact float matches.
+Dynamic work in GP-200.exe has already located real intermediate float-processing code in the path before VTSI compaction. Future probes should target identification parameters/state and the first buffer that matches the final internal large VTSI, rather than revisiting container serialization.

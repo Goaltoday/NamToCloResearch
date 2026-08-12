@@ -1,30 +1,10 @@
-# Runtime files (not redistributed)
+# Runtime files (not distributed)
 
-This repository does not contain proprietary vendor binaries or WAV assets.
-Keep all third-party runtime files below this directory:
+Place locally supplied Ampero runtime files here:
 
 ```text
-runtime/
-  ampero/
-    HTUSBTools.dll
-    nam_input_wav.wav
-  sonicake/
-    5868USB.dll
-    nam_input_wav.wav
-    mfc140.dll          # if shipped/needed by your Sonicake package
-    mfc140u.dll         # if shipped/needed
-    msvcp140.dll        # if shipped/needed
-    vcruntime140.dll    # if shipped/needed
+runtime\ampero\HTUSBTools.dll
+runtime\ampero\nam_input_wav.wav
 ```
 
-With that layout, no vendor paths are needed on the command line.
-
-Simplest full experiment:
-
-```powershell
-.\NamToClo.exe --cross-runtime ".\modelo.nam"
-```
-
-Output defaults to `cross-runtime-results\`.
-
-The CLI still supports original application roots with `--ampero-dir` / `--sonicake-dir`, or explicit `--dll` / `--stimulus` paths.
+Do not commit proprietary DLL/WAV files to the repository.

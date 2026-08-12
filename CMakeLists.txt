@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(NamToCloResearch VERSION 0.7.2 LANGUAGES CXX)
+project(NamToCloResearch VERSION 0.8.0 LANGUAGES CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "NamToCloResearch currently targets Windows x64 because HTUSBTools.dll is a Windows x64 DLL.")
@@ -37,4 +37,3 @@ install(FILES README.md LICENSE THIRD_PARTY.md DESTINATION .)
 install(DIRECTORY docs DESTINATION .)
 install(DIRECTORY scripts DESTINATION .)
 install(DIRECTORY runtime DESTINATION . FILES_MATCHING PATTERN "README.md")
-install(DIRECTORY tools DESTINATION . FILES_MATCHING PATTERN "*.py")
