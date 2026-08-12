@@ -173,7 +173,7 @@ RUNTIME DISCOVERY
     5. legacy runtime/ next to NamToClo.exe
 
 IMPORTANT
-  v0.7.1 can run the same namConvertCloData probe against Hotone HTUSBTools.dll or
+  v0.7.2 can run the same namConvertCloData probe against Hotone HTUSBTools.dll or
   Sonicake 5868USB.dll. The proprietary DLLs/WAVs are not distributed. The new
   --clo-rate commands call Sonicake's exported cloConvertSampleRate(VTSI*, double)
   in an isolated worker and preserve the original input file.
@@ -1151,6 +1151,23 @@ bool parseCommonRuntimeOption(const std::wstring& arg, int& i, int argc, wchar_t
 
 using CloConvertSampleRateFn = void*(__cdecl*)(void*, double);
 
+DWORD invokeCloRateWithSeh(CloConvertSampleRateFn fn,
+                           void* inputBuffer,
+                           double rate,
+                           void** returnedBuffer) noexcept {
+#if defined(_MSC_VER)
+    __try {
+        *returnedBuffer = fn(inputBuffer, rate);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return GetExceptionCode();
+    }
+#else
+    *returnedBuffer = fn(inputBuffer, rate);
+    return 0;
+#endif
+}
+
 bool isSupportedRate(double rate) {
     return rate == 44100.0 || rate == 48000.0 || rate == 96000.0;
 }
@@ -1194,16 +1211,7 @@ int runCloRateWorker(const fs::path& dll, const fs::path& input, double rate,
     }
 
     void* returned = nullptr;
-    DWORD exceptionCode = 0;
-#if defined(_MSC_VER)
-    __try {
-        returned = fn(data.data(), rate);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        exceptionCode = GetExceptionCode();
-    }
-#else
-    returned = fn(data.data(), rate);
-#endif
+    const DWORD exceptionCode = invokeCloRateWithSeh(fn, data.data(), rate, &returned);
     if (exceptionCode != 0) {
         std::cerr << "[rate-worker] ERROR API raised SEH exception " << ntc::hex32(exceptionCode) << "\n";
         return kExitSehBase;

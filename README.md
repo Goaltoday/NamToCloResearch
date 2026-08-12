@@ -425,7 +425,7 @@ The executable reports:
 
 This replaces the Python helper for normal Windows testing. The Python tool remains only as an optional research utility.
 
-## v0.7.1: Ampero + Sonicake cross-runtime probe
+## v0.7.2: Ampero + Sonicake cross-runtime probe
 
 The CLI can now run the existing `namConvertCloData` experiment against either the Hotone/Ampero `HTUSBTools.dll` or Sonicake Manager's `5868USB.dll` (both must be supplied locally by the researcher).
 

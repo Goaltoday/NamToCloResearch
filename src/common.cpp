@@ -275,7 +275,7 @@ bool makeGp200CompactClo(const fs::path& source, const fs::path& destination, st
     writeLe32(0x04, 0x1288u);
     writeLe32(0x14, 0x1200u);
     writeLe32(0x84, 0x0400u);
-    std::fill(data.begin() + 0x1288, data.end(), 0u);
+    std::fill(data.begin() + 0x1288, data.end(), std::uint8_t{0});
 
     // HTUSBTools stores CRC16/MODBUS with bytes swapped, over [0x0C, declaredSize).
     const std::uint16_t crc = crc16Modbus(data.data() + 0x0C, 0x1288u - 0x0Cu);
@@ -473,6 +473,36 @@ void printGp200Compare(const fs::path& aPath, const fs::path& bPath, const Gp200
     std::cout << "\nFloat blocks\n";
     printBlockStats("Block A @0x88, 128 float32", r.blockA);
     printBlockStats("Block B @0x288, 1024 float32", r.blockB);
+}
+
+
+bool readFileBytes(const fs::path& path, std::vector<std::uint8_t>& data, std::string& error) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) { error = "Cannot open file: " + pathToUtf8(path); return false; }
+    const auto end = in.tellg();
+    if (end < 0) { error = "Cannot determine file size: " + pathToUtf8(path); return false; }
+    data.resize(static_cast<std::size_t>(end));
+    in.seekg(0, std::ios::beg);
+    if (!data.empty()) {
+        in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
+        if (static_cast<std::size_t>(in.gcount()) != data.size()) {
+            error = "Short read: " + pathToUtf8(path); return false;
+        }
+    }
+    return true;
+}
+
+bool writeFileBytes(const fs::path& path, const std::uint8_t* data, std::size_t size, std::string& error) {
+    std::error_code ec;
+    if (path.has_parent_path()) {
+        fs::create_directories(path.parent_path(), ec);
+        if (ec) { error = "Cannot create output directory: " + ec.message(); return false; }
+    }
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) { error = "Cannot create file: " + pathToUtf8(path); return false; }
+    out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
+    if (!out) { error = "Failed writing file: " + pathToUtf8(path); return false; }
+    return true;
 }
 
 } // namespace ntc
