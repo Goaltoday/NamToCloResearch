@@ -1,43 +1,29 @@
-name: Build Windows x64
+name: Build Windows
 
 on:
   push:
-    branches: [ main, master ]
   pull_request:
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure CMake
+      - uses: actions/checkout@v4
+      - name: Configure
         run: cmake -S . -B build -A x64
-
-      - name: Build Release
+      - name: Build
         run: cmake --build build --config Release --parallel
-
-      - name: Smoke test CLI
+      - name: Stage app
         shell: pwsh
         run: |
-          .\build\Release\NamToClo.exe --version
-          .\build\Release\NamToClo.exe --help
-
-      - name: Install staging package
-        run: cmake --install build --config Release --prefix stage
-
-      - name: Create ZIP
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path stage\* -DestinationPath dist\NamToCloResearch-windows-x64.zip -Force
-
+          New-Item -ItemType Directory -Force dist/runtime/ampero | Out-Null
+          Copy-Item build/Release/NamToClo.exe dist/NamToClo.exe
+          Copy-Item runtime/README.md dist/runtime/README.md
+          Copy-Item runtime/ampero/README.md dist/runtime/ampero/README.md
+          Copy-Item README.md,LICENSE,THIRD_PARTY.md dist/
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NamToCloResearch-windows-x64
-          path: dist/NamToCloResearch-windows-x64.zip
-          if-no-files-found: error
+          name: NamToClo-Windows-x64
+          path: dist

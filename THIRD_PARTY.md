@@ -1,12 +1,14 @@
-# Third-party components
+# Third-party runtime
 
-This repository contains only original research/tooling source code and does not redistribute proprietary editor binaries or runtime assets.
+This project does not include or redistribute proprietary Hotone/Ampero files.
 
-To run the converter, the researcher must supply their own legitimate copies of:
+The application expects the following user-supplied files:
 
-- Hotone/Ampero II `HTUSBTools.dll`
-- the matching `nam_input_wav.wav`
+```text
+runtime\ampero\HTUSBTools.dll
+runtime\ampero\nam_input_wav.wav
+```
 
-The tool dynamically loads the DLL for interoperability/research. Neural Amp Modeler code is not copied into this repository; it is present inside the user-supplied vendor runtime.
+These files must come from a legally obtained Ampero II installation/package and remain subject to their original license terms.
 
-Valeton GP-200 binaries/CLO captures used during reverse engineering are likewise not distributed here.
+The source code in this repository dynamically loads `HTUSBTools.dll` and calls the exported `namConvertCloData` function for interoperability/research purposes.

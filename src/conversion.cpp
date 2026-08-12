@@ -1,0 +1,423 @@
+#include "conversion.hpp"
+#include "common.hpp"
+
+#include <windows.h>
+
+#include <chrono>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <iostream>
+#include <optional>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace ntc {
+namespace fs = std::filesystem;
+using namespace std::chrono_literals;
+
+namespace {
+constexpr int kExitOk = 0;
+constexpr int kExitUsage = 2;
+constexpr int kExitRuntimeMissing = 10;
+constexpr int kExitDllLoad = 11;
+constexpr int kExitExportMissing = 12;
+constexpr int kExitStageFailure = 20;
+constexpr int kExitWorkerLaunch = 21;
+constexpr int kExitWorkerTimeout = 22;
+constexpr int kExitConversionTimeout = 30;
+constexpr int kExitConversionBadSize = 32;
+constexpr int kExitCopyFailure = 40;
+constexpr int kExitMappingFailure = 41;
+constexpr int kExitSehBase = 100;
+constexpr std::uint8_t kBufferSentinel = 0xCC;
+constexpr std::uint64_t kNamConvertArg6 = 0;
+constexpr int kTimeoutSeconds = 180;
+
+struct WorkerOptions {
+    fs::path dll;
+    fs::path inputWav;
+    fs::path outputWav;
+    fs::path inputNam;
+    fs::path outputClo;
+    std::wstring mappingName;
+    int timeoutSeconds = kTimeoutSeconds;
+};
+
+struct SharedBuffer {
+    HANDLE mapping = nullptr;
+    std::uint8_t* view = nullptr;
+    std::wstring name;
+    ~SharedBuffer() {
+        if (view) UnmapViewOfFile(view);
+        if (mapping) CloseHandle(mapping);
+    }
+    SharedBuffer() = default;
+    SharedBuffer(const SharedBuffer&) = delete;
+    SharedBuffer& operator=(const SharedBuffer&) = delete;
+};
+
+void report(const StatusCallback& cb, const wchar_t* text) {
+    if (cb) cb(text);
+}
+
+fs::path findFirstExisting(const std::vector<fs::path>& candidates) {
+    std::error_code ec;
+    for (const auto& p : candidates) {
+        if (!p.empty() && fs::exists(p, ec) && !ec) return p;
+        ec.clear();
+    }
+    return {};
+}
+
+fs::path makeWorkDirectory() {
+    const auto now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    const DWORD pid = GetCurrentProcessId();
+    fs::path base = fs::temp_directory_path() / L"NamToClo";
+    std::error_code ec;
+    fs::create_directories(base, ec);
+    fs::path work = base / (L"job-" + std::to_wstring(pid) + L"-" + std::to_wstring(now));
+    fs::create_directories(work, ec);
+    return ec ? fs::path{} : work;
+}
+
+std::wstring makeMappingName() {
+    const auto now = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    return L"Local\\NamToClo-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(now);
+}
+
+bool createSharedBuffer(SharedBuffer& out, std::string& error) {
+    out.name = makeMappingName();
+    out.mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                                     static_cast<DWORD>(kExpectedCloSize), out.name.c_str());
+    if (!out.mapping) {
+        error = "CreateFileMappingW failed: " + win32ErrorMessage(GetLastError());
+        return false;
+    }
+    out.view = static_cast<std::uint8_t*>(MapViewOfFile(out.mapping, FILE_MAP_ALL_ACCESS, 0, 0, kExpectedCloSize));
+    if (!out.view) {
+        error = "MapViewOfFile failed: " + win32ErrorMessage(GetLastError());
+        return false;
+    }
+    std::memset(out.view, kBufferSentinel, static_cast<std::size_t>(kExpectedCloSize));
+    return true;
+}
+
+bool startsWithVtsi(const std::uint8_t* data) {
+    return data && data[0] == 'V' && data[1] == 'T' && data[2] == 'S' && data[3] == 'I';
+}
+
+std::size_t changedByteCount(const std::uint8_t* data) {
+    std::size_t changed = 0;
+    for (std::size_t i = 0; i < static_cast<std::size_t>(kExpectedCloSize); ++i) {
+        if (data[i] != kBufferSentinel) ++changed;
+    }
+    return changed;
+}
+
+fs::path uniquePath(const fs::path& desired) {
+    std::error_code ec;
+    if (!fs::exists(desired, ec)) return desired;
+    const auto parent = desired.parent_path();
+    const auto stem = desired.stem().wstring();
+    const auto ext = desired.extension().wstring();
+    for (int i = 1; i < 10000; ++i) {
+        fs::path p = parent / (stem + L" (" + std::to_wstring(i) + L")" + ext);
+        ec.clear();
+        if (!fs::exists(p, ec)) return p;
+    }
+    return desired;
+}
+
+std::wstring makeWorkerCommandLine(const WorkerOptions& w) {
+    const std::vector<std::wstring> args = {
+        executablePath().wstring(), L"--worker",
+        L"--dll", w.dll.wstring(),
+        L"--input-wav", w.inputWav.wstring(),
+        L"--output-wav", w.outputWav.wstring(),
+        L"--nam", w.inputNam.wstring(),
+        L"--clo", w.outputClo.wstring(),
+        L"--mapping", w.mappingName,
+        L"--timeout", std::to_wstring(w.timeoutSeconds)
+    };
+    std::wstring cmd;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (i) cmd.push_back(L' ');
+        cmd += quoteWindowsArg(args[i]);
+    }
+    return cmd;
+}
+
+int launchWorker(const WorkerOptions& worker, SharedBuffer& shared, bool& capturedValid, std::string& error) {
+    capturedValid = false;
+    std::wstring command = makeWorkerCommandLine(worker);
+    std::vector<wchar_t> mutableCommand(command.begin(), command.end());
+    mutableCommand.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    const DWORD flags = CREATE_NO_WINDOW;
+    if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi)) {
+        error = "Could not start conversion worker: " + win32ErrorMessage(GetLastError());
+        return kExitWorkerLaunch;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(worker.timeoutSeconds + 15);
+    while (std::chrono::steady_clock::now() < deadline) {
+        const DWORD wait = WaitForSingleObject(pi.hProcess, 100);
+        if (wait == WAIT_OBJECT_0 || wait == WAIT_FAILED) break;
+    }
+
+    DWORD exitCode = STILL_ACTIVE;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    if (exitCode == STILL_ACTIVE) {
+        TerminateProcess(pi.hProcess, kExitWorkerTimeout);
+        WaitForSingleObject(pi.hProcess, 2000);
+        exitCode = kExitWorkerTimeout;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    const std::size_t changed = changedByteCount(shared.view);
+    capturedValid = startsWithVtsi(shared.view) && changed > 0;
+    if (capturedValid) {
+        if (!writeFileBytes(worker.outputClo, shared.view, static_cast<std::size_t>(kExpectedCloSize), error)) {
+            capturedValid = false;
+        }
+    }
+
+    if (capturedValid) return kExitOk;
+    if (exitCode >= 0xC0000000u) {
+        error = "HTUSBTools worker terminated with Windows exception " + hex32(exitCode);
+        return static_cast<int>(exitCode & 0x7FFFFFFFu);
+    }
+    if (error.empty()) error = "Conversion worker failed (exit code " + std::to_string(exitCode) + ").";
+    return static_cast<int>(exitCode);
+}
+
+using NamConvertCloDataFn = std::uint32_t(__cdecl*)(void*, const char*, const char*, const char*, void*, std::uint64_t);
+
+DWORD invokeDataWithSeh(NamConvertCloDataFn fn, const char* inputWav, const char* outputWav,
+                        const char* inputNam, void* outputBuffer, std::uint32_t* apiReturn) noexcept {
+#if defined(_MSC_VER)
+    __try {
+        *apiReturn = fn(nullptr, inputWav, outputWav, inputNam, outputBuffer, kNamConvertArg6);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return GetExceptionCode();
+    }
+#else
+    *apiReturn = fn(nullptr, inputWav, outputWav, inputNam, outputBuffer, kNamConvertArg6);
+    return 0;
+#endif
+}
+
+int observeWorkerOutput(const WorkerOptions& options, std::uint8_t* mappedData) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(options.timeoutSeconds);
+    std::size_t lastChanged = 0;
+    int stablePolls = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const std::size_t changed = changedByteCount(mappedData);
+        if (changed > 0) {
+            if (changed == lastChanged) ++stablePolls;
+            else { lastChanged = changed; stablePolls = 0; }
+            if (startsWithVtsi(mappedData) && stablePolls >= 10) return kExitOk;
+        }
+        std::this_thread::sleep_for(100ms);
+    }
+    return kExitConversionTimeout;
+}
+
+std::optional<int> positiveInt(const std::wstring& s) {
+    try {
+        std::size_t n = 0;
+        const int v = std::stoi(s, &n, 10);
+        if (n != s.size() || v <= 0) return std::nullopt;
+        return v;
+    } catch (...) { return std::nullopt; }
+}
+
+bool parseWorker(int argc, wchar_t** argv, WorkerOptions& w) {
+    auto has = [argc](int i) { return i + 1 < argc; };
+    for (int i = 2; i < argc; ++i) {
+        const std::wstring a = argv[i];
+        if (a == L"--dll" && has(i)) w.dll = argv[++i];
+        else if (a == L"--input-wav" && has(i)) w.inputWav = argv[++i];
+        else if (a == L"--output-wav" && has(i)) w.outputWav = argv[++i];
+        else if (a == L"--nam" && has(i)) w.inputNam = argv[++i];
+        else if (a == L"--clo" && has(i)) w.outputClo = argv[++i];
+        else if (a == L"--mapping" && has(i)) w.mappingName = argv[++i];
+        else if (a == L"--timeout" && has(i)) {
+            const auto v = positiveInt(argv[++i]); if (!v) return false; w.timeoutSeconds = *v;
+        } else return false;
+    }
+    return !w.dll.empty() && !w.inputWav.empty() && !w.outputWav.empty() && !w.inputNam.empty()
+        && !w.outputClo.empty() && !w.mappingName.empty();
+}
+
+int runWorker(const WorkerOptions& options) {
+    HMODULE module = LoadLibraryExW(options.dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!module) return kExitDllLoad;
+    auto fn = reinterpret_cast<NamConvertCloDataFn>(GetProcAddress(module, "namConvertCloData"));
+    if (!fn) { FreeLibrary(module); return kExitExportMissing; }
+
+    HANDLE mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, options.mappingName.c_str());
+    if (!mapping) { FreeLibrary(module); return kExitMappingFailure; }
+    auto* mapped = static_cast<std::uint8_t*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, kExpectedCloSize));
+    if (!mapped) { CloseHandle(mapping); FreeLibrary(module); return kExitMappingFailure; }
+
+    const std::string inWav = pathToUtf8(options.inputWav);
+    const std::string outWav = pathToUtf8(options.outputWav);
+    const std::string nam = pathToUtf8(options.inputNam);
+    std::uint32_t apiReturn = 0;
+    const DWORD exceptionCode = invokeDataWithSeh(fn, inWav.c_str(), outWav.c_str(), nam.c_str(), mapped, &apiReturn);
+    int result = kExitOk;
+    if (exceptionCode != 0) result = kExitSehBase;
+    else if (apiReturn != kExpectedApiReturn) result = kExitConversionBadSize;
+    else result = observeWorkerOutput(options, mapped);
+
+    UnmapViewOfFile(mapped);
+    CloseHandle(mapping);
+    FreeLibrary(module);
+    return result;
+}
+
+bool valid2048(const fs::path& p) {
+    const CloInfo i = inspectClo(p);
+    return i.exists && i.size == kExpectedCloSize && i.magic == "VTSI"
+        && i.declaredSize == 0x2288 && i.payloadSize == 0x2200 && i.modelField == 0x800;
+}
+
+bool valid1024(const fs::path& p) {
+    const CloInfo i = inspectClo(p);
+    return i.exists && i.size == kExpectedCloSize && i.magic == "VTSI"
+        && i.declaredSize == 0x1288 && i.payloadSize == 0x1200 && i.modelField == 0x400;
+}
+
+} // namespace
+
+RuntimePaths resolveDefaultRuntime() {
+    RuntimePaths r;
+    const fs::path exe = executablePath();
+    if (exe.empty()) return r;
+    const fs::path root = exe.parent_path() / L"runtime" / L"ampero";
+    r.dll = findFirstExisting({root / L"HTUSBTools.dll"});
+    r.stimulus = findFirstExisting({root / L"nam_input_wav.wav"});
+    return r;
+}
+
+bool validateRuntime(const RuntimePaths& r, std::string& error) {
+    std::error_code ec;
+    if (r.dll.empty() || !fs::exists(r.dll, ec) || ec) {
+        error = "Missing runtime\\ampero\\HTUSBTools.dll";
+        return false;
+    }
+    ec.clear();
+    if (r.stimulus.empty() || !fs::exists(r.stimulus, ec) || ec) {
+        error = "Missing runtime\\ampero\\nam_input_wav.wav";
+        return false;
+    }
+    return true;
+}
+
+ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outputDirectory,
+                                  const StatusCallback& status) {
+    ConversionResult result;
+    std::error_code ec;
+    if (!fs::exists(inputNam, ec) || ec || inputNam.extension() != L".nam") {
+        result.exitCode = kExitUsage;
+        result.error = "Select a valid .nam file.";
+        return result;
+    }
+
+    RuntimePaths runtime = resolveDefaultRuntime();
+    if (!validateRuntime(runtime, result.error)) {
+        result.exitCode = kExitRuntimeMissing;
+        return result;
+    }
+
+    fs::path outDir = outputDirectory.empty() ? inputNam.parent_path() : outputDirectory;
+    fs::create_directories(outDir, ec);
+    if (ec) {
+        result.exitCode = kExitCopyFailure;
+        result.error = "Could not create output folder: " + ec.message();
+        return result;
+    }
+
+    const fs::path work = makeWorkDirectory();
+    if (work.empty()) {
+        result.exitCode = kExitStageFailure;
+        result.error = "Could not create temporary work directory.";
+        return result;
+    }
+
+    report(status, L"Preparing conversion...");
+    WorkerOptions worker;
+    worker.dll = runtime.dll;
+    worker.inputWav = work / L"nam_input_wav.wav";
+    worker.outputWav = work / L"outputFile.wav";
+    worker.inputNam = work / L"input.nam";
+    worker.outputClo = work / L"ampero_2048.clo";
+
+    std::string error;
+    if (!copyFileCreatingParents(runtime.stimulus, worker.inputWav, error)
+        || !copyFileCreatingParents(inputNam, worker.inputNam, error)) {
+        result.exitCode = kExitStageFailure;
+        result.error = "Could not stage conversion files: " + error;
+        fs::remove_all(work, ec);
+        return result;
+    }
+
+    SharedBuffer shared;
+    if (!createSharedBuffer(shared, error)) {
+        result.exitCode = kExitMappingFailure;
+        result.error = error;
+        fs::remove_all(work, ec);
+        return result;
+    }
+    worker.mappingName = shared.name;
+
+    report(status, L"Generating Ampero 2048 CLO...");
+    bool capturedValid = false;
+    const int workerExit = launchWorker(worker, shared, capturedValid, error);
+    if (workerExit != kExitOk || !capturedValid || !valid2048(worker.outputClo)) {
+        result.exitCode = workerExit != kExitOk ? workerExit : kExitConversionBadSize;
+        result.error = error.empty() ? "The generated Ampero CLO failed validation." : error;
+        fs::remove_all(work, ec);
+        return result;
+    }
+
+    const std::wstring base = inputNam.stem().wstring();
+    result.ampero2048 = uniquePath(outDir / (base + L"_Ampero_2048.clo"));
+    if (!copyFileCreatingParents(worker.outputClo, result.ampero2048, error)) {
+        result.exitCode = kExitCopyFailure;
+        result.error = error;
+        fs::remove_all(work, ec);
+        return result;
+    }
+
+    report(status, L"Generating GP-200 1024 compact CLO...");
+    result.gp2001024 = uniquePath(outDir / (base + L"_GP200_1024.clo"));
+    if (!makeGp200CompactClo(worker.outputClo, result.gp2001024, error) || !valid1024(result.gp2001024)) {
+        result.exitCode = kExitCopyFailure;
+        result.error = error.empty() ? "The GP-200 compact CLO failed validation." : error;
+        fs::remove_all(work, ec);
+        return result;
+    }
+
+    fs::remove_all(work, ec);
+    result.ok = true;
+    result.exitCode = kExitOk;
+    report(status, L"Done.");
+    return result;
+}
+
+int runWorkerCommandLine(int argc, wchar_t** argv) {
+    WorkerOptions w;
+    if (!parseWorker(argc, argv, w)) return kExitUsage;
+    return runWorker(w);
+}
+
+} // namespace ntc

@@ -1,10 +1,12 @@
-# Runtime files (not distributed)
+# Runtime setup
 
-Place locally supplied Ampero runtime files here:
+Create this exact layout next to `NamToClo.exe`:
 
 ```text
-runtime\ampero\HTUSBTools.dll
-runtime\ampero\nam_input_wav.wav
+runtime\
+  ampero\
+    HTUSBTools.dll
+    nam_input_wav.wav
 ```
 
-Do not commit proprietary DLL/WAV files to the repository.
+The proprietary files are intentionally not committed to this repository.

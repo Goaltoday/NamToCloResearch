@@ -1,28 +1,7 @@
-# Builds
-/build/
-/out/
-/stage/
-/dist/
+build/
+dist/
+release/
 .vs/
-CMakeUserPresets.json
-
-# Vendor runtime: never commit proprietary Hotone files
-/runtime/*
-!/runtime/README.md
-
-# Test/output files
-*.nam
-*.clo
-*.wav
-*.log
-*.dmp
-
-# Python
-__pycache__/
-*.pyc
-
-# OS/editor
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
+*.user
+runtime/ampero/HTUSBTools.dll
+runtime/ampero/nam_input_wav.wav
