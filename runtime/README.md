@@ -1,24 +1,30 @@
-# Runtime files (not distributed)
+# Runtime files (not redistributed)
 
-This repository intentionally does **not** contain Hotone/Ampero proprietary files.
-
-For local experiments, copy your legally obtained files from your own Ampero II installation/package into this directory:
+This repository does not contain proprietary vendor binaries or WAV assets.
+Keep all third-party runtime files below this directory:
 
 ```text
 runtime/
-  HTUSBTools.dll
-  nam_input_wav.wav
+  ampero/
+    HTUSBTools.dll
+    nam_input_wav.wav
+  sonicake/
+    5868USB.dll
+    nam_input_wav.wav
+    mfc140.dll          # if shipped/needed by your Sonicake package
+    mfc140u.dll         # if shipped/needed
+    msvcp140.dll        # if shipped/needed
+    vcruntime140.dll    # if shipped/needed
 ```
 
-The helper script can do this for you:
+With that layout, no vendor paths are needed on the command line.
+
+Simplest full experiment:
 
 ```powershell
-.\scripts\setup-runtime.ps1 -AmperoDir "C:\path\to\Ampero II"
+.\NamToClo.exe --cross-runtime ".\modelo.nam"
 ```
 
-Files observed in the analyzed Ampero II package:
+Output defaults to `cross-runtime-results\`.
 
-- `HTUSBTools.dll`: 3,470,336 bytes; SHA-256 `5ef8ac398ed0c00ca5d350ddfe8b94d8eefca58c5998c658bb50aecaca257626`
-- `nam_input_wav.wav`: 12,348,104 bytes; SHA-256 `9bb6c1b136dfbeb7538a6060499d98c89342b76ec568b76836e36ab98b29aa1a`
-
-A different Ampero II release may legitimately have a different DLL hash. Do not replace or redistribute vendor files through this repository.
+The CLI still supports original application roots with `--ampero-dir` / `--sonicake-dir`, or explicit `--dll` / `--stimulus` paths.

@@ -9,7 +9,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 if ([string]::IsNullOrWhiteSpace($Destination)) {
-    $Destination = Join-Path $PSScriptRoot "..\runtime"
+    $Destination = Join-Path $PSScriptRoot "..\runtime\ampero"
 }
 
 $AmperoDir = (Resolve-Path $AmperoDir).Path
@@ -62,4 +62,4 @@ if ($wavHash -eq $knownWav) {
 }
 
 Write-Host ""
-Write-Host "Next: run the compiled executable with --check-runtime."
+Write-Host "Next: run NamToClo.exe --check-runtime --provider ampero --verbose."

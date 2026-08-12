@@ -94,6 +94,8 @@ NamToCloResearch/
 │  └─ README.md
 ├─ scripts/
 │  ├─ setup-runtime.ps1
+│  ├─ setup-runtime-sonicake.ps1
+│  ├─ run-cross-runtime.ps1
 │  └─ run-probe.ps1
 ├─ src/
 │  ├─ common.cpp
@@ -123,7 +125,7 @@ and extract it anywhere, for example:
 C:\CNamToCloTest
 ```
 
-## 2. Prepare the Ampero runtime
+## 2. Prepare the vendor runtimes
 
 The repository intentionally does **not** redistribute `HTUSBTools.dll` or `nam_input_wav.wav`.
 
@@ -139,16 +141,39 @@ The corrected script resolves its destination inside the script body, so it does
 It creates:
 
 ```text
-runtime\HTUSBTools.dll
-runtime\nam_input_wav.wav
+runtime\ampero\HTUSBTools.dll
+runtime\ampero\nam_input_wav.wav
 ```
 
-If you do not want to change PowerShell policy even for the current process, copy those two files manually into `runtime\`.
+For Sonicake, either copy the files manually into `runtime\sonicake` or run:
+
+```powershell
+.\scripts\setup-runtime-sonicake.ps1 -SonicakeDir "C:\Program Files\Sonicake Manager"
+```
+
+Recommended layout:
+
+```text
+runtime\
+├─ ampero\
+│  ├─ HTUSBTools.dll
+│  └─ nam_input_wav.wav
+└─ sonicake\
+   ├─ 5868USB.dll
+   ├─ nam_input_wav.wav
+   ├─ mfc140.dll
+   ├─ mfc140u.dll
+   ├─ msvcp140.dll
+   └─ vcruntime140.dll
+```
+
+If you do not want to change PowerShell policy even for the current process, copy the files manually into the matching `runtime\ampero` / `runtime\sonicake` subdirectory.
 
 ## 3. Verify the runtime
 
 ```powershell
-.\NamToClo.exe --check-runtime --verbose
+.\NamToClo.exe --check-runtime --provider ampero --verbose
+.\NamToClo.exe --check-runtime --provider sonicake --verbose
 ```
 
 Expected exports include:
@@ -162,7 +187,38 @@ initWithWaveDicPathJson: present
 InitDartApiDL: present
 ```
 
-## 4. Run the v0.2 experiment
+## 4. Run the Ampero/Sonicake cross-runtime experiment
+
+With the recommended `runtime\ampero` and `runtime\sonicake` layout, the full experiment needs only the NAM path:
+
+```powershell
+.\NamToClo.exe --cross-runtime ".\modelo.nam"
+```
+
+Results are written to:
+
+```text
+cross-runtime-results\
+├─ ampero_raw_2048.clo
+├─ sonicake_raw.clo
+├─ ampero_rate_matrix\
+├─ sonicake_rate_matrix\
+└─ README_RESULTS.txt
+```
+
+To include a matching Valeton internal/reference CLO:
+
+```powershell
+.\NamToClo.exe --cross-runtime ".\modelo.nam" --reference ".\valeton-internal-2048.clo"
+```
+
+The PowerShell wrapper remains available and now uses the same runtime defaults:
+
+```powershell
+.\scripts\run-cross-runtime.ps1 -Nam ".\modelo.nam"
+```
+
+## 5. Run the legacy/single-provider experiment
 
 Use the same known NAM that already produced `outputFile.wav` in the previous experiment:
 
@@ -368,3 +424,23 @@ The executable reports:
 - Block B (`0x288`, 1024 `float32`) the same metrics.
 
 This replaces the Python helper for normal Windows testing. The Python tool remains only as an optional research utility.
+
+## v0.7.1: Ampero + Sonicake cross-runtime probe
+
+The CLI can now run the existing `namConvertCloData` experiment against either the Hotone/Ampero `HTUSBTools.dll` or Sonicake Manager's `5868USB.dll` (both must be supplied locally by the researcher).
+
+```powershell
+NamToClo.exe input.nam ampero.clo --provider ampero --ampero-dir "C:\path\to\Ampero II"
+NamToClo.exe input.nam sonicake.clo --provider sonicake --sonicake-dir "C:\path\to\Sonicake Manager"
+```
+
+Sonicake's DLL additionally exports `cloConvertSampleRate`. Static disassembly of the analyzed build shows the ABI `VTSI* cloConvertSampleRate(VTSI*, double)` on Windows x64. The function mutates/resamples both float blocks, updates the sample-rate code, and recalculates the VTSI checksum. It is called in an isolated worker:
+
+```powershell
+NamToClo.exe --clo-rate input.clo 44100 out_44100.clo --sonicake-dir "C:\path\to\Sonicake Manager"
+NamToClo.exe --clo-rate-matrix input.clo .\rate-results --sonicake-dir "C:\path\to\Sonicake Manager"
+```
+
+For the current Valeton/Ampero/Sonicake comparison, `scripts/run-cross-runtime.ps1` generates both raw NAM conversions and 44.1/48/96 kHz matrices. An optional Valeton internal VTSI can also be supplied as `-ReferenceClo`.
+
+The GP-200 binary patch options (`--gp200-size` and `--gp200-rate`) remain specific to the analyzed Ampero DLL layout and are intentionally blocked for Sonicake. `--gp200-compact` remains a serializer-only transformation and can be used after either provider if its input has the expected 2048-coefficient VTSI shape.

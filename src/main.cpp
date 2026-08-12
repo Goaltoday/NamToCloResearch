@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -40,17 +41,26 @@ enum class ConvertMode {
     File,
 };
 
+enum class RuntimeKind {
+    Auto,
+    Ampero,
+    Sonicake,
+};
+
 struct RuntimePaths {
     fs::path dll;
     fs::path stimulus;
+    RuntimeKind kind = RuntimeKind::Auto;
 };
 
 struct ConvertOptions {
     fs::path inputNam;
     fs::path outputClo;
     fs::path amperoDir;
+    fs::path sonicakeDir;
     fs::path dll;
     fs::path stimulus;
+    RuntimeKind runtimeKind = RuntimeKind::Auto;
     int timeoutSeconds = 180;
     bool keepTemp = false;
     bool verbose = false;
@@ -74,6 +84,7 @@ struct WorkerOptions {
     std::uint64_t arg6 = 0;
     bool gp200Size = false;
     bool gp200Rate = false;
+    RuntimeKind runtimeKind = RuntimeKind::Auto;
 };
 
 struct SharedBuffer {
@@ -96,11 +107,26 @@ struct SharedBuffer {
 };
 
 void printBanner() {
-    std::wcout << L"NamToCloResearch " << ntc::kVersion << L" - experimental Ampero NAM->CLO probe\n";
+    std::wcout << L"NamToCloResearch " << ntc::kVersion << L" - experimental Ampero/Sonicake NAM->CLO probe\n";
 }
 
 const char* modeName(ConvertMode mode) {
     return mode == ConvertMode::Data ? "data" : "file";
+}
+
+const char* runtimeKindName(RuntimeKind kind) {
+    switch (kind) {
+        case RuntimeKind::Ampero: return "ampero";
+        case RuntimeKind::Sonicake: return "sonicake";
+        default: return "auto";
+    }
+}
+
+std::optional<RuntimeKind> parseRuntimeKind(const std::wstring& text) {
+    if (text == L"auto") return RuntimeKind::Auto;
+    if (text == L"ampero") return RuntimeKind::Ampero;
+    if (text == L"sonicake") return RuntimeKind::Sonicake;
+    return std::nullopt;
 }
 
 void printHelp() {
@@ -112,6 +138,9 @@ USAGE
   NamToClo.exe --check-runtime [options]
   NamToClo.exe --inspect file.clo
   NamToClo.exe --compare-gp200 candidate.clo reference.clo
+  NamToClo.exe --clo-rate input.clo 44100|48000|96000 output.clo [runtime options]
+  NamToClo.exe --clo-rate-matrix input.clo output-dir [runtime options]
+  NamToClo.exe --cross-runtime input.nam [--output-dir dir] [--reference file.clo] [--verbose]
   NamToClo.exe --help
   NamToClo.exe --version
 
@@ -119,8 +148,10 @@ OPTIONS
   --mode data|file       Conversion API to probe. Default: data.
                          data = namConvertCloData + shared 0x2288-byte buffer.
                          file = legacy namConvertClo path used by v0.1.
+  --provider <kind>      auto|ampero|sonicake. Default: auto.
   --ampero-dir <dir>     Root directory of an Ampero II installation/package.
-  --dll <path>           Explicit path to HTUSBTools.dll.
+  --sonicake-dir <dir>   Root directory of a Sonicake Manager installation/package.
+  --dll <path>           Explicit path to HTUSBTools.dll or 5868USB.dll.
   --stimulus <path>      Explicit path to nam_input_wav.wav.
   --timeout <seconds>    Conversion timeout. Default: 180.
   --arg6 <value>         Experimental 6th argument for namConvertCloData.
@@ -138,15 +169,14 @@ RUNTIME DISCOVERY
     1. --dll / --stimulus
     2. --ampero-dir
     3. AMPERO_II_DIR environment variable
-    4. runtime/ next to NamToClo.exe
-    5. runtime/ in the current working directory
+    4. runtime/ampero or runtime/sonicake next to NamToClo.exe
+    5. legacy runtime/ next to NamToClo.exe
 
 IMPORTANT
-  v0.6.1 defaults to namConvertCloData. Static analysis and live testing confirm
-  arg5 can receive a complete VTSI 0x2288-byte buffer. arg6 remains experimental
-  and can now be varied with --arg6. The worker remains isolated so a DLL fast-fail
-  cannot terminate the parent process. The proprietary Hotone DLL and WAV are not
-  distributed by this repository.
+  v0.7.1 can run the same namConvertCloData probe against Hotone HTUSBTools.dll or
+  Sonicake 5868USB.dll. The proprietary DLLs/WAVs are not distributed. The new
+  --clo-rate commands call Sonicake's exported cloConvertSampleRate(VTSI*, double)
+  in an isolated worker and preserve the original input file.
 )HELP";
 }
 
@@ -201,17 +231,40 @@ fs::path findFirstExisting(const std::vector<fs::path>& candidates) {
     return {};
 }
 
-RuntimePaths discoverFromRoot(const fs::path& root) {
+RuntimePaths discoverFromRoot(const fs::path& root, RuntimeKind preferred = RuntimeKind::Auto) {
     RuntimePaths paths;
-    if (root.empty()) {
-        return paths;
-    }
+    if (root.empty()) return paths;
 
-    paths.dll = findFirstExisting({
-        root / L"assets" / L"HTUSBTools.dll",
-        root / L"data" / L"flutter_assets" / L"assets" / L"HTUSBTools.dll",
-        root / L"HTUSBTools.dll",
-    });
+    auto findAmperoDll = [&]() {
+        return findFirstExisting({
+            root / L"assets" / L"HTUSBTools.dll",
+            root / L"data" / L"flutter_assets" / L"assets" / L"HTUSBTools.dll",
+            root / L"HTUSBTools.dll",
+        });
+    };
+    auto findSonicakeDll = [&]() {
+        return findFirstExisting({
+            root / L"assets" / L"5868USB.dll",
+            root / L"data" / L"flutter_assets" / L"assets" / L"5868USB.dll",
+            root / L"5868USB.dll",
+        });
+    };
+
+    if (preferred == RuntimeKind::Sonicake) {
+        paths.dll = findSonicakeDll();
+        if (!paths.dll.empty()) paths.kind = RuntimeKind::Sonicake;
+    } else if (preferred == RuntimeKind::Ampero) {
+        paths.dll = findAmperoDll();
+        if (!paths.dll.empty()) paths.kind = RuntimeKind::Ampero;
+    } else {
+        paths.dll = findAmperoDll();
+        if (!paths.dll.empty()) {
+            paths.kind = RuntimeKind::Ampero;
+        } else {
+            paths.dll = findSonicakeDll();
+            if (!paths.dll.empty()) paths.kind = RuntimeKind::Sonicake;
+        }
+    }
 
     paths.stimulus = findFirstExisting({
         root / L"data" / L"flutter_assets" / L"assets" / L"wavs" / L"nam_input_wav.wav",
@@ -222,62 +275,80 @@ RuntimePaths discoverFromRoot(const fs::path& root) {
     return paths;
 }
 
+RuntimeKind detectRuntimeKindFromDll(const fs::path& dll) {
+    std::wstring name = dll.filename().wstring();
+    std::transform(name.begin(), name.end(), name.begin(), ::towlower);
+    if (name == L"htusbtools.dll") return RuntimeKind::Ampero;
+    if (name == L"5868usb.dll") return RuntimeKind::Sonicake;
+    return RuntimeKind::Auto;
+}
+
 RuntimePaths resolveRuntime(const ConvertOptions& options) {
-    RuntimePaths result{options.dll, options.stimulus};
+    RuntimePaths result{options.dll, options.stimulus, options.runtimeKind};
+    if (!result.dll.empty() && result.kind == RuntimeKind::Auto) {
+        result.kind = detectRuntimeKindFromDll(result.dll);
+    }
 
     auto normalize = [](fs::path& path) {
-        if (path.empty()) {
-            return;
-        }
+        if (path.empty()) return;
         std::error_code ec;
         const fs::path absolute = fs::absolute(path, ec);
-        if (!ec) {
-            path = absolute;
-        }
+        if (!ec) path = absolute;
     };
 
     auto fillMissing = [&result](const RuntimePaths& candidate) {
-        if (result.dll.empty()) {
+        if (result.dll.empty() && !candidate.dll.empty()) {
             result.dll = candidate.dll;
+            if (result.kind == RuntimeKind::Auto) result.kind = candidate.kind;
         }
-        if (result.stimulus.empty()) {
-            result.stimulus = candidate.stimulus;
-        }
+        if (result.stimulus.empty()) result.stimulus = candidate.stimulus;
     };
 
-    if (!options.amperoDir.empty()) {
-        fillMissing(discoverFromRoot(options.amperoDir));
-    }
+    if (options.runtimeKind != RuntimeKind::Sonicake && !options.amperoDir.empty())
+        fillMissing(discoverFromRoot(options.amperoDir, RuntimeKind::Ampero));
+    if (options.runtimeKind != RuntimeKind::Ampero && !options.sonicakeDir.empty())
+        fillMissing(discoverFromRoot(options.sonicakeDir, RuntimeKind::Sonicake));
 
     if (result.dll.empty() || result.stimulus.empty()) {
         wchar_t buffer[32768]{};
         constexpr DWORD bufferCount = static_cast<DWORD>(sizeof(buffer) / sizeof(buffer[0]));
-        const DWORD len = GetEnvironmentVariableW(L"AMPERO_II_DIR", buffer, bufferCount);
-        if (len > 0 && len < bufferCount) {
-            fillMissing(discoverFromRoot(fs::path(buffer)));
+        if (options.runtimeKind != RuntimeKind::Sonicake) {
+            const DWORD len = GetEnvironmentVariableW(L"AMPERO_II_DIR", buffer, bufferCount);
+            if (len > 0 && len < bufferCount) fillMissing(discoverFromRoot(fs::path(buffer), RuntimeKind::Ampero));
+        }
+        if (options.runtimeKind != RuntimeKind::Ampero && (result.dll.empty() || result.stimulus.empty())) {
+            const DWORD len = GetEnvironmentVariableW(L"SONICAKE_MANAGER_DIR", buffer, bufferCount);
+            if (len > 0 && len < bufferCount) fillMissing(discoverFromRoot(fs::path(buffer), RuntimeKind::Sonicake));
         }
     }
 
     if (result.dll.empty() || result.stimulus.empty()) {
         const fs::path exe = ntc::executablePath();
         if (!exe.empty()) {
-            fillMissing(discoverFromRoot(exe.parent_path() / L"runtime"));
+            if (options.runtimeKind == RuntimeKind::Sonicake)
+                fillMissing(discoverFromRoot(exe.parent_path() / L"runtime" / L"sonicake", RuntimeKind::Sonicake));
+            else if (options.runtimeKind == RuntimeKind::Ampero)
+                fillMissing(discoverFromRoot(exe.parent_path() / L"runtime" / L"ampero", RuntimeKind::Ampero));
+            else {
+                fillMissing(discoverFromRoot(exe.parent_path() / L"runtime" / L"ampero", RuntimeKind::Ampero));
+                if (result.dll.empty() || result.stimulus.empty())
+                    fillMissing(discoverFromRoot(exe.parent_path() / L"runtime" / L"sonicake", RuntimeKind::Sonicake));
+                if (result.dll.empty() || result.stimulus.empty())
+                    fillMissing(discoverFromRoot(exe.parent_path() / L"runtime", RuntimeKind::Auto));
+            }
         }
-    }
-
-    if (result.dll.empty() || result.stimulus.empty()) {
-        fillMissing(discoverFromRoot(fs::current_path() / L"runtime"));
     }
 
     normalize(result.dll);
     normalize(result.stimulus);
+    if (result.kind == RuntimeKind::Auto && !result.dll.empty()) result.kind = detectRuntimeKindFromDll(result.dll);
     return result;
 }
 
 bool validateRuntimeFiles(const RuntimePaths& paths) {
     std::error_code ec;
     if (paths.dll.empty() || !fs::exists(paths.dll, ec) || ec) {
-        std::cerr << "ERROR: HTUSBTools.dll was not found. Use --ampero-dir or --dll.\n";
+        std::cerr << "ERROR: runtime DLL was not found. Use --ampero-dir, --sonicake-dir or --dll.\n";
         return false;
     }
     ec.clear();
@@ -293,6 +364,7 @@ int checkRuntime(const RuntimePaths& paths, bool verbose) {
         return kExitRuntimeMissing;
     }
 
+    std::cout << "Provider: " << runtimeKindName(paths.kind) << "\n";
     std::cout << "DLL:      " << ntc::pathToUtf8(paths.dll) << "\n";
     std::cout << "Stimulus: " << ntc::pathToUtf8(paths.stimulus) << "\n";
 
@@ -318,6 +390,7 @@ int checkRuntime(const RuntimePaths& paths, bool verbose) {
     const char* exports[] = {
         "namConvertClo",
         "namConvertCloData",
+        "cloConvertSampleRate",
         "getNormalWav",
         "initWithWaveDicPath",
         "initWithWaveDicPathJson",
@@ -372,6 +445,7 @@ bool stageInputFiles(const RuntimePaths& runtime,
     worker.arg6 = options.arg6;
     worker.gp200Size = options.gp200Size;
     worker.gp200Rate = options.gp200Rate;
+    worker.runtimeKind = runtime.kind;
 
     if (!ntc::copyFileCreatingParents(runtime.stimulus, worker.inputWav, error)) {
         return false;
@@ -413,6 +487,7 @@ std::wstring makeWorkerCommandLine(const WorkerOptions& worker) {
         L"--worker",
         L"--mode", worker.mode == ConvertMode::Data ? L"data" : L"file",
         L"--dll", worker.dll.wstring(),
+        L"--provider", ntc::fromUtf8(runtimeKindName(worker.runtimeKind)),
         L"--input-wav", worker.inputWav.wstring(),
         L"--output-wav", worker.outputWav.wstring(),
         L"--nam", worker.inputNam.wstring(),
@@ -699,7 +774,7 @@ bool patchBytes(HMODULE module, std::uintptr_t rva,
     DWORD ignored = 0;
     VirtualProtect(target, size, oldProtect, &ignored);
     if (verbose) {
-        std::cout << "[worker] " << label << " patch applied at HTUSBTools.dll+0x"
+        std::cout << "[worker] " << label << " patch applied at runtime DLL+0x"
                   << std::hex << std::uppercase << rva << std::dec << "\n";
     }
     return true;
@@ -748,6 +823,11 @@ int runWorker(const WorkerOptions& options) {
         std::cerr << "[worker] ERROR LoadLibraryExW: " << ntc::win32ErrorMessage(err)
                   << " (" << ntc::hex32(err) << ")\n";
         return kExitDllLoad;
+    }
+
+    if ((options.gp200Size || options.gp200Rate) && options.runtimeKind == RuntimeKind::Sonicake) {
+        std::cerr << "[worker] ERROR GP-200 binary patches are specific to the analyzed HTUSBTools.dll build and are disabled for Sonicake.\n";
+        return kExitStageFailure;
     }
 
     if (options.gp200Size && !patchGp200ModelLength(module, options.verbose)) {
@@ -863,6 +943,7 @@ int convert(const ConvertOptions& options) {
     }
 
     std::cout << "Mode:             " << modeName(options.mode) << "\n";
+    std::cout << "Provider:         " << runtimeKindName(runtime.kind) << "\n";
     std::cout << "Runtime DLL:      " << ntc::pathToUtf8(runtime.dll) << "\n";
     std::cout << "Runtime stimulus: " << ntc::pathToUtf8(runtime.stimulus) << "\n";
     if (options.mode == ConvertMode::Data) {
@@ -957,6 +1038,10 @@ bool parseWorkerOptions(int argc, wchar_t** argv, WorkerOptions& out) {
             out.mode = *mode;
         } else if (arg == L"--dll" && hasValue(i, argc)) {
             out.dll = argv[++i];
+        } else if (arg == L"--provider" && hasValue(i, argc)) {
+            const auto kind = parseRuntimeKind(argv[++i]);
+            if (!kind) return false;
+            out.runtimeKind = *kind;
         } else if (arg == L"--input-wav" && hasValue(i, argc)) {
             out.inputWav = argv[++i];
         } else if (arg == L"--output-wav" && hasValue(i, argc)) {
@@ -1001,8 +1086,18 @@ bool parseCommonRuntimeOption(const std::wstring& arg, int& i, int argc, wchar_t
         out.mode = *mode;
         return true;
     }
+    if (arg == L"--provider" && hasValue(i, argc)) {
+        const auto kind = parseRuntimeKind(argv[++i]);
+        if (!kind) return false;
+        out.runtimeKind = *kind;
+        return true;
+    }
     if (arg == L"--ampero-dir" && hasValue(i, argc)) {
         out.amperoDir = argv[++i];
+        return true;
+    }
+    if (arg == L"--sonicake-dir" && hasValue(i, argc)) {
+        out.sonicakeDir = argv[++i];
         return true;
     }
     if (arg == L"--dll" && hasValue(i, argc)) {
@@ -1051,6 +1146,345 @@ bool parseCommonRuntimeOption(const std::wstring& arg, int& i, int argc, wchar_t
         return true;
     }
     return false;
+}
+
+
+using CloConvertSampleRateFn = void*(__cdecl*)(void*, double);
+
+bool isSupportedRate(double rate) {
+    return rate == 44100.0 || rate == 48000.0 || rate == 96000.0;
+}
+
+std::optional<double> parseSampleRate(const std::wstring& text) {
+    try {
+        std::size_t used = 0;
+        const double value = std::stod(text, &used);
+        if (used != text.size() || !isSupportedRate(value)) return std::nullopt;
+        return value;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+int runCloRateWorker(const fs::path& dll, const fs::path& input, double rate,
+                     const fs::path& output, bool verbose) {
+    std::vector<std::uint8_t> data;
+    std::string error;
+    if (!ntc::readFileBytes(input, data, error)) {
+        std::cerr << "[rate-worker] ERROR: " << error << "\n";
+        return kExitUsage;
+    }
+    if (data.size() != ntc::kExpectedCloSize || std::memcmp(data.data(), "VTSI", 4) != 0) {
+        std::cerr << "[rate-worker] ERROR input must be a 0x2288-byte VTSI file.\n";
+        return kExitConversionBadSize;
+    }
+
+    HMODULE module = LoadLibraryExW(dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!module) {
+        const DWORD err = GetLastError();
+        std::cerr << "[rate-worker] ERROR LoadLibraryExW: " << ntc::win32ErrorMessage(err)
+                  << " (" << ntc::hex32(err) << ")\n";
+        return kExitDllLoad;
+    }
+    auto fn = reinterpret_cast<CloConvertSampleRateFn>(GetProcAddress(module, "cloConvertSampleRate"));
+    if (!fn) {
+        std::cerr << "[rate-worker] ERROR export cloConvertSampleRate not found. "
+                     "The analyzed Ampero HTUSBTools.dll does not export it; use Sonicake 5868USB.dll.\n";
+        return kExitExportMissing;
+    }
+
+    void* returned = nullptr;
+    DWORD exceptionCode = 0;
+#if defined(_MSC_VER)
+    __try {
+        returned = fn(data.data(), rate);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        exceptionCode = GetExceptionCode();
+    }
+#else
+    returned = fn(data.data(), rate);
+#endif
+    if (exceptionCode != 0) {
+        std::cerr << "[rate-worker] ERROR API raised SEH exception " << ntc::hex32(exceptionCode) << "\n";
+        return kExitSehBase;
+    }
+    if (!returned) {
+        std::cerr << "[rate-worker] ERROR cloConvertSampleRate returned null.\n";
+        return kExitStageFailure;
+    }
+
+    const auto* outData = static_cast<const std::uint8_t*>(returned);
+    if (std::memcmp(outData, "VTSI", 4) != 0) {
+        std::cerr << "[rate-worker] ERROR returned buffer is not VTSI.\n";
+        return kExitStageFailure;
+    }
+    if (!ntc::writeFileBytes(output, outData, static_cast<std::size_t>(ntc::kExpectedCloSize), error)) {
+        std::cerr << "[rate-worker] ERROR: " << error << "\n";
+        return kExitCopyFailure;
+    }
+    if (verbose) {
+        std::cout << "[rate-worker] input=" << ntc::pathToUtf8(input)
+                  << " rate=" << static_cast<int>(rate)
+                  << " returned=0x" << std::hex << std::uppercase
+                  << reinterpret_cast<std::uintptr_t>(returned) << std::dec << "\n";
+    }
+    ntc::printCloInfo(output, ntc::inspectClo(output, 32));
+    return kExitOk;
+}
+
+int launchCloRateWorker(const fs::path& dll, const fs::path& input, double rate,
+                        const fs::path& output, bool verbose) {
+    const fs::path exe = ntc::executablePath();
+    std::vector<std::wstring> args = {
+        exe.wstring(), L"--rate-worker",
+        L"--dll", dll.wstring(),
+        L"--input", input.wstring(),
+        L"--rate", std::to_wstring(static_cast<int>(rate)),
+        L"--output", output.wstring(),
+    };
+    if (verbose) args.push_back(L"--verbose");
+    std::wstring command;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        if (i) command.push_back(L' ');
+        command += ntc::quoteWindowsArg(args[i]);
+    }
+    std::vector<wchar_t> mutableCommand(command.begin(), command.end());
+    mutableCommand.push_back(L'\0');
+    STARTUPINFOW si{}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, 0,
+                        nullptr, nullptr, &si, &pi)) {
+        const DWORD err = GetLastError();
+        std::cerr << "ERROR launching rate worker: " << ntc::win32ErrorMessage(err) << "\n";
+        return kExitWorkerLaunch;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exitCode = 0;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    if (exitCode >= 0xC0000000u) {
+        std::cerr << "ERROR rate worker terminated with Windows exception " << ntc::hex32(exitCode) << "\n";
+        return static_cast<int>(exitCode & 0x7FFFFFFFu);
+    }
+    return static_cast<int>(exitCode);
+}
+
+bool parseRateRuntimeOptions(int start, int argc, wchar_t** argv, ConvertOptions& options) {
+    for (int i = start; i < argc; ++i) {
+        const std::wstring arg = argv[i];
+        if (arg == L"--provider" && hasValue(i, argc)) {
+            const auto k = parseRuntimeKind(argv[++i]);
+            if (!k) return false;
+            options.runtimeKind = *k;
+        } else if (arg == L"--sonicake-dir" && hasValue(i, argc)) {
+            options.sonicakeDir = argv[++i];
+        } else if (arg == L"--ampero-dir" && hasValue(i, argc)) {
+            options.amperoDir = argv[++i];
+        } else if (arg == L"--dll" && hasValue(i, argc)) {
+            options.dll = argv[++i];
+        } else if (arg == L"--stimulus" && hasValue(i, argc)) {
+            options.stimulus = argv[++i];
+        } else if (arg == L"--verbose") {
+            options.verbose = true;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+int commandCloRate(int argc, wchar_t** argv) {
+    if (argc < 5) {
+        std::cerr << "Usage: NamToClo.exe --clo-rate input.clo 44100|48000|96000 output.clo [--sonicake-dir dir|--dll 5868USB.dll]\n";
+        return kExitUsage;
+    }
+    const fs::path input = argv[2];
+    const auto rate = parseSampleRate(argv[3]);
+    const fs::path output = argv[4];
+    if (!rate) {
+        std::cerr << "ERROR supported rates are 44100, 48000 and 96000.\n";
+        return kExitUsage;
+    }
+    ConvertOptions options;
+    options.runtimeKind = RuntimeKind::Sonicake;
+    if (!parseRateRuntimeOptions(5, argc, argv, options)) {
+        std::cerr << "ERROR invalid runtime option for --clo-rate.\n";
+        return kExitUsage;
+    }
+    RuntimePaths runtime = resolveRuntime(options);
+    if (runtime.dll.empty()) {
+        std::cerr << "ERROR Sonicake 5868USB.dll not found. Use --sonicake-dir or --dll.\n";
+        return kExitRuntimeMissing;
+    }
+    std::cout << "CLO sample-rate conversion via: " << ntc::pathToUtf8(runtime.dll) << "\n";
+    return launchCloRateWorker(runtime.dll, input, *rate, output, options.verbose);
+}
+
+int commandCloRateMatrix(int argc, wchar_t** argv) {
+    if (argc < 4) {
+        std::cerr << "Usage: NamToClo.exe --clo-rate-matrix input.clo output-dir [--sonicake-dir dir|--dll 5868USB.dll]\n";
+        return kExitUsage;
+    }
+    const fs::path input = argv[2];
+    const fs::path outDir = argv[3];
+    ConvertOptions options;
+    options.runtimeKind = RuntimeKind::Sonicake;
+    if (!parseRateRuntimeOptions(4, argc, argv, options)) {
+        std::cerr << "ERROR invalid runtime option for --clo-rate-matrix.\n";
+        return kExitUsage;
+    }
+    RuntimePaths runtime = resolveRuntime(options);
+    if (runtime.dll.empty()) {
+        std::cerr << "ERROR Sonicake 5868USB.dll not found. Use --sonicake-dir or --dll.\n";
+        return kExitRuntimeMissing;
+    }
+    std::error_code ec;
+    fs::create_directories(outDir, ec);
+    if (ec) {
+        std::cerr << "ERROR cannot create output directory: " << ec.message() << "\n";
+        return kExitCopyFailure;
+    }
+    const std::wstring stem = input.stem().wstring();
+    for (int rate : {44100, 48000, 96000}) {
+        const fs::path output = outDir / (stem + L"_sr" + std::to_wstring(rate) + L".clo");
+        std::cout << "\n=== target " << rate << " Hz ===\n";
+        const int rc = launchCloRateWorker(runtime.dll, input, static_cast<double>(rate), output, options.verbose);
+        if (rc != kExitOk) return rc;
+    }
+    std::cout << "\nSUCCESS rate matrix written to: " << ntc::pathToUtf8(outDir) << "\n";
+    return kExitOk;
+}
+
+
+int commandCrossRuntime(int argc, wchar_t** argv) {
+    if (argc < 3) {
+        std::cerr << "Usage: NamToClo.exe --cross-runtime input.nam [--output-dir dir] [--reference file.clo] [--verbose]\n";
+        return kExitUsage;
+    }
+
+    const fs::path inputNam = argv[2];
+    fs::path outputDir = L"cross-runtime-results";
+    fs::path referenceClo;
+    bool verbose = false;
+
+    for (int i = 3; i < argc; ++i) {
+        const std::wstring arg = argv[i];
+        if (arg == L"--output-dir" && hasValue(i, argc)) {
+            outputDir = argv[++i];
+        } else if (arg == L"--reference" && hasValue(i, argc)) {
+            referenceClo = argv[++i];
+        } else if (arg == L"--verbose") {
+            verbose = true;
+        } else {
+            std::cerr << "ERROR invalid option for --cross-runtime: " << ntc::toUtf8(arg) << "\n";
+            return kExitUsage;
+        }
+    }
+
+    std::error_code ec;
+    fs::create_directories(outputDir, ec);
+    if (ec) {
+        std::cerr << "ERROR cannot create output directory: " << ec.message() << "\n";
+        return kExitCopyFailure;
+    }
+
+    const fs::path ampero = outputDir / L"ampero_raw_2048.clo";
+    const fs::path sonicake = outputDir / L"sonicake_raw.clo";
+
+    ConvertOptions amperoOptions;
+    amperoOptions.inputNam = inputNam;
+    amperoOptions.outputClo = ampero;
+    amperoOptions.runtimeKind = RuntimeKind::Ampero;
+    amperoOptions.mode = ConvertMode::Data;
+    amperoOptions.verbose = verbose;
+
+    std::cout << "\n=== Ampero namConvertCloData ===\n";
+    int rc = convert(amperoOptions);
+    if (rc != kExitOk) {
+        std::cerr << "ERROR Ampero conversion failed: " << rc << "\n";
+        return rc;
+    }
+
+    ConvertOptions sonicakeOptions;
+    sonicakeOptions.inputNam = inputNam;
+    sonicakeOptions.outputClo = sonicake;
+    sonicakeOptions.runtimeKind = RuntimeKind::Sonicake;
+    sonicakeOptions.mode = ConvertMode::Data;
+    sonicakeOptions.verbose = verbose;
+
+    std::cout << "\n=== Sonicake namConvertCloData ===\n";
+    rc = convert(sonicakeOptions);
+    if (rc != kExitOk) {
+        std::cerr << "ERROR Sonicake conversion failed: " << rc << "\n";
+        return rc;
+    }
+
+    ConvertOptions rateOptions;
+    rateOptions.runtimeKind = RuntimeKind::Sonicake;
+    rateOptions.verbose = verbose;
+    const RuntimePaths sonicakeRuntime = resolveRuntime(rateOptions);
+    if (sonicakeRuntime.dll.empty()) {
+        std::cerr << "ERROR Sonicake 5868USB.dll was not found in runtime/sonicake.\n";
+        return kExitRuntimeMissing;
+    }
+
+    auto runMatrix = [&](const fs::path& source, const fs::path& dir) -> int {
+        std::error_code matrixEc;
+        fs::create_directories(dir, matrixEc);
+        if (matrixEc) {
+            std::cerr << "ERROR cannot create matrix directory: " << matrixEc.message() << "\n";
+            return kExitCopyFailure;
+        }
+        const std::wstring stem = source.stem().wstring();
+        for (int rate : {44100, 48000, 96000}) {
+            const fs::path output = dir / (stem + L"_sr" + std::to_wstring(rate) + L".clo");
+            const int matrixRc = launchCloRateWorker(sonicakeRuntime.dll, source,
+                                                     static_cast<double>(rate), output, verbose);
+            if (matrixRc != kExitOk) return matrixRc;
+        }
+        return kExitOk;
+    };
+
+    std::cout << "\n=== Sonicake cloConvertSampleRate matrix: Ampero raw ===\n";
+    rc = runMatrix(ampero, outputDir / L"ampero_rate_matrix");
+    if (rc != kExitOk) return rc;
+
+    std::cout << "\n=== Sonicake cloConvertSampleRate matrix: Sonicake raw ===\n";
+    rc = runMatrix(sonicake, outputDir / L"sonicake_rate_matrix");
+    if (rc != kExitOk) return rc;
+
+    if (!referenceClo.empty()) {
+        if (!fs::exists(referenceClo, ec) || ec) {
+            std::cerr << "ERROR reference CLO not found: " << ntc::pathToUtf8(referenceClo) << "\n";
+            return kExitUsage;
+        }
+        std::cout << "\n=== Sonicake cloConvertSampleRate matrix: reference ===\n";
+        rc = runMatrix(referenceClo, outputDir / L"reference_rate_matrix");
+        if (rc != kExitOk) return rc;
+    }
+
+    std::ofstream note(outputDir / L"README_RESULTS.txt", std::ios::binary);
+    if (note) {
+        note << "NamToCloResearch cross-runtime results\r\n"
+             << "Input NAM: " << ntc::pathToUtf8(inputNam) << "\r\n"
+             << "Ampero: ampero_raw_2048.clo\r\n"
+             << "Sonicake: sonicake_raw.clo\r\n"
+             << "Rate matrices: 44100 / 48000 / 96000 via Sonicake cloConvertSampleRate\r\n";
+        if (!referenceClo.empty()) note << "Reference: " << ntc::pathToUtf8(referenceClo) << "\r\n";
+    }
+
+    std::cout << "\n=== Raw comparison: Ampero vs Sonicake ===\n";
+    ntc::printGp200Compare(ampero, sonicake, ntc::compareGp200Clo(ampero, sonicake));
+    if (!referenceClo.empty()) {
+        std::cout << "\n=== Raw comparison: Ampero vs reference ===\n";
+        ntc::printGp200Compare(ampero, referenceClo, ntc::compareGp200Clo(ampero, referenceClo));
+        std::cout << "\n=== Raw comparison: Sonicake vs reference ===\n";
+        ntc::printGp200Compare(sonicake, referenceClo, ntc::compareGp200Clo(sonicake, referenceClo));
+    }
+
+    std::cout << "\nSUCCESS cross-runtime results written to: " << ntc::pathToUtf8(outputDir) << "\n";
+    return kExitOk;
 }
 
 int commandCheckRuntime(int argc, wchar_t** argv) {
@@ -1122,6 +1556,34 @@ int wmain(int argc, wchar_t** argv) {
         const ntc::CloInfo info = ntc::inspectClo(path, 32);
         ntc::printCloInfo(path, info);
         return info.exists ? kExitOk : kExitUsage;
+    }
+    if (first == L"--clo-rate") {
+        return commandCloRate(argc, argv);
+    }
+    if (first == L"--clo-rate-matrix") {
+        return commandCloRateMatrix(argc, argv);
+    }
+    if (first == L"--rate-worker") {
+        fs::path dll, input, output;
+        double rate = 0.0;
+        bool verbose = false;
+        for (int i = 2; i < argc; ++i) {
+            const std::wstring arg = argv[i];
+            if (arg == L"--dll" && hasValue(i, argc)) dll = argv[++i];
+            else if (arg == L"--input" && hasValue(i, argc)) input = argv[++i];
+            else if (arg == L"--output" && hasValue(i, argc)) output = argv[++i];
+            else if (arg == L"--rate" && hasValue(i, argc)) {
+                const auto parsed = parseSampleRate(argv[++i]);
+                if (!parsed) return kExitUsage;
+                rate = *parsed;
+            } else if (arg == L"--verbose") verbose = true;
+            else return kExitUsage;
+        }
+        if (dll.empty() || input.empty() || output.empty() || rate == 0.0) return kExitUsage;
+        return runCloRateWorker(dll, input, rate, output, verbose);
+    }
+    if (first == L"--cross-runtime") {
+        return commandCrossRuntime(argc, argv);
     }
     if (first == L"--check-runtime") {
         return commandCheckRuntime(argc, argv);
