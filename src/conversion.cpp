@@ -306,8 +306,13 @@ RuntimePaths resolveDefaultRuntime() {
     const fs::path exe = executablePath();
     if (exe.empty()) return r;
     const fs::path root = exe.parent_path() / L"runtime" / L"ampero";
-    r.dll = findFirstExisting({root / L"HTUSBTools.dll"});
-    r.stimulus = findFirstExisting({root / L"nam_input_wav.wav"});
+    // Keep expected paths even when optional Sound Clone resources are absent.
+    // This lets mode-specific validation return precise error messages.
+    r.dll = root / L"HTUSBTools.dll";
+    r.legacyStimulus = root / L"nam_input_wav.wav";
+    r.cleanStimulus = root / L"inputSignalCleanSW.wav";
+    r.distStimulus = root / L"inputSignalDistSW.wav";
+    r.presetAudio = root / L"PresetAudio.wav";
     return r;
 }
 
@@ -318,7 +323,7 @@ bool validateRuntime(const RuntimePaths& r, std::string& error) {
         return false;
     }
     ec.clear();
-    if (r.stimulus.empty() || !fs::exists(r.stimulus, ec) || ec) {
+    if (r.legacyStimulus.empty() || !fs::exists(r.legacyStimulus, ec) || ec) {
         error = "Missing runtime\\ampero\\nam_input_wav.wav";
         return false;
     }
@@ -326,7 +331,7 @@ bool validateRuntime(const RuntimePaths& r, std::string& error) {
 }
 
 ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outputDirectory,
-                                  const StatusCallback& status) {
+                                  const StimulusMode stimulusMode, const StatusCallback& status) {
     ConversionResult result;
     result.inputNam = inputNam;
     std::error_code ec;
@@ -368,7 +373,9 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     worker.outputClo = work / L"ampero_2048.clo";
 
     std::string error;
-    if (!copyFileCreatingParents(runtime.stimulus, worker.inputWav, error)
+    const std::wstring stimulusStatus = std::wstring(L"Preparing stimulus: ") + stimulusModeDisplayName(stimulusMode);
+    report(status, stimulusStatus.c_str());
+    if (!buildStimulus(runtime, stimulusMode, worker.inputWav, error)
         || !copyFileCreatingParents(inputNam, worker.inputNam, error)) {
         result.exitCode = kExitStageFailure;
         result.error = "Could not stage conversion files: " + error;
@@ -422,7 +429,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
 
 
 BatchConversionResult convertNamFolder(const fs::path& inputDirectory, const fs::path& outputDirectory,
-                                       const StatusCallback& status) {
+                                       const StimulusMode stimulusMode, const StatusCallback& status) {
     BatchConversionResult batch;
     std::error_code ec;
     if (!fs::exists(inputDirectory, ec) || ec || !fs::is_directory(inputDirectory, ec)) {
@@ -454,7 +461,7 @@ BatchConversionResult convertNamFolder(const fs::path& inputDirectory, const fs:
             status(L"[" + std::to_wstring(i + 1) + L"/" + std::to_wstring(namFiles.size()) +
                    L"] " + nam.filename().wstring());
         }
-        auto item = convertNamToBoth(nam, outDir, [&, i, nam](const std::wstring& text) {
+        auto item = convertNamToBoth(nam, outDir, stimulusMode, [&, i, nam](const std::wstring& text) {
             if (status) {
                 status(L"[" + std::to_wstring(i + 1) + L"/" + std::to_wstring(namFiles.size()) +
                        L"] " + nam.filename().wstring() + L" - " + text);

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "stimulus.hpp"
+
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -11,7 +13,10 @@ namespace fs = std::filesystem;
 
 struct RuntimePaths {
     fs::path dll;
-    fs::path stimulus;
+    fs::path legacyStimulus;
+    fs::path cleanStimulus;
+    fs::path distStimulus;
+    fs::path presetAudio;
 };
 
 struct ConversionResult {
@@ -34,12 +39,16 @@ struct BatchConversionResult {
 using StatusCallback = std::function<void(const std::wstring&)>;
 
 RuntimePaths resolveDefaultRuntime();
+// Base runtime validation deliberately checks only the files required by
+// Legacy mode so v1.1 installations remain usable unchanged.
 bool validateRuntime(const RuntimePaths& runtime, std::string& error);
 ConversionResult convertNamToBoth(const fs::path& inputNam,
                                   const fs::path& outputDirectory,
+                                  StimulusMode stimulusMode = StimulusMode::Legacy,
                                   const StatusCallback& status = {});
 BatchConversionResult convertNamFolder(const fs::path& inputDirectory,
                                        const fs::path& outputDirectory,
+                                       StimulusMode stimulusMode = StimulusMode::Legacy,
                                        const StatusCallback& status = {});
 
 // Internal worker entry used by the same GUI executable in a hidden child process.

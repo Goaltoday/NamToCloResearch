@@ -27,6 +27,7 @@ constexpr int IDC_BROWSE_OUTPUT = 105;
 constexpr int IDC_CONVERT = 106;
 constexpr int IDC_OPEN_OUTPUT = 107;
 constexpr int IDC_STATUS = 108;
+constexpr int IDC_STIMULUS_MODE = 109;
 
 enum class InputMode { None, SingleNam, Folder };
 
@@ -38,6 +39,7 @@ HWND gBrowseButton = nullptr;
 HWND gConvertButton = nullptr;
 HWND gOpenButton = nullptr;
 HWND gStatus = nullptr;
+HWND gStimulusCombo = nullptr;
 HFONT gFont = nullptr;
 bool gBusy = false;
 InputMode gInputMode = InputMode::None;
@@ -59,6 +61,7 @@ void enableControls(bool enable) {
     EnableWindow(gBrowseButton, enable);
     EnableWindow(gConvertButton, enable);
     EnableWindow(gOpenButton, enable);
+    EnableWindow(gStimulusCombo, enable);
 }
 
 bool isNamFile(const fs::path& p) {
@@ -150,6 +153,18 @@ void chooseOutput(HWND owner) {
     if (chooseFolder(owner, L"Select output folder", current, selected)) setText(gOutEdit, selected.wstring());
 }
 
+
+ntc::StimulusMode selectedStimulusMode() {
+    const LRESULT index = SendMessageW(gStimulusCombo, CB_GETCURSEL, 0, 0);
+    switch (index) {
+    case 1: return ntc::StimulusMode::CleanMono;
+    case 2: return ntc::StimulusMode::CleanDualMono;
+    case 3: return ntc::StimulusMode::DistMono;
+    case 4: return ntc::StimulusMode::DistDualMono;
+    default: return ntc::StimulusMode::Legacy;
+    }
+}
+
 void postStatus(HWND hwnd, const std::wstring& s) {
     auto* copy = new std::wstring(s);
     PostMessageW(hwnd, WM_APP_STATUS, 0, reinterpret_cast<LPARAM>(copy));
@@ -168,19 +183,21 @@ void startConversion(HWND hwnd) {
         return;
     }
 
+    const ntc::StimulusMode stimulusMode = selectedStimulusMode();
+
     enableControls(false);
     if (gInputMode == InputMode::SingleNam) {
         setText(gStatus, L"Starting conversion...");
-        std::thread([hwnd, input, out] {
+        std::thread([hwnd, input, out, stimulusMode] {
             auto result = std::make_unique<ntc::ConversionResult>(
-                ntc::convertNamToBoth(input, out, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
+                ntc::convertNamToBoth(input, out, stimulusMode, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
             PostMessageW(hwnd, WM_APP_DONE_SINGLE, 0, reinterpret_cast<LPARAM>(result.release()));
         }).detach();
     } else {
         setText(gStatus, L"Starting batch conversion...");
-        std::thread([hwnd, input, out] {
+        std::thread([hwnd, input, out, stimulusMode] {
             auto result = std::make_unique<ntc::BatchConversionResult>(
-                ntc::convertNamFolder(input, out, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
+                ntc::convertNamFolder(input, out, stimulusMode, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
             PostMessageW(hwnd, WM_APP_DONE_BATCH, 0, reinterpret_cast<LPARAM>(result.release()));
         }).detach();
     }
@@ -231,25 +248,40 @@ void createUi(HWND hwnd) {
                                   582, 215, 135, 34, hwnd, reinterpret_cast<HMENU>(IDC_BROWSE_OUTPUT), nullptr, nullptr);
     applyFont(gBrowseButton);
 
+    HWND stimulusLabel = CreateWindowW(L"STATIC", L"Stimulus test mode", WS_CHILD | WS_VISIBLE,
+                                       30, 272, 180, 24, hwnd, nullptr, nullptr, nullptr);
+    applyFont(stimulusLabel);
+    gStimulusCombo = CreateWindowW(L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+        30, 298, 440, 180, hwnd, reinterpret_cast<HMENU>(IDC_STIMULUS_MODE), nullptr, nullptr);
+    applyFont(gStimulusCombo);
+    for (const auto mode : { ntc::StimulusMode::Legacy, ntc::StimulusMode::CleanMono,
+                             ntc::StimulusMode::CleanDualMono, ntc::StimulusMode::DistMono,
+                             ntc::StimulusMode::DistDualMono }) {
+        SendMessageW(gStimulusCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(ntc::stimulusModeDisplayName(mode)));
+    }
+    SendMessageW(gStimulusCombo, CB_SETCURSEL, 0, 0);
+
     HWND info = CreateWindowW(L"STATIC",
-        L"For each NAM: <name>_Ampero_2048.clo + <name>_GP200_1024.clo\r\n"
-        L"Batch mode processes .nam files in the selected folder (non-recursive).",
-        WS_CHILD | WS_VISIBLE, 30, 273, 690, 55, hwnd, nullptr, nullptr, nullptr);
+        L"Legacy preserves the v1.1 stimulus byte-for-byte. Clean/Dist modes are experimental.\r\n"
+        L"For each NAM: <name>_Ampero_2048.clo + <name>_GP200_1024.clo",
+        WS_CHILD | WS_VISIBLE, 30, 345, 690, 55, hwnd, nullptr, nullptr, nullptr);
     applyFont(info);
 
     gConvertButton = CreateWindowW(L"BUTTON", L"Convert", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                                   30, 350, 150, 42, hwnd, reinterpret_cast<HMENU>(IDC_CONVERT), nullptr, nullptr);
+                                   30, 418, 150, 42, hwnd, reinterpret_cast<HMENU>(IDC_CONVERT), nullptr, nullptr);
     applyFont(gConvertButton);
     gOpenButton = CreateWindowW(L"BUTTON", L"Open output folder", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                194, 350, 180, 42, hwnd, reinterpret_cast<HMENU>(IDC_OPEN_OUTPUT), nullptr, nullptr);
+                                194, 418, 180, 42, hwnd, reinterpret_cast<HMENU>(IDC_OPEN_OUTPUT), nullptr, nullptr);
     applyFont(gOpenButton);
 
     gStatus = CreateWindowW(L"STATIC", L"Checking runtime...", WS_CHILD | WS_VISIBLE,
-                            30, 420, 690, 28, hwnd, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
+                            30, 488, 690, 42, hwnd, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
-    HWND ver = CreateWindowW(L"STATIC", L"Version 1.1.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
-                             580, 462, 137, 22, hwnd, nullptr, nullptr, nullptr);
+    HWND ver = CreateWindowW(L"STATIC", L"Version 1.2.0 experimental", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                             500, 548, 217, 22, hwnd, nullptr, nullptr, nullptr);
     applyFont(ver);
     DragAcceptFiles(hwnd, TRUE);
 }
@@ -368,9 +400,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.1",
+    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.2 Experimental",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 765, 540,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 765, 625,
                                 nullptr, nullptr, instance, nullptr);
     if (!hwnd) { CoUninitialize(); return 1; }
     ShowWindow(hwnd, show);

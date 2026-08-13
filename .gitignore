@@ -5,3 +5,6 @@ release/
 *.user
 runtime/ampero/HTUSBTools.dll
 runtime/ampero/nam_input_wav.wav
+runtime/ampero/inputSignalCleanSW.wav
+runtime/ampero/inputSignalDistSW.wav
+runtime/ampero/PresetAudio.wav
