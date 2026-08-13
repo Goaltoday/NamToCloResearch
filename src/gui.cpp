@@ -28,6 +28,9 @@ constexpr int IDC_CONVERT = 106;
 constexpr int IDC_OPEN_OUTPUT = 107;
 constexpr int IDC_STATUS = 108;
 constexpr int IDC_STIMULUS_MODE = 109;
+constexpr int IDC_TAIL_MODE = 110;
+constexpr int IDC_RECORDED_PATH = 111;
+constexpr int IDC_BROWSE_RECORDED = 112;
 
 enum class InputMode { None, SingleNam, Folder };
 
@@ -40,6 +43,9 @@ HWND gConvertButton = nullptr;
 HWND gOpenButton = nullptr;
 HWND gStatus = nullptr;
 HWND gStimulusCombo = nullptr;
+HWND gTailCombo = nullptr;
+HWND gRecordedEdit = nullptr;
+HWND gBrowseRecordedButton = nullptr;
 HFONT gFont = nullptr;
 bool gBusy = false;
 InputMode gInputMode = InputMode::None;
@@ -62,6 +68,11 @@ void enableControls(bool enable) {
     EnableWindow(gConvertButton, enable);
     EnableWindow(gOpenButton, enable);
     EnableWindow(gStimulusCombo, enable);
+    EnableWindow(gTailCombo, enable);
+    if (!enable) {
+        EnableWindow(gRecordedEdit, FALSE);
+        EnableWindow(gBrowseRecordedButton, FALSE);
+    }
 }
 
 bool isNamFile(const fs::path& p) {
@@ -163,6 +174,36 @@ ntc::StimulusMode selectedStimulusMode() {
     }
 }
 
+
+void chooseRecordedAudio(HWND owner) {
+    wchar_t file[32768]{};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"WAV audio (*.wav)\0*.wav\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(file));
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrDefExt = L"wav";
+    if (GetOpenFileNameW(&ofn)) setText(gRecordedEdit, fs::path(file).wstring());
+}
+
+ntc::TailMode selectedTailMode() {
+    return SendMessageW(gTailCombo, CB_GETCURSEL, 0, 0) == 1
+        ? ntc::TailMode::RecordedAudio
+        : ntc::TailMode::PresetAudio;
+}
+
+void updateTailControls() {
+    if (gBusy) return;
+    const ntc::StimulusMode mode = selectedStimulusMode();
+    const bool soundCloneMode = mode != ntc::StimulusMode::Legacy;
+    EnableWindow(gTailCombo, soundCloneMode ? TRUE : FALSE);
+    const bool recorded = soundCloneMode && selectedTailMode() == ntc::TailMode::RecordedAudio;
+    EnableWindow(gRecordedEdit, recorded ? TRUE : FALSE);
+    EnableWindow(gBrowseRecordedButton, recorded ? TRUE : FALSE);
+}
+
 void postStatus(HWND hwnd, const std::wstring& s) {
     auto* copy = new std::wstring(s);
     PostMessageW(hwnd, WM_APP_STATUS, 0, reinterpret_cast<LPARAM>(copy));
@@ -181,21 +222,30 @@ void startConversion(HWND hwnd) {
         return;
     }
 
-    const ntc::StimulusMode stimulusMode = selectedStimulusMode();
+    ntc::StimulusConfig stimulus;
+    stimulus.mode = selectedStimulusMode();
+    stimulus.tailMode = selectedTailMode();
+    stimulus.recordedAudio = fs::path(getText(gRecordedEdit));
+    if (stimulus.mode != ntc::StimulusMode::Legacy
+        && stimulus.tailMode == ntc::TailMode::RecordedAudio
+        && stimulus.recordedAudio.empty()) {
+        MessageBoxW(hwnd, L"Select a Recorded Audio WAV file. It will be trimmed or zero-padded to 20 seconds automatically.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
+        return;
+    }
 
     enableControls(false);
     if (gInputMode == InputMode::SingleNam) {
         setText(gStatus, L"Starting conversion...");
-        std::thread([hwnd, input, out, stimulusMode] {
+        std::thread([hwnd, input, out, stimulus] {
             auto result = std::make_unique<ntc::ConversionResult>(
-                ntc::convertNamToBoth(input, out, stimulusMode, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
+                ntc::convertNamToBoth(input, out, stimulus, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
             PostMessageW(hwnd, WM_APP_DONE_SINGLE, 0, reinterpret_cast<LPARAM>(result.release()));
         }).detach();
     } else {
         setText(gStatus, L"Starting batch conversion...");
-        std::thread([hwnd, input, out, stimulusMode] {
+        std::thread([hwnd, input, out, stimulus] {
             auto result = std::make_unique<ntc::BatchConversionResult>(
-                ntc::convertNamFolder(input, out, stimulusMode, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
+                ntc::convertNamFolder(input, out, stimulus, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
             PostMessageW(hwnd, WM_APP_DONE_BATCH, 0, reinterpret_cast<LPARAM>(result.release()));
         }).detach();
     }
@@ -260,26 +310,51 @@ void createUi(HWND hwnd) {
     }
     SendMessageW(gStimulusCombo, CB_SETCURSEL, 0, 0);
 
+    HWND tailLabel = CreateWindowW(L"STATIC", L"Tail / Reamp source", WS_CHILD | WS_VISIBLE,
+                                   30, 346, 220, 24, hwnd, nullptr, nullptr, nullptr);
+    applyFont(tailLabel);
+    gTailCombo = CreateWindowW(L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+        30, 372, 440, 120, hwnd, reinterpret_cast<HMENU>(IDC_TAIL_MODE), nullptr, nullptr);
+    applyFont(gTailCombo);
+    for (const auto mode : { ntc::TailMode::PresetAudio, ntc::TailMode::RecordedAudio }) {
+        SendMessageW(gTailCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(ntc::tailModeDisplayName(mode)));
+    }
+    SendMessageW(gTailCombo, CB_SETCURSEL, 0, 0);
+
+    HWND recordedLabel = CreateWindowW(L"STATIC", L"Recorded WAV (adapted automatically to 20.000 s)",
+                                       WS_CHILD | WS_VISIBLE, 30, 420, 390, 24, hwnd, nullptr, nullptr, nullptr);
+    applyFont(recordedLabel);
+    gRecordedEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+        30, 446, 540, 32, hwnd, reinterpret_cast<HMENU>(IDC_RECORDED_PATH), nullptr, nullptr);
+    applyFont(gRecordedEdit);
+    gBrowseRecordedButton = CreateWindowW(L"BUTTON", L"Browse WAV...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        582, 445, 135, 34, hwnd, reinterpret_cast<HMENU>(IDC_BROWSE_RECORDED), nullptr, nullptr);
+    applyFont(gBrowseRecordedButton);
+
     HWND info = CreateWindowW(L"STATIC",
-        L"Original preserves the validated v1.1 stimulus byte-for-byte. Clean/Dist reproduce the Sound Clone stimulus structure.\r\n"
-        L"For each NAM: <name>_Ampero_2048.clo + <name>_GP200_1024.clo",
-        WS_CHILD | WS_VISIBLE, 30, 345, 690, 55, hwnd, nullptr, nullptr, nullptr);
+        L"Recorded Audio is converted automatically to mono PCM16 44.1 kHz and to exactly 20 s (trim/pad); its level is not normalized.\r\n"
+        L"Original / Legacy ignores the Tail source and preserves the validated v1.1 stimulus byte-for-byte.",
+        WS_CHILD | WS_VISIBLE, 30, 495, 690, 52, hwnd, nullptr, nullptr, nullptr);
     applyFont(info);
 
     gConvertButton = CreateWindowW(L"BUTTON", L"Convert", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                                   30, 418, 150, 42, hwnd, reinterpret_cast<HMENU>(IDC_CONVERT), nullptr, nullptr);
+                                   30, 565, 150, 42, hwnd, reinterpret_cast<HMENU>(IDC_CONVERT), nullptr, nullptr);
     applyFont(gConvertButton);
     gOpenButton = CreateWindowW(L"BUTTON", L"Open output folder", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                194, 418, 180, 42, hwnd, reinterpret_cast<HMENU>(IDC_OPEN_OUTPUT), nullptr, nullptr);
+                                194, 565, 180, 42, hwnd, reinterpret_cast<HMENU>(IDC_OPEN_OUTPUT), nullptr, nullptr);
     applyFont(gOpenButton);
 
     gStatus = CreateWindowW(L"STATIC", L"Checking runtime...", WS_CHILD | WS_VISIBLE,
-                            30, 488, 690, 42, hwnd, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
+                            30, 630, 690, 42, hwnd, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
-    HWND ver = CreateWindowW(L"STATIC", L"Version 1.3.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
-                             500, 548, 217, 22, hwnd, nullptr, nullptr, nullptr);
+    HWND ver = CreateWindowW(L"STATIC", L"Version 1.4.1", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                             500, 690, 217, 22, hwnd, nullptr, nullptr, nullptr);
     applyFont(ver);
+    updateTailControls();
     DragAcceptFiles(hwnd, TRUE);
 }
 
@@ -298,6 +373,13 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_LOAD_FILE: chooseNam(hwnd); return 0;
         case IDC_LOAD_FOLDER: chooseNamFolder(hwnd); return 0;
         case IDC_BROWSE_OUTPUT: chooseOutput(hwnd); return 0;
+        case IDC_BROWSE_RECORDED: chooseRecordedAudio(hwnd); return 0;
+        case IDC_STIMULUS_MODE:
+            if (HIWORD(wParam) == CBN_SELCHANGE) updateTailControls();
+            return 0;
+        case IDC_TAIL_MODE:
+            if (HIWORD(wParam) == CBN_SELCHANGE) updateTailControls();
+            return 0;
         case IDC_CONVERT: startConversion(hwnd); return 0;
         case IDC_OPEN_OUTPUT: openOutputFolder(hwnd); return 0;
         default: break;
@@ -323,6 +405,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_APP_DONE_SINGLE: {
         std::unique_ptr<ntc::ConversionResult> r(reinterpret_cast<ntc::ConversionResult*>(lParam));
         enableControls(true);
+        updateTailControls();
         if (r && r->ok) {
             std::wstring msg = L"Conversion complete.\r\n\r\nAmpero 2048:\r\n" + r->ampero2048.wstring()
                              + L"\r\n\r\nGP-200 1024:\r\n" + r->gp2001024.wstring();
@@ -338,6 +421,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_APP_DONE_BATCH: {
         std::unique_ptr<ntc::BatchConversionResult> r(reinterpret_cast<ntc::BatchConversionResult*>(lParam));
         enableControls(true);
+        updateTailControls();
         if (!r || r->total == 0) {
             setText(gStatus, L"Batch conversion did not find any NAM files.");
             MessageBoxW(hwnd, L"No .nam files were found in the selected folder.", L"Batch conversion", MB_ICONINFORMATION | MB_OK);
@@ -397,9 +481,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.2 Experimental",
+    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.4",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 765, 625,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 765, 770,
                                 nullptr, nullptr, instance, nullptr);
     if (!hwnd) { CoUninitialize(); return 1; }
     ShowWindow(hwnd, show);

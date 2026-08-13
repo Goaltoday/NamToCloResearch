@@ -331,7 +331,7 @@ bool validateRuntime(const RuntimePaths& r, std::string& error) {
 }
 
 ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outputDirectory,
-                                  const StimulusMode stimulusMode, const StatusCallback& status) {
+                                  const StimulusConfig stimulus, const StatusCallback& status) {
     ConversionResult result;
     result.inputNam = inputNam;
     std::error_code ec;
@@ -373,9 +373,9 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     worker.outputClo = work / L"ampero_2048.clo";
 
     std::string error;
-    const std::wstring stimulusStatus = std::wstring(L"Preparing stimulus: ") + stimulusModeDisplayName(stimulusMode);
+    const std::wstring stimulusStatus = std::wstring(L"Preparing stimulus: ") + stimulusModeDisplayName(stimulus.mode);
     report(status, stimulusStatus.c_str());
-    if (!buildStimulus(runtime, stimulusMode, worker.inputWav, error)
+    if (!buildStimulus(runtime, stimulus, worker.inputWav, error)
         || !copyFileCreatingParents(inputNam, worker.inputNam, error)) {
         result.exitCode = kExitStageFailure;
         result.error = "Could not stage conversion files: " + error;
@@ -429,7 +429,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
 
 
 BatchConversionResult convertNamFolder(const fs::path& inputDirectory, const fs::path& outputDirectory,
-                                       const StimulusMode stimulusMode, const StatusCallback& status) {
+                                       const StimulusConfig stimulus, const StatusCallback& status) {
     BatchConversionResult batch;
     std::error_code ec;
     if (!fs::exists(inputDirectory, ec) || ec || !fs::is_directory(inputDirectory, ec)) {
@@ -461,7 +461,7 @@ BatchConversionResult convertNamFolder(const fs::path& inputDirectory, const fs:
             status(L"[" + std::to_wstring(i + 1) + L"/" + std::to_wstring(namFiles.size()) +
                    L"] " + nam.filename().wstring());
         }
-        auto item = convertNamToBoth(nam, outDir, stimulusMode, [&, i, nam](const std::wstring& text) {
+        auto item = convertNamToBoth(nam, outDir, stimulus, [&, i, nam](const std::wstring& text) {
             if (status) {
                 status(L"[" + std::to_wstring(i + 1) + L"/" + std::to_wstring(namFiles.size()) +
                        L"] " + nam.filename().wstring() + L" - " + text);

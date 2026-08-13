@@ -44,11 +44,11 @@ RuntimePaths resolveDefaultRuntime();
 bool validateRuntime(const RuntimePaths& runtime, std::string& error);
 ConversionResult convertNamToBoth(const fs::path& inputNam,
                                   const fs::path& outputDirectory,
-                                  StimulusMode stimulusMode = StimulusMode::Legacy,
+                                  StimulusConfig stimulus = {},
                                   const StatusCallback& status = {});
 BatchConversionResult convertNamFolder(const fs::path& inputDirectory,
                                        const fs::path& outputDirectory,
-                                       StimulusMode stimulusMode = StimulusMode::Legacy,
+                                       StimulusConfig stimulus = {},
                                        const StatusCallback& status = {});
 
 // Internal worker entry used by the same GUI executable in a hidden child process.
