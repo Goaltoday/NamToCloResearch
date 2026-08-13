@@ -1,5 +1,6 @@
 #include "conversion.hpp"
 #include "common.hpp"
+#include "resource.h"
 
 #include <windows.h>
 #include <commdlg.h>
@@ -85,6 +86,8 @@ HBRUSH gCardBrush = nullptr;
 HBRUSH gFooterBrush = nullptr;
 HBRUSH gInfoBrush = nullptr;
 HBRUSH gStatusBrush = nullptr;
+HBITMAP gLogoBitmap = nullptr;
+HBITMAP gSectionIcons[5] = { nullptr, nullptr, nullptr, nullptr, nullptr };
 UiMetrics gUi{};
 bool gBusy = false;
 InputMode gInputMode = InputMode::None;
@@ -97,7 +100,13 @@ std::wstring getText(HWND h) {
     return s;
 }
 
-void setText(HWND h, const std::wstring& s) { SetWindowTextW(h, s.c_str()); }
+void setText(HWND h, const std::wstring& s) {
+    SetWindowTextW(h, s.c_str());
+    if (h == gStatus || h == gVersion) {
+        InvalidateRect(h, nullptr, TRUE);
+        UpdateWindow(h);
+    }
+}
 
 HMENU controlId(int id) { return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)); }
 
@@ -106,16 +115,16 @@ void safeDeleteObject(HGDIOBJ obj) {
 }
 
 void createResources() {
-    gFont = CreateFontW(-17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    gFont = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                         DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    gTitleFont = CreateFontW(-42, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    gTitleFont = CreateFontW(-40, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                              DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    gSubtitleFont = CreateFontW(-18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    gSubtitleFont = CreateFontW(-17, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                 DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    gSectionFont = CreateFontW(-18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+    gSectionFont = CreateFontW(-17, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                                DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
@@ -124,6 +133,14 @@ void createResources() {
     gFooterBrush = CreateSolidBrush(kColorFooter);
     gInfoBrush = CreateSolidBrush(kColorInfo);
     gStatusBrush = CreateSolidBrush(kColorStatusOk);
+
+    HINSTANCE instance = GetModuleHandleW(nullptr);
+    gLogoBitmap = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_LOGO));
+    gSectionIcons[0] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_INPUT));
+    gSectionIcons[1] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_OUTPUT));
+    gSectionIcons[2] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_STIMULUS));
+    gSectionIcons[3] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_REAMP));
+    gSectionIcons[4] = LoadBitmapW(instance, MAKEINTRESOURCEW(IDB_ICON_RECORDED));
 }
 
 void destroyResources() {
@@ -136,6 +153,12 @@ void destroyResources() {
     safeDeleteObject(gFooterBrush);
     safeDeleteObject(gInfoBrush);
     safeDeleteObject(gStatusBrush);
+    safeDeleteObject(gLogoBitmap);
+    gLogoBitmap = nullptr;
+    for (auto& icon : gSectionIcons) {
+        safeDeleteObject(icon);
+        icon = nullptr;
+    }
     gFont = gTitleFont = gSubtitleFont = gSectionFont = nullptr;
     gWindowBrush = gCardBrush = gFooterBrush = gInfoBrush = gStatusBrush = nullptr;
 }
@@ -347,28 +370,22 @@ void moveCtrl(HWND h, int x, int y, int w, int hgt) {
 }
 
 void computeLayout(int clientW, int clientH) {
-    const int margin = 28;
-    const int gap = 8;
-    const int sectionH1 = 88;
-    const int sectionH2 = 84;
-    const int sectionH3 = 80;
-    const int sectionH4 = 80;
-    const int sectionH5 = 122;
-    const int buttonH = 42;
-    const int footerH = 40;
+    const int margin = 24;
+    const int gap = 7;
+    const int footerH = 38;
 
-    gUi.header = RECT{ margin, 16, clientW - margin, 126 };
+    gUi.header = RECT{ margin, 12, clientW - margin, 98 };
 
-    int y = 118;
-    gUi.sectionInput = RECT{ margin, y, clientW - margin, y + sectionH1 }; y += sectionH1 + gap;
-    gUi.sectionOutput = RECT{ margin, y, clientW - margin, y + sectionH2 }; y += sectionH2 + gap;
-    gUi.sectionStimulus = RECT{ margin, y, clientW - margin, y + sectionH3 }; y += sectionH3 + gap;
-    gUi.sectionTail = RECT{ margin, y, clientW - margin, y + sectionH4 }; y += sectionH4 + gap;
-    gUi.sectionRecorded = RECT{ margin, y, clientW - margin, y + sectionH5 }; y += sectionH5 + gap;
-    gUi.buttonArea = RECT{ margin, y, clientW - margin, y + buttonH };
+    int y = 100;
+    gUi.sectionInput = RECT{ margin, y, clientW - margin, y + 76 }; y += 76 + gap;
+    gUi.sectionOutput = RECT{ margin, y, clientW - margin, y + 70 }; y += 70 + gap;
+    gUi.sectionStimulus = RECT{ margin, y, clientW - margin, y + 66 }; y += 66 + gap;
+    gUi.sectionTail = RECT{ margin, y, clientW - margin, y + 66 }; y += 66 + gap;
+    gUi.sectionRecorded = RECT{ margin, y, clientW - margin, y + 105 }; y += 105 + gap;
+    gUi.buttonArea = RECT{ margin, y, clientW - margin, y + 38 };
     gUi.footer = RECT{ 0, clientH - footerH, clientW, clientH };
-    gUi.infoBox = RECT{ gUi.sectionRecorded.left + 118, gUi.sectionRecorded.top + 60,
-                        gUi.sectionRecorded.right - 18, gUi.sectionRecorded.top + 96 };
+    gUi.infoBox = RECT{ gUi.sectionRecorded.left + 108, gUi.sectionRecorded.top + 62,
+                        gUi.sectionRecorded.right - 16, gUi.sectionRecorded.top + 96 };
 }
 
 void layoutControls(HWND hwnd) {
@@ -376,47 +393,45 @@ void layoutControls(HWND hwnd) {
     GetClientRect(hwnd, &rc);
     computeLayout(rc.right - rc.left, rc.bottom - rc.top);
 
-    const int contentX = gUi.sectionInput.left + 128;
-    const int mediumButtonW = 132;
-    const int sectionRightInset = 20;
+    const int contentX = gUi.sectionInput.left + 108;
+    const int sectionRightInset = 16;
 
     HWND title = GetDlgItem(hwnd, 1001);
-    if (title) moveCtrl(title, 136, 28, 360, 48);
-    if (gSubtitle) moveCtrl(gSubtitle, 138, 72, rc.right - 180, 24);
+    if (title) moveCtrl(title, 118, 18, 340, 42);
+    if (gSubtitle) moveCtrl(gSubtitle, 120, 62, rc.right - 150, 22);
 
-    // Input section
-    moveCtrl(GetDlgItem(hwnd, 1002), contentX, gUi.sectionInput.top + 10, 240, 22);
-    const int inputEditW = (gUi.sectionInput.right - sectionRightInset) - (contentX + 560);
-    moveCtrl(gInputEdit, contentX, gUi.sectionInput.top + 34, inputEditW, 30);
-    moveCtrl(gLoadFileButton, gUi.sectionInput.right - sectionRightInset - 272, gUi.sectionInput.top + 31, 128, 34);
-    moveCtrl(gLoadFolderButton, gUi.sectionInput.right - sectionRightInset - 136, gUi.sectionInput.top + 31, 128, 34);
+    // Keep a visible gap between each label and its field/control.
+    moveCtrl(GetDlgItem(hwnd, 1002), contentX, gUi.sectionInput.top + 8, 230, 20);
+    const int inputButtonX = gUi.sectionInput.right - sectionRightInset - 244;
+    const int inputEditW = inputButtonX - 12 - contentX;
+    moveCtrl(gInputEdit, contentX, gUi.sectionInput.top + 35, inputEditW, 28);
+    moveCtrl(gLoadFileButton, inputButtonX, gUi.sectionInput.top + 31, 116, 32);
+    moveCtrl(gLoadFolderButton, gUi.sectionInput.right - sectionRightInset - 120, gUi.sectionInput.top + 31, 116, 32);
 
-    // Output section
-    moveCtrl(GetDlgItem(hwnd, 1003), contentX, gUi.sectionOutput.top + 10, 170, 22);
-    const int outputEditW = (gUi.sectionOutput.right - sectionRightInset) - (contentX + 184);
-    moveCtrl(gOutEdit, contentX, gUi.sectionOutput.top + 32, outputEditW, 30);
-    moveCtrl(gBrowseButton, gUi.sectionOutput.right - sectionRightInset - 116, gUi.sectionOutput.top + 30, 116, 34);
+    moveCtrl(GetDlgItem(hwnd, 1003), contentX, gUi.sectionOutput.top + 7, 170, 20);
+    const int outputEditW = (gUi.sectionOutput.right - sectionRightInset) - (contentX + 142);
+    moveCtrl(gOutEdit, contentX, gUi.sectionOutput.top + 33, outputEditW, 28);
+    moveCtrl(gBrowseButton, gUi.sectionOutput.right - sectionRightInset - 112, gUi.sectionOutput.top + 29, 112, 32);
 
-    // Stimulus section
-    moveCtrl(GetDlgItem(hwnd, 1004), contentX, gUi.sectionStimulus.top + 10, 190, 22);
-    moveCtrl(gStimulusCombo, contentX, gUi.sectionStimulus.top + 30, 520, 200);
+    moveCtrl(GetDlgItem(hwnd, 1004), contentX, gUi.sectionStimulus.top + 6, 190, 20);
+    moveCtrl(gStimulusCombo, contentX, gUi.sectionStimulus.top + 32, 490, 180);
 
-    // Tail section
-    moveCtrl(GetDlgItem(hwnd, 1005), contentX, gUi.sectionTail.top + 10, 210, 22);
-    moveCtrl(gTailCombo, contentX, gUi.sectionTail.top + 30, 520, 200);
+    moveCtrl(GetDlgItem(hwnd, 1005), contentX, gUi.sectionTail.top + 6, 210, 20);
+    moveCtrl(gTailCombo, contentX, gUi.sectionTail.top + 32, 490, 180);
 
-    // Recorded section
-    moveCtrl(GetDlgItem(hwnd, 1006), contentX, gUi.sectionRecorded.top + 8, 430, 22);
-    const int recordedEditW = (gUi.sectionRecorded.right - sectionRightInset) - (contentX + 184);
-    moveCtrl(gRecordedEdit, contentX, gUi.sectionRecorded.top + 28, recordedEditW, 30);
-    moveCtrl(gBrowseRecordedButton, gUi.sectionRecorded.right - sectionRightInset - 128, gUi.sectionRecorded.top + 26, 128, 34);
-    moveCtrl(gInfo, gUi.infoBox.left + 38, gUi.infoBox.top + 5, (gUi.infoBox.right - gUi.infoBox.left) - 46, 26);
+    moveCtrl(GetDlgItem(hwnd, 1006), contentX, gUi.sectionRecorded.top + 6, 430, 20);
+    const int recordedEditW = (gUi.sectionRecorded.right - sectionRightInset) - (contentX + 150);
+    moveCtrl(gRecordedEdit, contentX, gUi.sectionRecorded.top + 32, recordedEditW, 28);
+    moveCtrl(gBrowseRecordedButton, gUi.sectionRecorded.right - sectionRightInset - 124, gUi.sectionRecorded.top + 28, 124, 32);
+    moveCtrl(gInfo, gUi.infoBox.left + 36, gUi.infoBox.top + 5,
+             (gUi.infoBox.right - gUi.infoBox.left) - 44, 24);
 
-    moveCtrl(gConvertButton, gUi.buttonArea.left + 184, gUi.buttonArea.top, 210, 40);
-    moveCtrl(gOpenButton, gUi.buttonArea.left + 410, gUi.buttonArea.top, 210, 40);
+    const int center = rc.right / 2;
+    moveCtrl(gConvertButton, center - 222, gUi.buttonArea.top, 200, 36);
+    moveCtrl(gOpenButton, center - 10, gUi.buttonArea.top, 200, 36);
 
-    moveCtrl(gStatus, 48, gUi.footer.top + 9, rc.right - 230, 22);
-    moveCtrl(gVersion, rc.right - 148, gUi.footer.top + 9, 108, 22);
+    moveCtrl(gStatus, 44, gUi.footer.top + 8, rc.right - 220, 22);
+    moveCtrl(gVersion, rc.right - 140, gUi.footer.top + 8, 110, 22);
 }
 
 void createSectionLabel(HWND hwnd, int id, const wchar_t* text) {
@@ -501,7 +516,7 @@ void createUi(HWND hwnd) {
                             0, 0, 100, 22, hwnd, controlId(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
-    gVersion = CreateWindowW(L"STATIC", L"Version 1.5.1", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+    gVersion = CreateWindowW(L"STATIC", L"Version 1.5.2", WS_CHILD | WS_VISIBLE | SS_RIGHT,
                              0, 0, 110, 22, hwnd, controlId(IDC_VERSION), nullptr, nullptr);
     applyFont(gVersion);
 
@@ -528,83 +543,29 @@ void fillRect(HDC hdc, const RECT& rc, COLORREF fill) {
     DeleteObject(brush);
 }
 
-void drawIconBadge(HDC hdc, const RECT& rc) {
-    drawRoundedRect(hdc, rc, kColorAccent, kColorAccentDark, 22);
-    HPEN pen = CreatePen(PS_SOLID, 6, RGB(255, 255, 255));
-    HGDIOBJ oldPen = SelectObject(hdc, pen);
-    int cx = (rc.left + rc.right) / 2;
-    int cy = (rc.top + rc.bottom) / 2;
-    const int heights[] = { 18, 34, 56, 78, 56, 34, 18 };
-    const int xOffsets[] = { -30, -20, -10, 0, 10, 20, 30 };
-    for (int i = 0; i < 7; ++i) {
-        MoveToEx(hdc, cx + xOffsets[i], cy - heights[i] / 2, nullptr);
-        LineTo(hdc, cx + xOffsets[i], cy + heights[i] / 2);
-    }
-    SelectObject(hdc, oldPen);
-    DeleteObject(pen);
+void drawBitmap(HDC hdc, HBITMAP bitmap, int x, int y) {
+    if (!bitmap) return;
+    BITMAP bm{};
+    GetObjectW(bitmap, sizeof(bm), &bm);
+    HDC mem = CreateCompatibleDC(hdc);
+    HGDIOBJ old = SelectObject(mem, bitmap);
+    BitBlt(hdc, x, y, bm.bmWidth, bm.bmHeight, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, old);
+    DeleteDC(mem);
 }
 
 void drawSectionIcon(HDC hdc, const RECT& rc, int kind) {
-    drawRoundedRect(hdc, rc, RGB(244, 248, 255), RGB(205, 220, 245), 14);
-    HPEN pen = CreatePen(PS_SOLID, 3, kColorAccent);
-    HGDIOBJ oldPen = SelectObject(hdc, pen);
-    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
-    const int cx = (rc.left + rc.right) / 2;
-    const int cy = (rc.top + rc.bottom) / 2;
-    switch (kind) {
-    case 0: // file
-        Rectangle(hdc, cx - 12, cy - 16, cx + 12, cy + 16);
-        MoveToEx(hdc, cx - 7, cy - 7, nullptr); LineTo(hdc, cx + 7, cy - 7);
-        MoveToEx(hdc, cx - 7, cy, nullptr); LineTo(hdc, cx + 7, cy);
-        MoveToEx(hdc, cx - 7, cy + 7, nullptr); LineTo(hdc, cx + 3, cy + 7);
-        break;
-    case 1: // folder
-        MoveToEx(hdc, cx - 14, cy - 9, nullptr);
-        LineTo(hdc, cx - 3, cy - 9);
-        LineTo(hdc, cx + 2, cy - 14);
-        LineTo(hdc, cx + 14, cy - 14);
-        LineTo(hdc, cx + 14, cy + 12);
-        LineTo(hdc, cx - 14, cy + 12);
-        LineTo(hdc, cx - 14, cy - 9);
-        break;
-    case 2: // waveform
-        MoveToEx(hdc, cx - 16, cy, nullptr);
-        LineTo(hdc, cx - 9, cy);
-        LineTo(hdc, cx - 5, cy - 10);
-        LineTo(hdc, cx, cy + 12);
-        LineTo(hdc, cx + 4, cy - 14);
-        LineTo(hdc, cx + 9, cy + 1);
-        LineTo(hdc, cx + 16, cy + 1);
-        break;
-    case 3: { // circular arrows
-        Arc(hdc, cx - 16, cy - 16, cx + 16, cy + 16, cx + 10, cy - 8, cx + 16, cy + 5);
-        Arc(hdc, cx - 16, cy - 16, cx + 16, cy + 16, cx - 10, cy + 8, cx - 16, cy - 5);
-        MoveToEx(hdc, cx + 13, cy + 4, nullptr); LineTo(hdc, cx + 18, cy + 8); LineTo(hdc, cx + 12, cy + 11);
-        MoveToEx(hdc, cx - 13, cy - 4, nullptr); LineTo(hdc, cx - 18, cy - 8); LineTo(hdc, cx - 12, cy - 11);
-        break;
-    }
-    case 4: { // file + note + waveform
-        Rectangle(hdc, cx - 14, cy - 15, cx + 6, cy + 13);
-        MoveToEx(hdc, cx - 1, cy - 15, nullptr); LineTo(hdc, cx + 6, cy - 8); LineTo(hdc, cx + 6, cy - 15);
-        MoveToEx(hdc, cx + 8, cy - 5, nullptr); LineTo(hdc, cx + 8, cy + 8);
-        LineTo(hdc, cx + 16, cy + 6);
-        Ellipse(hdc, cx + 3, cy + 4, cx + 11, cy + 12);
-        MoveToEx(hdc, cx - 10, cy + 6, nullptr);
-        LineTo(hdc, cx - 7, cy + 6);
-        LineTo(hdc, cx - 5, cy + 2);
-        LineTo(hdc, cx - 2, cy + 10);
-        LineTo(hdc, cx + 1, cy + 4);
-        break;
-    }
-    }
-    SelectObject(hdc, oldBrush);
-    SelectObject(hdc, oldPen);
-    DeleteObject(pen);
+    if (kind < 0 || kind >= 5 || !gSectionIcons[kind]) return;
+    BITMAP bm{};
+    GetObjectW(gSectionIcons[kind], sizeof(bm), &bm);
+    const int x = rc.left + ((rc.right - rc.left) - bm.bmWidth) / 2;
+    const int y = rc.top + ((rc.bottom - rc.top) - bm.bmHeight) / 2;
+    drawBitmap(hdc, gSectionIcons[kind], x, y);
 }
 
 void drawSectionCard(HDC hdc, const RECT& rc, int iconKind) {
     drawRoundedRect(hdc, rc, kColorCard, kColorBorder, 18);
-    RECT iconRect{ rc.left + 16, rc.top + 10, rc.left + 70, rc.top + 64 };
+    RECT iconRect{ rc.left + 14, rc.top + 9, rc.left + 66, rc.top + 61 };
     drawSectionIcon(hdc, iconRect, iconKind);
 }
 
@@ -629,8 +590,7 @@ void paintBackground(HWND hwnd, HDC hdc) {
     GetClientRect(hwnd, &rc);
     fillRect(hdc, rc, kColorWindow);
 
-    RECT heroIcon{ 30, 22, 100, 92 };
-    drawIconBadge(hdc, heroIcon);
+    drawBitmap(hdc, gLogoBitmap, 28, 18);
 
     drawSectionCard(hdc, gUi.sectionInput, 0);
     drawSectionCard(hdc, gUi.sectionOutput, 1);
@@ -640,7 +600,7 @@ void paintBackground(HWND hwnd, HDC hdc) {
     drawInfoBox(hdc);
     fillRect(hdc, gUi.footer, kColorFooter);
 
-    RECT statusDot{ 16, gUi.footer.top + 10, 32, gUi.footer.top + 26 };
+    RECT statusDot{ 18, gUi.footer.top + 9, 32, gUi.footer.top + 23 };
     HBRUSH dotBrush = CreateSolidBrush(kColorStatusOk);
     HGDIOBJ oldBrush = SelectObject(hdc, dotBrush);
     HGDIOBJ oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
@@ -716,11 +676,22 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         HDC hdc = reinterpret_cast<HDC>(wParam);
         SetBkMode(hdc, TRANSPARENT);
         HWND ctrl = reinterpret_cast<HWND>(lParam);
-        if (ctrl == gSubtitle || ctrl == gStatus || ctrl == gVersion || ctrl == gInfo || ctrl == GetDlgItem(hwnd, 1001)
+        if (ctrl == gStatus || ctrl == gVersion) {
+            SetBkMode(hdc, OPAQUE);
+            SetBkColor(hdc, kColorFooter);
+            SetTextColor(hdc, kColorSubtleText);
+            return reinterpret_cast<LRESULT>(gFooterBrush);
+        }
+        if (ctrl == gInfo) {
+            SetBkMode(hdc, OPAQUE);
+            SetBkColor(hdc, kColorInfo);
+            SetTextColor(hdc, kColorSubtleText);
+            return reinterpret_cast<LRESULT>(gInfoBrush);
+        }
+        if (ctrl == gSubtitle || ctrl == GetDlgItem(hwnd, 1001)
             || ctrl == GetDlgItem(hwnd, 1002) || ctrl == GetDlgItem(hwnd, 1003) || ctrl == GetDlgItem(hwnd, 1004)
             || ctrl == GetDlgItem(hwnd, 1005) || ctrl == GetDlgItem(hwnd, 1006)) {
-            if (ctrl == gSubtitle || ctrl == gInfo || ctrl == gStatus || ctrl == gVersion) SetTextColor(hdc, kColorSubtleText);
-            else SetTextColor(hdc, kColorText);
+            SetTextColor(hdc, ctrl == gSubtitle ? kColorSubtleText : kColorText);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
         break;
@@ -837,6 +808,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     }
     if (argv) LocalFree(argv);
 
+    // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.
+    SetProcessDPIAware();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -848,9 +821,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = nullptr;
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.5.1",
+    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.5.2",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 1100, 740,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 640,
                                 nullptr, nullptr, instance, nullptr);
     if (!hwnd) { CoUninitialize(); return 1; }
     ShowWindow(hwnd, show);
