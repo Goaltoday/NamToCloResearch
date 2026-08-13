@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -31,8 +32,35 @@ constexpr int IDC_STIMULUS_MODE = 109;
 constexpr int IDC_TAIL_MODE = 110;
 constexpr int IDC_RECORDED_PATH = 111;
 constexpr int IDC_BROWSE_RECORDED = 112;
+constexpr int IDC_VERSION = 113;
+constexpr int IDC_SUBTITLE = 114;
+constexpr int IDC_INFO = 115;
+
+constexpr COLORREF kColorWindow = RGB(246, 248, 252);
+constexpr COLORREF kColorCard = RGB(255, 255, 255);
+constexpr COLORREF kColorBorder = RGB(220, 226, 235);
+constexpr COLORREF kColorAccent = RGB(46, 115, 233);
+constexpr COLORREF kColorAccentDark = RGB(33, 95, 204);
+constexpr COLORREF kColorText = RGB(26, 31, 41);
+constexpr COLORREF kColorSubtleText = RGB(88, 97, 112);
+constexpr COLORREF kColorFooter = RGB(239, 243, 249);
+constexpr COLORREF kColorInfo = RGB(244, 248, 255);
+constexpr COLORREF kColorStatusOk = RGB(73, 193, 89);
+constexpr COLORREF kColorDisabled = RGB(203, 210, 220);
 
 enum class InputMode { None, SingleNam, Folder };
+
+struct UiMetrics {
+    RECT header{};
+    RECT sectionInput{};
+    RECT sectionOutput{};
+    RECT sectionStimulus{};
+    RECT sectionTail{};
+    RECT sectionRecorded{};
+    RECT buttonArea{};
+    RECT footer{};
+    RECT infoBox{};
+};
 
 HWND gInputEdit = nullptr;
 HWND gOutEdit = nullptr;
@@ -46,7 +74,19 @@ HWND gStimulusCombo = nullptr;
 HWND gTailCombo = nullptr;
 HWND gRecordedEdit = nullptr;
 HWND gBrowseRecordedButton = nullptr;
+HWND gVersion = nullptr;
+HWND gInfo = nullptr;
+HWND gSubtitle = nullptr;
 HFONT gFont = nullptr;
+HFONT gTitleFont = nullptr;
+HFONT gSubtitleFont = nullptr;
+HFONT gSectionFont = nullptr;
+HBRUSH gWindowBrush = nullptr;
+HBRUSH gCardBrush = nullptr;
+HBRUSH gFooterBrush = nullptr;
+HBRUSH gInfoBrush = nullptr;
+HBRUSH gStatusBrush = nullptr;
+UiMetrics gUi{};
 bool gBusy = false;
 InputMode gInputMode = InputMode::None;
 
@@ -59,6 +99,51 @@ std::wstring getText(HWND h) {
 }
 
 void setText(HWND h, const std::wstring& s) { SetWindowTextW(h, s.c_str()); }
+
+void safeDeleteObject(HGDIOBJ obj) {
+    if (obj) DeleteObject(obj);
+}
+
+void createResources() {
+    gFont = CreateFontW(-19, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    gTitleFont = CreateFontW(-54, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                             DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    gSubtitleFont = CreateFontW(-22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    gSectionFont = CreateFontW(-21, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                               OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                               DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+    gWindowBrush = CreateSolidBrush(kColorWindow);
+    gCardBrush = CreateSolidBrush(kColorCard);
+    gFooterBrush = CreateSolidBrush(kColorFooter);
+    gInfoBrush = CreateSolidBrush(kColorInfo);
+    gStatusBrush = CreateSolidBrush(kColorStatusOk);
+}
+
+void destroyResources() {
+    safeDeleteObject(gFont);
+    safeDeleteObject(gTitleFont);
+    safeDeleteObject(gSubtitleFont);
+    safeDeleteObject(gSectionFont);
+    safeDeleteObject(gWindowBrush);
+    safeDeleteObject(gCardBrush);
+    safeDeleteObject(gFooterBrush);
+    safeDeleteObject(gInfoBrush);
+    safeDeleteObject(gStatusBrush);
+    gFont = gTitleFont = gSubtitleFont = gSectionFont = nullptr;
+    gWindowBrush = gCardBrush = gFooterBrush = gInfoBrush = gStatusBrush = nullptr;
+}
+
+void applyFont(HWND h, HFONT font) {
+    if (h && font) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+}
+
+void applyFont(HWND h) { applyFont(h, gFont); }
 
 void enableControls(bool enable) {
     gBusy = !enable;
@@ -73,6 +158,7 @@ void enableControls(bool enable) {
         EnableWindow(gRecordedEdit, FALSE);
         EnableWindow(gBrowseRecordedButton, FALSE);
     }
+    InvalidateRect(GetParent(gConvertButton), nullptr, FALSE);
 }
 
 bool isNamFile(const fs::path& p) {
@@ -164,7 +250,6 @@ void chooseOutput(HWND owner) {
     if (chooseFolder(owner, L"Select output folder", current, selected)) setText(gOutEdit, selected.wstring());
 }
 
-
 ntc::StimulusMode selectedStimulusMode() {
     const LRESULT index = SendMessageW(gStimulusCombo, CB_GETCURSEL, 0, 0);
     switch (index) {
@@ -173,7 +258,6 @@ ntc::StimulusMode selectedStimulusMode() {
     default: return ntc::StimulusMode::Legacy;
     }
 }
-
 
 void chooseRecordedAudio(HWND owner) {
     wchar_t file[32768]{};
@@ -229,7 +313,7 @@ void startConversion(HWND hwnd) {
     if (stimulus.mode != ntc::StimulusMode::Legacy
         && stimulus.tailMode == ntc::TailMode::RecordedAudio
         && stimulus.recordedAudio.empty()) {
-        MessageBoxW(hwnd, L"Select a Recorded Audio WAV file. It will be trimmed or zero-padded to 20 seconds automatically.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
+        MessageBoxW(hwnd, L"Select a Recorded Audio WAV file.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
         return;
     }
 
@@ -257,65 +341,135 @@ void openOutputFolder(HWND hwnd) {
     ShellExecuteW(hwnd, L"open", out.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
-void applyFont(HWND h) { if (h && gFont) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(gFont), TRUE); }
+void moveCtrl(HWND h, int x, int y, int w, int hgt) {
+    if (h) MoveWindow(h, x, y, w, hgt, TRUE);
+}
+
+void computeLayout(int clientW, int clientH) {
+    const int margin = 36;
+    const int gap = 14;
+    const int sectionH1 = 122;
+    const int sectionH2 = 106;
+    const int sectionH3 = 108;
+    const int sectionH4 = 108;
+    const int sectionH5 = 206;
+    const int buttonH = 56;
+    const int footerH = 60;
+
+    gUi.header = RECT{ margin, 18, clientW - margin, 154 };
+
+    int y = 166;
+    gUi.sectionInput = RECT{ margin, y, clientW - margin, y + sectionH1 }; y += sectionH1 + gap;
+    gUi.sectionOutput = RECT{ margin, y, clientW - margin, y + sectionH2 }; y += sectionH2 + gap;
+    gUi.sectionStimulus = RECT{ margin, y, clientW - margin, y + sectionH3 }; y += sectionH3 + gap;
+    gUi.sectionTail = RECT{ margin, y, clientW - margin, y + sectionH4 }; y += sectionH4 + gap;
+    gUi.sectionRecorded = RECT{ margin, y, clientW - margin, y + sectionH5 }; y += sectionH5 + gap;
+    gUi.buttonArea = RECT{ margin, y, clientW - margin, y + buttonH };
+    gUi.footer = RECT{ 0, clientH - footerH, clientW, clientH };
+    gUi.infoBox = RECT{ gUi.sectionRecorded.left + 148, gUi.sectionRecorded.top + 118,
+                        gUi.sectionRecorded.right - 22, gUi.sectionRecorded.top + 188 };
+}
+
+void layoutControls(HWND hwnd) {
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    computeLayout(rc.right - rc.left, rc.bottom - rc.top);
+
+    const int contentX = gUi.sectionInput.left + 154;
+    const int wideButtonW = 150;
+    const int mediumButtonW = 132;
+    const int sectionRightInset = 20;
+
+    HWND title = GetDlgItem(hwnd, 1001);
+    if (title) moveCtrl(title, 170, 44, 460, 64);
+    if (gSubtitle) moveCtrl(gSubtitle, 172, 108, rc.right - 220, 28);
+
+    // Input section
+    moveCtrl(GetDlgItem(hwnd, 1002), contentX, gUi.sectionInput.top + 18, 280, 28);
+    const int inputEditW = (gUi.sectionInput.right - sectionRightInset) - (contentX + 652);
+    moveCtrl(gInputEdit, contentX, gUi.sectionInput.top + 56, inputEditW, 36);
+    moveCtrl(gLoadFileButton, gUi.sectionInput.right - sectionRightInset - 316, gUi.sectionInput.top + 54, 148, 40);
+    moveCtrl(gLoadFolderButton, gUi.sectionInput.right - sectionRightInset - 156, gUi.sectionInput.top + 54, 148, 40);
+
+    // Output section
+    moveCtrl(GetDlgItem(hwnd, 1003), contentX, gUi.sectionOutput.top + 16, 200, 28);
+    const int outputEditW = (gUi.sectionOutput.right - sectionRightInset) - (contentX + 184);
+    moveCtrl(gOutEdit, contentX, gUi.sectionOutput.top + 54, outputEditW, 36);
+    moveCtrl(gBrowseButton, gUi.sectionOutput.right - sectionRightInset - mediumButtonW, gUi.sectionOutput.top + 52, mediumButtonW, 40);
+
+    // Stimulus section
+    moveCtrl(GetDlgItem(hwnd, 1004), contentX, gUi.sectionStimulus.top + 16, 220, 28);
+    moveCtrl(gStimulusCombo, contentX, gUi.sectionStimulus.top + 52, 640, 250);
+
+    // Tail section
+    moveCtrl(GetDlgItem(hwnd, 1005), contentX, gUi.sectionTail.top + 16, 240, 28);
+    moveCtrl(gTailCombo, contentX, gUi.sectionTail.top + 52, 640, 250);
+
+    // Recorded section
+    moveCtrl(GetDlgItem(hwnd, 1006), contentX, gUi.sectionRecorded.top + 16, 560, 28);
+    const int recordedEditW = (gUi.sectionRecorded.right - sectionRightInset) - (contentX + 184);
+    moveCtrl(gRecordedEdit, contentX, gUi.sectionRecorded.top + 54, recordedEditW, 36);
+    moveCtrl(gBrowseRecordedButton, gUi.sectionRecorded.right - sectionRightInset - 150, gUi.sectionRecorded.top + 52, 150, 40);
+    moveCtrl(gInfo, gUi.infoBox.left + 48, gUi.infoBox.top + 13, (gUi.infoBox.right - gUi.infoBox.left) - 58, 42);
+
+    moveCtrl(gConvertButton, gUi.buttonArea.left, gUi.buttonArea.top, 286, 56);
+    moveCtrl(gOpenButton, gUi.buttonArea.left + 308, gUi.buttonArea.top, 284, 56);
+
+    moveCtrl(gStatus, 72, gUi.footer.top + 16, rc.right - 320, 28);
+    moveCtrl(gVersion, rc.right - 180, gUi.footer.top + 16, 140, 28);
+}
+
+void createSectionLabel(HWND hwnd, int id, const wchar_t* text) {
+    HWND h = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE,
+                           0, 0, 100, 24, hwnd, reinterpret_cast<HMENU>(id), nullptr, nullptr);
+    applyFont(h, gSectionFont);
+}
 
 void createUi(HWND hwnd) {
-    gFont = CreateFontW(-18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                        DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    createResources();
+
     HWND title = CreateWindowW(L"STATIC", L"NAM to CLO", WS_CHILD | WS_VISIBLE,
-                               28, 22, 440, 34, hwnd, nullptr, nullptr, nullptr);
-    HFONT titleFont = CreateFontW(-28, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                                  OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                  DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    SendMessageW(title, WM_SETFONT, reinterpret_cast<WPARAM>(titleFont), TRUE);
-    SetPropW(hwnd, L"TitleFont", titleFont);
+                               0, 0, 100, 30, hwnd, reinterpret_cast<HMENU>(1001), nullptr, nullptr);
+    applyFont(title, gTitleFont);
 
-    HWND sub = CreateWindowW(L"STATIC", L"Convert one NAM or batch-convert every NAM in a selected folder.",
-                             WS_CHILD | WS_VISIBLE, 30, 60, 680, 24, hwnd, nullptr, nullptr, nullptr);
-    applyFont(sub);
+    gSubtitle = CreateWindowW(L"STATIC", L"Convert one NAM or batch-convert every NAM in a selected folder.",
+                              WS_CHILD | WS_VISIBLE, 0, 0, 100, 20, hwnd,
+                              reinterpret_cast<HMENU>(IDC_SUBTITLE), nullptr, nullptr);
+    applyFont(gSubtitle, gSubtitleFont);
 
-    HWND l1 = CreateWindowW(L"STATIC", L"Input NAM or folder", WS_CHILD | WS_VISIBLE, 30, 106, 190, 24, hwnd, nullptr, nullptr, nullptr);
-    applyFont(l1);
+    createSectionLabel(hwnd, 1002, L"Input NAM or folder");
+    createSectionLabel(hwnd, 1003, L"Output folder");
+    createSectionLabel(hwnd, 1004, L"Stimulus profile");
+    createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
+    createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
+
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-                                 30, 132, 440, 32, hwnd, reinterpret_cast<HMENU>(IDC_INPUT_PATH), nullptr, nullptr);
+                                 0, 0, 100, 30, hwnd, reinterpret_cast<HMENU>(IDC_INPUT_PATH), nullptr, nullptr);
     applyFont(gInputEdit);
-    gLoadFileButton = CreateWindowW(L"BUTTON", L"Load NAM...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                    482, 131, 105, 34, hwnd, reinterpret_cast<HMENU>(IDC_LOAD_FILE), nullptr, nullptr);
-    applyFont(gLoadFileButton);
-    gLoadFolderButton = CreateWindowW(L"BUTTON", L"Load Folder...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                      597, 131, 120, 34, hwnd, reinterpret_cast<HMENU>(IDC_LOAD_FOLDER), nullptr, nullptr);
-    applyFont(gLoadFolderButton);
+    gLoadFileButton = CreateWindowW(L"BUTTON", L"Load NAM...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                    0, 0, 110, 34, hwnd, reinterpret_cast<HMENU>(IDC_LOAD_FILE), nullptr, nullptr);
+    gLoadFolderButton = CreateWindowW(L"BUTTON", L"Load Folder...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                      0, 0, 120, 34, hwnd, reinterpret_cast<HMENU>(IDC_LOAD_FOLDER), nullptr, nullptr);
 
-    HWND l2 = CreateWindowW(L"STATIC", L"Output folder", WS_CHILD | WS_VISIBLE, 30, 190, 150, 24, hwnd, nullptr, nullptr, nullptr);
-    applyFont(l2);
     gOutEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-                               30, 216, 540, 32, hwnd, reinterpret_cast<HMENU>(IDC_OUTPUT_PATH), nullptr, nullptr);
+                               0, 0, 100, 30, hwnd, reinterpret_cast<HMENU>(IDC_OUTPUT_PATH), nullptr, nullptr);
     applyFont(gOutEdit);
-    gBrowseButton = CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                  582, 215, 135, 34, hwnd, reinterpret_cast<HMENU>(IDC_BROWSE_OUTPUT), nullptr, nullptr);
-    applyFont(gBrowseButton);
+    gBrowseButton = CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                  0, 0, 120, 34, hwnd, reinterpret_cast<HMENU>(IDC_BROWSE_OUTPUT), nullptr, nullptr);
 
-    HWND stimulusLabel = CreateWindowW(L"STATIC", L"Stimulus profile", WS_CHILD | WS_VISIBLE,
-                                       30, 272, 180, 24, hwnd, nullptr, nullptr, nullptr);
-    applyFont(stimulusLabel);
     gStimulusCombo = CreateWindowW(L"COMBOBOX", L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-        30, 298, 440, 180, hwnd, reinterpret_cast<HMENU>(IDC_STIMULUS_MODE), nullptr, nullptr);
+                                   WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                   0, 0, 100, 120, hwnd, reinterpret_cast<HMENU>(IDC_STIMULUS_MODE), nullptr, nullptr);
     applyFont(gStimulusCombo);
-    for (const auto mode : { ntc::StimulusMode::Legacy, ntc::StimulusMode::Clean,
-                             ntc::StimulusMode::Dist }) {
+    for (const auto mode : { ntc::StimulusMode::Legacy, ntc::StimulusMode::Clean, ntc::StimulusMode::Dist }) {
         SendMessageW(gStimulusCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(ntc::stimulusModeDisplayName(mode)));
     }
     SendMessageW(gStimulusCombo, CB_SETCURSEL, 0, 0);
 
-    HWND tailLabel = CreateWindowW(L"STATIC", L"Tail / Reamp source", WS_CHILD | WS_VISIBLE,
-                                   30, 346, 220, 24, hwnd, nullptr, nullptr, nullptr);
-    applyFont(tailLabel);
     gTailCombo = CreateWindowW(L"COMBOBOX", L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-        30, 372, 440, 120, hwnd, reinterpret_cast<HMENU>(IDC_TAIL_MODE), nullptr, nullptr);
+                               WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                               0, 0, 100, 120, hwnd, reinterpret_cast<HMENU>(IDC_TAIL_MODE), nullptr, nullptr);
     applyFont(gTailCombo);
     for (const auto mode : { ntc::TailMode::PresetAudio, ntc::TailMode::RecordedAudio }) {
         SendMessageW(gTailCombo, CB_ADDSTRING, 0,
@@ -323,39 +477,218 @@ void createUi(HWND hwnd) {
     }
     SendMessageW(gTailCombo, CB_SETCURSEL, 0, 0);
 
-    HWND recordedLabel = CreateWindowW(L"STATIC", L"Recorded WAV (adapted automatically to 20.000 s)",
-                                       WS_CHILD | WS_VISIBLE, 30, 420, 390, 24, hwnd, nullptr, nullptr, nullptr);
-    applyFont(recordedLabel);
-    gRecordedEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-        30, 446, 540, 32, hwnd, reinterpret_cast<HMENU>(IDC_RECORDED_PATH), nullptr, nullptr);
+    gRecordedEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+                                    0, 0, 100, 30, hwnd, reinterpret_cast<HMENU>(IDC_RECORDED_PATH), nullptr, nullptr);
     applyFont(gRecordedEdit);
-    gBrowseRecordedButton = CreateWindowW(L"BUTTON", L"Browse WAV...", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        582, 445, 135, 34, hwnd, reinterpret_cast<HMENU>(IDC_BROWSE_RECORDED), nullptr, nullptr);
-    applyFont(gBrowseRecordedButton);
+    gBrowseRecordedButton = CreateWindowW(L"BUTTON", L"Browse WAV...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                          0, 0, 120, 34, hwnd, reinterpret_cast<HMENU>(IDC_BROWSE_RECORDED), nullptr, nullptr);
 
-    HWND info = CreateWindowW(L"STATIC",
-        L"Recorded Audio is converted automatically to mono PCM16 44.1 kHz and to exactly 20 s (trim/pad); its level is not normalized.\r\n"
-        L"Original / Legacy ignores the Tail source and preserves the validated v1.1 stimulus byte-for-byte.",
-        WS_CHILD | WS_VISIBLE, 30, 495, 690, 52, hwnd, nullptr, nullptr, nullptr);
-    applyFont(info);
+    gInfo = CreateWindowW(L"STATIC",
+                          L"Recorded Audio is converted automatically to mono PCM16 44.1 kHz and to exactly 20 s (trim/pad);\r\n"
+                          L"its level is not normalized.",
+                          WS_CHILD | WS_VISIBLE,
+                          0, 0, 100, 40, hwnd, reinterpret_cast<HMENU>(IDC_INFO), nullptr, nullptr);
+    applyFont(gInfo);
 
-    gConvertButton = CreateWindowW(L"BUTTON", L"Convert", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-                                   30, 565, 150, 42, hwnd, reinterpret_cast<HMENU>(IDC_CONVERT), nullptr, nullptr);
+    gConvertButton = CreateWindowW(L"BUTTON", L"Convert", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                   0, 0, 150, 42, hwnd, reinterpret_cast<HMENU>(IDC_CONVERT), nullptr, nullptr);
     applyFont(gConvertButton);
-    gOpenButton = CreateWindowW(L"BUTTON", L"Open output folder", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                                194, 565, 180, 42, hwnd, reinterpret_cast<HMENU>(IDC_OPEN_OUTPUT), nullptr, nullptr);
+    gOpenButton = CreateWindowW(L"BUTTON", L"Open output folder", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                0, 0, 180, 42, hwnd, reinterpret_cast<HMENU>(IDC_OPEN_OUTPUT), nullptr, nullptr);
     applyFont(gOpenButton);
 
     gStatus = CreateWindowW(L"STATIC", L"Checking runtime...", WS_CHILD | WS_VISIBLE,
-                            30, 630, 690, 42, hwnd, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
+                            0, 0, 100, 22, hwnd, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
-    HWND ver = CreateWindowW(L"STATIC", L"Version 1.4.1", WS_CHILD | WS_VISIBLE | SS_RIGHT,
-                             500, 690, 217, 22, hwnd, nullptr, nullptr, nullptr);
-    applyFont(ver);
+    gVersion = CreateWindowW(L"STATIC", L"Version 1.5.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+                             0, 0, 110, 22, hwnd, reinterpret_cast<HMENU>(IDC_VERSION), nullptr, nullptr);
+    applyFont(gVersion);
+
+    layoutControls(hwnd);
     updateTailControls();
     DragAcceptFiles(hwnd, TRUE);
+}
+
+void drawRoundedRect(HDC hdc, const RECT& rc, COLORREF fill, COLORREF border, int radius = 18) {
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HBRUSH brush = CreateSolidBrush(fill);
+    HGDIOBJ oldPen = SelectObject(hdc, pen);
+    HGDIOBJ oldBrush = SelectObject(hdc, brush);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
+
+void fillRect(HDC hdc, const RECT& rc, COLORREF fill) {
+    HBRUSH brush = CreateSolidBrush(fill);
+    FillRect(hdc, &rc, brush);
+    DeleteObject(brush);
+}
+
+void drawIconBadge(HDC hdc, const RECT& rc) {
+    drawRoundedRect(hdc, rc, kColorAccent, kColorAccentDark, 22);
+    HPEN pen = CreatePen(PS_SOLID, 6, RGB(255, 255, 255));
+    HGDIOBJ oldPen = SelectObject(hdc, pen);
+    int cx = (rc.left + rc.right) / 2;
+    int cy = (rc.top + rc.bottom) / 2;
+    const int heights[] = { 18, 34, 56, 78, 56, 34, 18 };
+    const int xOffsets[] = { -30, -20, -10, 0, 10, 20, 30 };
+    for (int i = 0; i < 7; ++i) {
+        MoveToEx(hdc, cx + xOffsets[i], cy - heights[i] / 2, nullptr);
+        LineTo(hdc, cx + xOffsets[i], cy + heights[i] / 2);
+    }
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+void drawSectionIcon(HDC hdc, const RECT& rc, int kind) {
+    drawRoundedRect(hdc, rc, RGB(244, 248, 255), RGB(205, 220, 245), 16);
+    HPEN pen = CreatePen(PS_SOLID, 3, kColorAccent);
+    HGDIOBJ oldPen = SelectObject(hdc, pen);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+    const int cx = (rc.left + rc.right) / 2;
+    const int cy = (rc.top + rc.bottom) / 2;
+    switch (kind) {
+    case 0: // file
+        Rectangle(hdc, cx - 14, cy - 18, cx + 14, cy + 18);
+        MoveToEx(hdc, cx - 8, cy - 8, nullptr); LineTo(hdc, cx + 8, cy - 8);
+        MoveToEx(hdc, cx - 8, cy, nullptr); LineTo(hdc, cx + 8, cy);
+        MoveToEx(hdc, cx - 8, cy + 8, nullptr); LineTo(hdc, cx + 4, cy + 8);
+        break;
+    case 1: // folder
+        MoveToEx(hdc, cx - 16, cy - 10, nullptr);
+        LineTo(hdc, cx - 3, cy - 10);
+        LineTo(hdc, cx + 2, cy - 16);
+        LineTo(hdc, cx + 16, cy - 16);
+        LineTo(hdc, cx + 16, cy + 14);
+        LineTo(hdc, cx - 16, cy + 14);
+        LineTo(hdc, cx - 16, cy - 10);
+        break;
+    case 2: // waveform
+        MoveToEx(hdc, cx - 18, cy, nullptr);
+        LineTo(hdc, cx - 10, cy);
+        LineTo(hdc, cx - 6, cy - 12);
+        LineTo(hdc, cx, cy + 14);
+        LineTo(hdc, cx + 5, cy - 16);
+        LineTo(hdc, cx + 10, cy + 2);
+        LineTo(hdc, cx + 18, cy + 2);
+        break;
+    case 3: // reamp arrows
+        Arc(hdc, cx - 18, cy - 18, cx + 18, cy + 18, cx + 12, cy - 8, cx + 18, cy + 6);
+        Arc(hdc, cx - 18, cy - 18, cx + 18, cy + 18, cx - 12, cy + 8, cx - 18, cy - 6);
+        MoveToEx(hdc, cx + 16, cy + 4, nullptr); LineTo(hdc, cx + 22, cy + 10); LineTo(hdc, cx + 13, cy + 12);
+        MoveToEx(hdc, cx - 16, cy - 4, nullptr); LineTo(hdc, cx - 22, cy - 10); LineTo(hdc, cx - 13, cy - 12);
+        break;
+    case 4: // note
+        MoveToEx(hdc, cx + 8, cy - 14, nullptr);
+        LineTo(hdc, cx + 8, cy + 10);
+        LineTo(hdc, cx - 8, cy + 6);
+        Ellipse(hdc, cx - 20, cy + 2, cx - 4, cy + 18);
+        Ellipse(hdc, cx + 0, cy - 2, cx + 16, cy + 14);
+        break;
+    }
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+void drawSectionCard(HDC hdc, const RECT& rc, int iconKind) {
+    drawRoundedRect(hdc, rc, kColorCard, kColorBorder, 18);
+    RECT iconRect{ rc.left + 22, rc.top + 20, rc.left + 88, rc.top + 86 };
+    drawSectionIcon(hdc, iconRect, iconKind);
+}
+
+void drawInfoBox(HDC hdc) {
+    drawRoundedRect(hdc, gUi.infoBox, kColorInfo, RGB(210, 223, 247), 12);
+    RECT iconRc{ gUi.infoBox.left + 14, gUi.infoBox.top + 12, gUi.infoBox.left + 34, gUi.infoBox.top + 32 };
+    HPEN pen = CreatePen(PS_SOLID, 2, kColorAccent);
+    HGDIOBJ oldPen = SelectObject(hdc, pen);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(HOLLOW_BRUSH));
+    Ellipse(hdc, iconRc.left, iconRc.top, iconRc.right, iconRc.bottom);
+    MoveToEx(hdc, (iconRc.left + iconRc.right) / 2, iconRc.top + 8, nullptr);
+    LineTo(hdc, (iconRc.left + iconRc.right) / 2, iconRc.bottom - 7);
+    MoveToEx(hdc, (iconRc.left + iconRc.right) / 2, iconRc.top + 4, nullptr);
+    LineTo(hdc, (iconRc.left + iconRc.right) / 2 + 1, iconRc.top + 4);
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(pen);
+}
+
+void paintBackground(HWND hwnd, HDC hdc) {
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    fillRect(hdc, rc, kColorWindow);
+
+    RECT heroIcon{ 58, 44, 142, 128 };
+    drawIconBadge(hdc, heroIcon);
+
+    drawSectionCard(hdc, gUi.sectionInput, 0);
+    drawSectionCard(hdc, gUi.sectionOutput, 1);
+    drawSectionCard(hdc, gUi.sectionStimulus, 2);
+    drawSectionCard(hdc, gUi.sectionTail, 3);
+    drawSectionCard(hdc, gUi.sectionRecorded, 4);
+    drawInfoBox(hdc);
+    fillRect(hdc, gUi.footer, kColorFooter);
+
+    RECT statusDot{ 28, gUi.footer.top + 14, 52, gUi.footer.top + 38 };
+    HBRUSH dotBrush = CreateSolidBrush(kColorStatusOk);
+    HGDIOBJ oldBrush = SelectObject(hdc, dotBrush);
+    HGDIOBJ oldPen = SelectObject(hdc, GetStockObject(HOLLOW_PEN));
+    Ellipse(hdc, statusDot.left, statusDot.top, statusDot.right, statusDot.bottom);
+    SelectObject(hdc, oldPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(dotBrush);
+}
+
+void drawButton(DRAWITEMSTRUCT* dis) {
+    const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
+    const bool selected = (dis->itemState & ODS_SELECTED) != 0;
+    const int id = static_cast<int>(dis->CtlID);
+    const bool primary = id == IDC_CONVERT;
+
+    COLORREF fill = primary ? (selected ? kColorAccentDark : kColorAccent) : kColorCard;
+    COLORREF border = primary ? (selected ? kColorAccentDark : kColorAccentDark) : kColorAccent;
+    COLORREF text = primary ? RGB(255, 255, 255) : kColorAccentDark;
+    if (disabled) {
+        fill = primary ? kColorDisabled : RGB(247, 248, 250);
+        border = RGB(208, 214, 224);
+        text = RGB(145, 152, 164);
+    }
+
+    RECT rc = dis->rcItem;
+    drawRoundedRect(dis->hDC, rc, fill, border, 16);
+
+    std::wstring label = getText(dis->hwndItem);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, text);
+    SelectObject(dis->hDC, gSectionFont ? gSectionFont : gFont);
+
+    if (primary) {
+        POINT pts[3] = {
+            { rc.left + 44, rc.top + 18 },
+            { rc.left + 44, rc.bottom - 18 },
+            { rc.left + 66, (rc.top + rc.bottom) / 2 }
+        };
+        HBRUSH triBrush = CreateSolidBrush(text);
+        HGDIOBJ oldBrush = SelectObject(dis->hDC, triBrush);
+        HGDIOBJ oldPen = SelectObject(dis->hDC, GetStockObject(NULL_PEN));
+        Polygon(dis->hDC, pts, 3);
+        SelectObject(dis->hDC, oldPen);
+        SelectObject(dis->hDC, oldBrush);
+        DeleteObject(triBrush);
+        rc.left += 78;
+    }
+
+    DrawTextW(dis->hDC, label.c_str(), -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    if ((dis->itemState & ODS_FOCUS) != 0) {
+        RECT focus = dis->rcItem;
+        InflateRect(&focus, -5, -5);
+        DrawFocusRect(dis->hDC, &focus);
+    }
 }
 
 LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -368,6 +701,35 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         else setText(gStatus, L"Runtime missing: " + ntc::fromUtf8(error));
         return 0;
     }
+    case WM_SIZE:
+        layoutControls(hwnd);
+        InvalidateRect(hwnd, nullptr, TRUE);
+        return 0;
+    case WM_CTLCOLORSTATIC: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetBkMode(hdc, TRANSPARENT);
+        HWND ctrl = reinterpret_cast<HWND>(lParam);
+        if (ctrl == gSubtitle || ctrl == gStatus || ctrl == gVersion || ctrl == gInfo || ctrl == GetDlgItem(hwnd, 1001)
+            || ctrl == GetDlgItem(hwnd, 1002) || ctrl == GetDlgItem(hwnd, 1003) || ctrl == GetDlgItem(hwnd, 1004)
+            || ctrl == GetDlgItem(hwnd, 1005) || ctrl == GetDlgItem(hwnd, 1006)) {
+            if (ctrl == gSubtitle || ctrl == gInfo || ctrl == gStatus || ctrl == gVersion) SetTextColor(hdc, kColorSubtleText);
+            else SetTextColor(hdc, kColorText);
+            return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
+        }
+        break;
+    }
+    case WM_DRAWITEM:
+        drawButton(reinterpret_cast<DRAWITEMSTRUCT*>(lParam));
+        return TRUE;
+    case WM_PAINT: {
+        PAINTSTRUCT ps{};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        paintBackground(hwnd, hdc);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_ERASEBKGND:
+        return 1;
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDC_LOAD_FILE: chooseNam(hwnd); return 0;
@@ -450,11 +812,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (MessageBoxW(hwnd, L"A conversion is running. Close anyway?", L"NAM to CLO", MB_ICONWARNING | MB_YESNO) != IDYES) return 0;
         }
         DestroyWindow(hwnd); return 0;
-    case WM_DESTROY: {
-        if (HFONT f = reinterpret_cast<HFONT>(GetPropW(hwnd, L"TitleFont"))) DeleteObject(f);
-        if (gFont) DeleteObject(gFont);
+    case WM_DESTROY:
+        destroyResources();
         PostQuitMessage(0); return 0;
-    }
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
@@ -478,12 +838,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.lpszClassName = kClassName;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
-    wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+    wc.hbrBackground = nullptr;
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.4",
+    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.5",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 765, 770,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1230, 980,
                                 nullptr, nullptr, instance, nullptr);
     if (!hwnd) { CoUninitialize(); return 1; }
     ShowWindow(hwnd, show);
