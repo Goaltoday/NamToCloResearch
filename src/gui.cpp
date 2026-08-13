@@ -11,7 +11,6 @@
 #include <memory>
 #include <string>
 #include <thread>
-#include <vector>
 
 namespace fs = std::filesystem;
 
@@ -99,6 +98,8 @@ std::wstring getText(HWND h) {
 }
 
 void setText(HWND h, const std::wstring& s) { SetWindowTextW(h, s.c_str()); }
+
+HMENU controlId(int id) { return reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)); }
 
 void safeDeleteObject(HGDIOBJ obj) {
     if (obj) DeleteObject(obj);
@@ -376,7 +377,6 @@ void layoutControls(HWND hwnd) {
     computeLayout(rc.right - rc.left, rc.bottom - rc.top);
 
     const int contentX = gUi.sectionInput.left + 154;
-    const int wideButtonW = 150;
     const int mediumButtonW = 132;
     const int sectionRightInset = 20;
 
@@ -421,7 +421,7 @@ void layoutControls(HWND hwnd) {
 
 void createSectionLabel(HWND hwnd, int id, const wchar_t* text) {
     HWND h = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE,
-                           0, 0, 100, 24, hwnd, reinterpret_cast<HMENU>(id), nullptr, nullptr);
+                           0, 0, 100, 24, hwnd, controlId(id), nullptr, nullptr);
     applyFont(h, gSectionFont);
 }
 
@@ -429,12 +429,12 @@ void createUi(HWND hwnd) {
     createResources();
 
     HWND title = CreateWindowW(L"STATIC", L"NAM to CLO", WS_CHILD | WS_VISIBLE,
-                               0, 0, 100, 30, hwnd, reinterpret_cast<HMENU>(1001), nullptr, nullptr);
+                               0, 0, 100, 30, hwnd, controlId(1001), nullptr, nullptr);
     applyFont(title, gTitleFont);
 
     gSubtitle = CreateWindowW(L"STATIC", L"Convert one NAM or batch-convert every NAM in a selected folder.",
                               WS_CHILD | WS_VISIBLE, 0, 0, 100, 20, hwnd,
-                              reinterpret_cast<HMENU>(IDC_SUBTITLE), nullptr, nullptr);
+                              controlId(IDC_SUBTITLE), nullptr, nullptr);
     applyFont(gSubtitle, gSubtitleFont);
 
     createSectionLabel(hwnd, 1002, L"Input NAM or folder");
@@ -444,22 +444,22 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-                                 0, 0, 100, 30, hwnd, reinterpret_cast<HMENU>(IDC_INPUT_PATH), nullptr, nullptr);
+                                 0, 0, 100, 30, hwnd, controlId(IDC_INPUT_PATH), nullptr, nullptr);
     applyFont(gInputEdit);
     gLoadFileButton = CreateWindowW(L"BUTTON", L"Load NAM...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                                    0, 0, 110, 34, hwnd, reinterpret_cast<HMENU>(IDC_LOAD_FILE), nullptr, nullptr);
+                                    0, 0, 110, 34, hwnd, controlId(IDC_LOAD_FILE), nullptr, nullptr);
     gLoadFolderButton = CreateWindowW(L"BUTTON", L"Load Folder...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                                      0, 0, 120, 34, hwnd, reinterpret_cast<HMENU>(IDC_LOAD_FOLDER), nullptr, nullptr);
+                                      0, 0, 120, 34, hwnd, controlId(IDC_LOAD_FOLDER), nullptr, nullptr);
 
     gOutEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-                               0, 0, 100, 30, hwnd, reinterpret_cast<HMENU>(IDC_OUTPUT_PATH), nullptr, nullptr);
+                               0, 0, 100, 30, hwnd, controlId(IDC_OUTPUT_PATH), nullptr, nullptr);
     applyFont(gOutEdit);
     gBrowseButton = CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                                  0, 0, 120, 34, hwnd, reinterpret_cast<HMENU>(IDC_BROWSE_OUTPUT), nullptr, nullptr);
+                                  0, 0, 120, 34, hwnd, controlId(IDC_BROWSE_OUTPUT), nullptr, nullptr);
 
     gStimulusCombo = CreateWindowW(L"COMBOBOX", L"",
                                    WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                   0, 0, 100, 120, hwnd, reinterpret_cast<HMENU>(IDC_STIMULUS_MODE), nullptr, nullptr);
+                                   0, 0, 100, 120, hwnd, controlId(IDC_STIMULUS_MODE), nullptr, nullptr);
     applyFont(gStimulusCombo);
     for (const auto mode : { ntc::StimulusMode::Legacy, ntc::StimulusMode::Clean, ntc::StimulusMode::Dist }) {
         SendMessageW(gStimulusCombo, CB_ADDSTRING, 0,
@@ -469,7 +469,7 @@ void createUi(HWND hwnd) {
 
     gTailCombo = CreateWindowW(L"COMBOBOX", L"",
                                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                               0, 0, 100, 120, hwnd, reinterpret_cast<HMENU>(IDC_TAIL_MODE), nullptr, nullptr);
+                               0, 0, 100, 120, hwnd, controlId(IDC_TAIL_MODE), nullptr, nullptr);
     applyFont(gTailCombo);
     for (const auto mode : { ntc::TailMode::PresetAudio, ntc::TailMode::RecordedAudio }) {
         SendMessageW(gTailCombo, CB_ADDSTRING, 0,
@@ -478,31 +478,31 @@ void createUi(HWND hwnd) {
     SendMessageW(gTailCombo, CB_SETCURSEL, 0, 0);
 
     gRecordedEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-                                    0, 0, 100, 30, hwnd, reinterpret_cast<HMENU>(IDC_RECORDED_PATH), nullptr, nullptr);
+                                    0, 0, 100, 30, hwnd, controlId(IDC_RECORDED_PATH), nullptr, nullptr);
     applyFont(gRecordedEdit);
     gBrowseRecordedButton = CreateWindowW(L"BUTTON", L"Browse WAV...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                                          0, 0, 120, 34, hwnd, reinterpret_cast<HMENU>(IDC_BROWSE_RECORDED), nullptr, nullptr);
+                                          0, 0, 120, 34, hwnd, controlId(IDC_BROWSE_RECORDED), nullptr, nullptr);
 
     gInfo = CreateWindowW(L"STATIC",
                           L"Recorded Audio is converted automatically to mono PCM16 44.1 kHz and to exactly 20 s (trim/pad);\r\n"
                           L"its level is not normalized.",
                           WS_CHILD | WS_VISIBLE,
-                          0, 0, 100, 40, hwnd, reinterpret_cast<HMENU>(IDC_INFO), nullptr, nullptr);
+                          0, 0, 100, 40, hwnd, controlId(IDC_INFO), nullptr, nullptr);
     applyFont(gInfo);
 
     gConvertButton = CreateWindowW(L"BUTTON", L"Convert", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                                   0, 0, 150, 42, hwnd, reinterpret_cast<HMENU>(IDC_CONVERT), nullptr, nullptr);
+                                   0, 0, 150, 42, hwnd, controlId(IDC_CONVERT), nullptr, nullptr);
     applyFont(gConvertButton);
     gOpenButton = CreateWindowW(L"BUTTON", L"Open output folder", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                                0, 0, 180, 42, hwnd, reinterpret_cast<HMENU>(IDC_OPEN_OUTPUT), nullptr, nullptr);
+                                0, 0, 180, 42, hwnd, controlId(IDC_OPEN_OUTPUT), nullptr, nullptr);
     applyFont(gOpenButton);
 
     gStatus = CreateWindowW(L"STATIC", L"Checking runtime...", WS_CHILD | WS_VISIBLE,
-                            0, 0, 100, 22, hwnd, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
+                            0, 0, 100, 22, hwnd, controlId(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
     gVersion = CreateWindowW(L"STATIC", L"Version 1.5.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
-                             0, 0, 110, 22, hwnd, reinterpret_cast<HMENU>(IDC_VERSION), nullptr, nullptr);
+                             0, 0, 110, 22, hwnd, controlId(IDC_VERSION), nullptr, nullptr);
     applyFont(gVersion);
 
     layoutControls(hwnd);
@@ -636,7 +636,7 @@ void paintBackground(HWND hwnd, HDC hdc) {
     RECT statusDot{ 28, gUi.footer.top + 14, 52, gUi.footer.top + 38 };
     HBRUSH dotBrush = CreateSolidBrush(kColorStatusOk);
     HGDIOBJ oldBrush = SelectObject(hdc, dotBrush);
-    HGDIOBJ oldPen = SelectObject(hdc, GetStockObject(HOLLOW_PEN));
+    HGDIOBJ oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
     Ellipse(hdc, statusDot.left, statusDot.top, statusDot.right, statusDot.bottom);
     SelectObject(hdc, oldPen);
     SelectObject(hdc, oldBrush);
@@ -769,10 +769,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         enableControls(true);
         updateTailControls();
         if (r && r->ok) {
-            std::wstring msg = L"Conversion complete.\r\n\r\nAmpero 2048:\r\n" + r->ampero2048.wstring()
-                             + L"\r\n\r\nGP-200 1024:\r\n" + r->gp2001024.wstring();
+            std::wstring resultMessage = L"Conversion complete.\r\n\r\nAmpero 2048:\r\n" + r->ampero2048.wstring()
+                                      + L"\r\n\r\nGP-200 1024:\r\n" + r->gp2001024.wstring();
             setText(gStatus, L"Done. Two CLO files were generated successfully.");
-            MessageBoxW(hwnd, msg.c_str(), L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
+            MessageBoxW(hwnd, resultMessage.c_str(), L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
         } else {
             const std::wstring err = r ? ntc::fromUtf8(r->error) : L"Unknown conversion error.";
             setText(gStatus, L"Conversion failed.");
@@ -790,21 +790,21 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
 
-        std::wstring msg = L"Batch conversion complete.\r\n\r\nProcessed: " + std::to_wstring(r->total)
-                         + L"\r\nSucceeded: " + std::to_wstring(r->succeeded)
-                         + L"\r\nFailed: " + std::to_wstring(r->failed);
+        std::wstring resultMessage = L"Batch conversion complete.\r\n\r\nProcessed: " + std::to_wstring(r->total)
+                                   + L"\r\nSucceeded: " + std::to_wstring(r->succeeded)
+                                   + L"\r\nFailed: " + std::to_wstring(r->failed);
         if (r->failed > 0) {
-            msg += L"\r\n\r\nFailed files:";
+            resultMessage += L"\r\n\r\nFailed files:";
             for (const auto& item : r->items) {
                 if (!item.ok) {
-                    msg += L"\r\n- " + item.inputNam.filename().wstring();
-                    if (!item.error.empty()) msg += L": " + ntc::fromUtf8(item.error);
+                    resultMessage += L"\r\n- " + item.inputNam.filename().wstring();
+                    if (!item.error.empty()) resultMessage += L": " + ntc::fromUtf8(item.error);
                 }
             }
         }
 
         setText(gStatus, L"Batch done: " + std::to_wstring(r->succeeded) + L" succeeded, " + std::to_wstring(r->failed) + L" failed.");
-        MessageBoxW(hwnd, msg.c_str(), L"NAM to CLO - Batch", (r->failed == 0 ? MB_ICONINFORMATION : MB_ICONWARNING) | MB_OK);
+        MessageBoxW(hwnd, resultMessage.c_str(), L"NAM to CLO - Batch", (r->failed == 0 ? MB_ICONINFORMATION : MB_ICONWARNING) | MB_OK);
         return 0;
     }
     case WM_CLOSE:
