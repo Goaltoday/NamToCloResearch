@@ -35,6 +35,8 @@ constexpr int IDC_BROWSE_RECORDED = 112;
 constexpr int IDC_VERSION = 113;
 constexpr int IDC_SUBTITLE = 114;
 constexpr int IDC_INFO = 115;
+constexpr int IDC_CUSTOM_STIMULUS_PATH = 116;
+constexpr int IDC_BROWSE_CUSTOM_STIMULUS = 117;
 
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
@@ -71,6 +73,8 @@ HWND gConvertButton = nullptr;
 HWND gOpenButton = nullptr;
 HWND gStatus = nullptr;
 HWND gStimulusCombo = nullptr;
+HWND gCustomStimulusEdit = nullptr;
+HWND gBrowseCustomStimulusButton = nullptr;
 HWND gTailCombo = nullptr;
 HWND gRecordedEdit = nullptr;
 HWND gBrowseRecordedButton = nullptr;
@@ -179,6 +183,10 @@ void enableControls(bool enable) {
     EnableWindow(gStimulusCombo, enable);
     EnableWindow(gTailCombo, enable);
     if (!enable) {
+        EnableWindow(gCustomStimulusEdit, FALSE);
+        EnableWindow(gBrowseCustomStimulusButton, FALSE);
+    }
+    if (!enable) {
         EnableWindow(gRecordedEdit, FALSE);
         EnableWindow(gBrowseRecordedButton, FALSE);
     }
@@ -279,8 +287,22 @@ ntc::StimulusMode selectedStimulusMode() {
     switch (index) {
     case 1: return ntc::StimulusMode::Clean;
     case 2: return ntc::StimulusMode::Dist;
+    case 3: return ntc::StimulusMode::Custom;
     default: return ntc::StimulusMode::Legacy;
     }
+}
+
+void chooseCustomStimulus(HWND owner) {
+    wchar_t file[32768]{};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"WAV audio (*.wav)\0*.wav\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(file));
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrDefExt = L"wav";
+    if (GetOpenFileNameW(&ofn)) setText(gCustomStimulusEdit, fs::path(file).wstring());
 }
 
 void chooseRecordedAudio(HWND owner) {
@@ -305,6 +327,10 @@ ntc::TailMode selectedTailMode() {
 void updateTailControls() {
     if (gBusy) return;
     const ntc::StimulusMode mode = selectedStimulusMode();
+    const bool customStimulus = mode == ntc::StimulusMode::Custom;
+    EnableWindow(gCustomStimulusEdit, customStimulus ? TRUE : FALSE);
+    EnableWindow(gBrowseCustomStimulusButton, customStimulus ? TRUE : FALSE);
+
     const bool soundCloneMode = mode != ntc::StimulusMode::Legacy;
     EnableWindow(gTailCombo, soundCloneMode ? TRUE : FALSE);
     const bool recorded = soundCloneMode && selectedTailMode() == ntc::TailMode::RecordedAudio;
@@ -332,8 +358,13 @@ void startConversion(HWND hwnd) {
 
     ntc::StimulusConfig stimulus;
     stimulus.mode = selectedStimulusMode();
+    stimulus.customStimulus = fs::path(getText(gCustomStimulusEdit));
     stimulus.tailMode = selectedTailMode();
     stimulus.recordedAudio = fs::path(getText(gRecordedEdit));
+    if (stimulus.mode == ntc::StimulusMode::Custom && stimulus.customStimulus.empty()) {
+        MessageBoxW(hwnd, L"Select a Custom Stimulus WAV file.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
+        return;
+    }
     if (stimulus.mode != ntc::StimulusMode::Legacy
         && stimulus.tailMode == ntc::TailMode::RecordedAudio
         && stimulus.recordedAudio.empty()) {
@@ -379,7 +410,7 @@ void computeLayout(int clientW, int clientH) {
     int y = 100;
     gUi.sectionInput = RECT{ margin, y, clientW - margin, y + 76 }; y += 76 + gap;
     gUi.sectionOutput = RECT{ margin, y, clientW - margin, y + 70 }; y += 70 + gap;
-    gUi.sectionStimulus = RECT{ margin, y, clientW - margin, y + 66 }; y += 66 + gap;
+    gUi.sectionStimulus = RECT{ margin, y, clientW - margin, y + 105 }; y += 105 + gap;
     gUi.sectionTail = RECT{ margin, y, clientW - margin, y + 66 }; y += 66 + gap;
     gUi.sectionRecorded = RECT{ margin, y, clientW - margin, y + 105 }; y += 105 + gap;
     gUi.buttonArea = RECT{ margin, y, clientW - margin, y + 38 };
@@ -415,6 +446,11 @@ void layoutControls(HWND hwnd) {
 
     moveCtrl(GetDlgItem(hwnd, 1004), contentX, gUi.sectionStimulus.top + 6, 190, 20);
     moveCtrl(gStimulusCombo, contentX, gUi.sectionStimulus.top + 32, 490, 180);
+    moveCtrl(GetDlgItem(hwnd, 1007), contentX, gUi.sectionStimulus.top + 60, 360, 20);
+    const int customEditW = (gUi.sectionStimulus.right - sectionRightInset) - (contentX + 150);
+    moveCtrl(gCustomStimulusEdit, contentX, gUi.sectionStimulus.top + 80, customEditW, 28);
+    moveCtrl(gBrowseCustomStimulusButton, gUi.sectionStimulus.right - sectionRightInset - 124,
+             gUi.sectionStimulus.top + 76, 124, 32);
 
     moveCtrl(GetDlgItem(hwnd, 1005), contentX, gUi.sectionTail.top + 6, 210, 20);
     moveCtrl(gTailCombo, contentX, gUi.sectionTail.top + 32, 490, 180);
@@ -455,6 +491,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1002, L"Input NAM or folder");
     createSectionLabel(hwnd, 1003, L"Output folder");
     createSectionLabel(hwnd, 1004, L"Stimulus profile");
+    createSectionLabel(hwnd, 1007, L"Custom stimulus WAV (adapted automatically to 50.000 s)");
     createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
 
@@ -476,11 +513,19 @@ void createUi(HWND hwnd) {
                                    WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
                                    0, 0, 100, 120, hwnd, controlId(IDC_STIMULUS_MODE), nullptr, nullptr);
     applyFont(gStimulusCombo);
-    for (const auto mode : { ntc::StimulusMode::Legacy, ntc::StimulusMode::Clean, ntc::StimulusMode::Dist }) {
+    for (const auto mode : { ntc::StimulusMode::Legacy, ntc::StimulusMode::Clean, ntc::StimulusMode::Dist, ntc::StimulusMode::Custom }) {
         SendMessageW(gStimulusCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(ntc::stimulusModeDisplayName(mode)));
     }
     SendMessageW(gStimulusCombo, CB_SETCURSEL, 0, 0);
+
+    gCustomStimulusEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+        0, 0, 100, 30, hwnd, controlId(IDC_CUSTOM_STIMULUS_PATH), nullptr, nullptr);
+    applyFont(gCustomStimulusEdit);
+    gBrowseCustomStimulusButton = CreateWindowW(L"BUTTON", L"Browse WAV...",
+        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+        0, 0, 120, 34, hwnd, controlId(IDC_BROWSE_CUSTOM_STIMULUS), nullptr, nullptr);
 
     gTailCombo = CreateWindowW(L"COMBOBOX", L"",
                                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
@@ -516,7 +561,7 @@ void createUi(HWND hwnd) {
                             0, 0, 100, 22, hwnd, controlId(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
-    gVersion = CreateWindowW(L"STATIC", L"Version 1.5.2", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+    gVersion = CreateWindowW(L"STATIC", L"Version 1.6.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
                              0, 0, 110, 22, hwnd, controlId(IDC_VERSION), nullptr, nullptr);
     applyFont(gVersion);
 
@@ -690,7 +735,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (ctrl == gSubtitle || ctrl == GetDlgItem(hwnd, 1001)
             || ctrl == GetDlgItem(hwnd, 1002) || ctrl == GetDlgItem(hwnd, 1003) || ctrl == GetDlgItem(hwnd, 1004)
-            || ctrl == GetDlgItem(hwnd, 1005) || ctrl == GetDlgItem(hwnd, 1006)) {
+            || ctrl == GetDlgItem(hwnd, 1005) || ctrl == GetDlgItem(hwnd, 1006) || ctrl == GetDlgItem(hwnd, 1007)) {
             SetTextColor(hdc, ctrl == gSubtitle ? kColorSubtleText : kColorText);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
@@ -714,6 +759,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_LOAD_FOLDER: chooseNamFolder(hwnd); return 0;
         case IDC_BROWSE_OUTPUT: chooseOutput(hwnd); return 0;
         case IDC_BROWSE_RECORDED: chooseRecordedAudio(hwnd); return 0;
+        case IDC_BROWSE_CUSTOM_STIMULUS: chooseCustomStimulus(hwnd); return 0;
         case IDC_STIMULUS_MODE:
             if (HIWORD(wParam) == CBN_SELCHANGE) updateTailControls();
             return 0;
@@ -821,9 +867,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = nullptr;
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.5.2",
+    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.6",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 640,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 685,
                                 nullptr, nullptr, instance, nullptr);
     if (!hwnd) { CoUninitialize(); return 1; }
     ShowWindow(hwnd, show);

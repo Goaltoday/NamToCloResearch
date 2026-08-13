@@ -251,9 +251,11 @@ std::int16_t floatToPcm16(double value) {
     return static_cast<std::int16_t>(sample);
 }
 
-bool readRecordedAudio20Seconds(const fs::path& path,
-                                Pcm16MonoWav& wav,
-                                std::string& error) {
+bool readAdaptedAudio(const fs::path& path,
+                      const std::uint64_t targetFrames,
+                      const char* roleName,
+                      Pcm16MonoWav& wav,
+                      std::string& error) {
     WavData source;
     if (!readWaveFile(path, source, error)) return false;
 
@@ -264,7 +266,7 @@ bool readRecordedAudio20Seconds(const fs::path& path,
         || (source.format == kWaveFormatIeeeFloat
             && (source.bitsPerSample == 32 || source.bitsPerSample == 64));
     if (!formatSupported) {
-        error = "Recorded WAV must use PCM 8/16/24/32-bit or IEEE float 32/64-bit audio.";
+        error = std::string(roleName) + " WAV must use PCM 8/16/24/32-bit or IEEE float 32/64-bit audio.";
         return false;
     }
 
@@ -277,7 +279,7 @@ bool readRecordedAudio20Seconds(const fs::path& path,
 
     const std::uint64_t sourceFrames = source.data.size() / source.blockAlign;
     if (sourceFrames == 0) {
-        error = "Recorded WAV contains no audio samples: " + pathToUtf8(path);
+        error = std::string(roleName) + " WAV contains no audio samples: " + pathToUtf8(path);
         return false;
     }
 
@@ -290,7 +292,7 @@ bool readRecordedAudio20Seconds(const fs::path& path,
             const double sample = decodeSample(framePtr + static_cast<std::size_t>(channel) * bytesPerSample,
                                                source.format, source.bitsPerSample, ok);
             if (!ok) {
-                error = "Unsupported sample format in recorded WAV: " + pathToUtf8(path);
+                error = "Unsupported sample format in " + std::string(roleName) + " WAV: " + pathToUtf8(path);
                 return false;
             }
             sum += sample;
@@ -298,10 +300,9 @@ bool readRecordedAudio20Seconds(const fs::path& path,
         mono[frame] = sum / source.channels;
     }
 
-    // The tail handed to Sound Clone is always exactly 20.000 seconds at
-    // 44.1 kHz. Longer recordings are trimmed to their first 20 seconds.
-    // Shorter recordings are padded with digital silence at the end.
-    wav.samples.assign(static_cast<std::size_t>(kTailFrames), static_cast<std::int16_t>(0));
+    // User-provided audio is always adapted to the exact requested duration
+    // at 44.1 kHz. Longer files are trimmed; shorter files are zero-padded.
+    wav.samples.assign(static_cast<std::size_t>(targetFrames), static_cast<std::int16_t>(0));
 
     if (source.sampleRate == kExpectedSampleRate) {
         const std::size_t framesToCopy = std::min(wav.samples.size(), mono.size());
@@ -311,9 +312,9 @@ bool readRecordedAudio20Seconds(const fs::path& path,
         return true;
     }
 
-    // Linear interpolation is intentionally used only to adapt the user's
-    // recorded tail to 44.1 kHz. Samples beyond the end of a short recording
-    // remain zero; samples beyond 20 seconds of a long recording are ignored.
+    // Linear interpolation adapts user-provided audio to 44.1 kHz. Samples
+    // beyond the end of a short file remain zero; samples beyond the target
+    // duration of a long file are ignored.
     const double ratio = static_cast<double>(source.sampleRate) / kExpectedSampleRate;
     for (std::size_t i = 0; i < wav.samples.size(); ++i) {
         const double sourcePosition = static_cast<double>(i) * ratio;
@@ -396,6 +397,7 @@ const wchar_t* stimulusModeDisplayName(const StimulusMode mode) {
     case StimulusMode::Legacy: return L"Original / Legacy";
     case StimulusMode::Clean:  return L"Clean";
     case StimulusMode::Dist:   return L"Dist";
+    case StimulusMode::Custom: return L"Custom WAV";
     }
     return L"Unknown";
 }
@@ -420,18 +422,26 @@ bool buildStimulus(const RuntimePaths& runtime,
         return copyFileCreatingParents(runtime.legacyStimulus, destination, error);
     }
 
-    const bool clean = config.mode == StimulusMode::Clean;
-    const fs::path& basePath = clean ? runtime.cleanStimulus : runtime.distStimulus;
-    if (!existsFile(basePath)) {
-        error = clean
-            ? "Missing runtime\\ampero\\inputSignalCleanSW.wav"
-            : "Missing runtime\\ampero\\inputSignalDistSW.wav";
-        return false;
-    }
-
     Pcm16MonoWav base;
     Pcm16MonoWav tail;
-    if (!readPcm16Mono44100(basePath, kBaseFrames, base, error)) return false;
+
+    if (config.mode == StimulusMode::Custom) {
+        if (!existsFile(config.customStimulus)) {
+            error = "Select a valid Custom Stimulus WAV file.";
+            return false;
+        }
+        if (!readAdaptedAudio(config.customStimulus, kBaseFrames, "Custom stimulus", base, error)) return false;
+    } else {
+        const bool clean = config.mode == StimulusMode::Clean;
+        const fs::path& basePath = clean ? runtime.cleanStimulus : runtime.distStimulus;
+        if (!existsFile(basePath)) {
+            error = clean
+                ? "Missing runtime\\ampero\\inputSignalCleanSW.wav"
+                : "Missing runtime\\ampero\\inputSignalDistSW.wav";
+            return false;
+        }
+        if (!readPcm16Mono44100(basePath, kBaseFrames, base, error)) return false;
+    }
 
     if (config.tailMode == TailMode::PresetAudio) {
         if (!existsFile(runtime.presetAudio)) {
@@ -444,7 +454,7 @@ bool buildStimulus(const RuntimePaths& runtime,
             error = "Select a valid Recorded Audio WAV file.";
             return false;
         }
-        if (!readRecordedAudio20Seconds(config.recordedAudio, tail, error)) return false;
+        if (!readAdaptedAudio(config.recordedAudio, kTailFrames, "Recorded Audio", tail, error)) return false;
     }
 
     std::vector<std::int16_t> combined;
