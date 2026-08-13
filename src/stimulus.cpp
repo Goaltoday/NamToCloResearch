@@ -18,6 +18,7 @@ constexpr std::uint16_t kExpectedBitsPerSample = 16;
 constexpr std::uint16_t kExpectedSourceChannels = 1;
 constexpr std::uint64_t kBaseFrames = 50ull * kExpectedSampleRate;
 constexpr std::uint64_t kTailFrames = 20ull * kExpectedSampleRate;
+constexpr std::size_t kSoundClonePaddingFrames = 600;
 
 struct Pcm16MonoWav {
     std::vector<std::int16_t> samples;
@@ -230,11 +231,9 @@ bool existsFile(const fs::path& p) {
 
 const wchar_t* stimulusModeDisplayName(const StimulusMode mode) {
     switch (mode) {
-    case StimulusMode::Legacy:       return L"Legacy (original v1.1 stimulus)";
-    case StimulusMode::CleanMono:    return L"Clean + PresetAudio (mono test)";
-    case StimulusMode::CleanDualMono:return L"Clean + PresetAudio (dual-mono test)";
-    case StimulusMode::DistMono:     return L"Dist + PresetAudio (mono test)";
-    case StimulusMode::DistDualMono: return L"Dist + PresetAudio (dual-mono test)";
+    case StimulusMode::Legacy: return L"Original / Legacy";
+    case StimulusMode::Clean:  return L"Clean";
+    case StimulusMode::Dist:   return L"Dist";
     }
     return L"Unknown";
 }
@@ -251,8 +250,7 @@ bool buildStimulus(const RuntimePaths& runtime,
         return copyFileCreatingParents(runtime.legacyStimulus, destination, error);
     }
 
-    const bool clean = mode == StimulusMode::CleanMono || mode == StimulusMode::CleanDualMono;
-    const bool dualMono = mode == StimulusMode::CleanDualMono || mode == StimulusMode::DistDualMono;
+    const bool clean = mode == StimulusMode::Clean;
     const fs::path& basePath = clean ? runtime.cleanStimulus : runtime.distStimulus;
 
     if (!existsFile(basePath)) {
@@ -272,11 +270,15 @@ bool buildStimulus(const RuntimePaths& runtime,
     if (!readPcm16Mono44100(runtime.presetAudio, kTailFrames, tail, error)) return false;
 
     std::vector<std::int16_t> combined;
-    combined.reserve(base.samples.size() + tail.samples.size());
+    combined.reserve(base.samples.size() + tail.samples.size() + kSoundClonePaddingFrames);
     combined.insert(combined.end(), base.samples.begin(), base.samples.end());
     combined.insert(combined.end(), tail.samples.begin(), tail.samples.end());
+    combined.insert(combined.end(), kSoundClonePaddingFrames, static_cast<std::int16_t>(0));
 
-    return writePcm16Wav(destination, combined, dualMono, error);
+    // The official Sound Clone inputSignal.wav is mono. Previous v1.2 tests
+    // confirmed that mono and dual-mono stimuli produce identical CLO data,
+    // so v1.3 keeps the native mono representation.
+    return writePcm16Wav(destination, combined, false, error);
 }
 
 } // namespace ntc

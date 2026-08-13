@@ -16,8 +16,16 @@ runtime\
 
 ## Mode requirements
 
-- **Legacy** requires only `HTUSBTools.dll` + `nam_input_wav.wav` and preserves the v1.1 path.
-- **Clean tests** additionally require `inputSignalCleanSW.wav` + `PresetAudio.wav`.
-- **Dist tests** additionally require `inputSignalDistSW.wav` + `PresetAudio.wav`.
+- **Original / Legacy** requires only `HTUSBTools.dll` + `nam_input_wav.wav` and preserves the validated v1.1 path byte-for-byte.
+- **Clean** additionally requires `inputSignalCleanSW.wav` + `PresetAudio.wav`.
+- **Dist** additionally requires `inputSignalDistSW.wav` + `PresetAudio.wav`.
 
-The experimental Clean/Dist builder expects the Sound Clone source WAVs to be mono PCM16, 44.1 kHz, with exact durations of 50 s (Clean/Dist) and 20 s (`PresetAudio.wav`). No normalization, gain adjustment, resampling, fades, or other DSP is applied.
+For Clean and Dist, v1.3 builds the stimulus as observed in the official Sound Clone application:
+
+```text
+50 s Clean/Dist source
++ 20 s PresetAudio
++ 600 zero samples
+```
+
+The generated Sound Clone-style stimulus is mono PCM16 at 44.1 kHz. No normalization, gain adjustment, resampling, fades, or other DSP is applied.

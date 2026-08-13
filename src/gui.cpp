@@ -157,10 +157,8 @@ void chooseOutput(HWND owner) {
 ntc::StimulusMode selectedStimulusMode() {
     const LRESULT index = SendMessageW(gStimulusCombo, CB_GETCURSEL, 0, 0);
     switch (index) {
-    case 1: return ntc::StimulusMode::CleanMono;
-    case 2: return ntc::StimulusMode::CleanDualMono;
-    case 3: return ntc::StimulusMode::DistMono;
-    case 4: return ntc::StimulusMode::DistDualMono;
+    case 1: return ntc::StimulusMode::Clean;
+    case 2: return ntc::StimulusMode::Dist;
     default: return ntc::StimulusMode::Legacy;
     }
 }
@@ -248,23 +246,22 @@ void createUi(HWND hwnd) {
                                   582, 215, 135, 34, hwnd, reinterpret_cast<HMENU>(IDC_BROWSE_OUTPUT), nullptr, nullptr);
     applyFont(gBrowseButton);
 
-    HWND stimulusLabel = CreateWindowW(L"STATIC", L"Stimulus test mode", WS_CHILD | WS_VISIBLE,
+    HWND stimulusLabel = CreateWindowW(L"STATIC", L"Stimulus profile", WS_CHILD | WS_VISIBLE,
                                        30, 272, 180, 24, hwnd, nullptr, nullptr, nullptr);
     applyFont(stimulusLabel);
     gStimulusCombo = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
         30, 298, 440, 180, hwnd, reinterpret_cast<HMENU>(IDC_STIMULUS_MODE), nullptr, nullptr);
     applyFont(gStimulusCombo);
-    for (const auto mode : { ntc::StimulusMode::Legacy, ntc::StimulusMode::CleanMono,
-                             ntc::StimulusMode::CleanDualMono, ntc::StimulusMode::DistMono,
-                             ntc::StimulusMode::DistDualMono }) {
+    for (const auto mode : { ntc::StimulusMode::Legacy, ntc::StimulusMode::Clean,
+                             ntc::StimulusMode::Dist }) {
         SendMessageW(gStimulusCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(ntc::stimulusModeDisplayName(mode)));
     }
     SendMessageW(gStimulusCombo, CB_SETCURSEL, 0, 0);
 
     HWND info = CreateWindowW(L"STATIC",
-        L"Legacy preserves the v1.1 stimulus byte-for-byte. Clean/Dist modes are experimental.\r\n"
+        L"Original preserves the validated v1.1 stimulus byte-for-byte. Clean/Dist reproduce the Sound Clone stimulus structure.\r\n"
         L"For each NAM: <name>_Ampero_2048.clo + <name>_GP200_1024.clo",
         WS_CHILD | WS_VISIBLE, 30, 345, 690, 55, hwnd, nullptr, nullptr, nullptr);
     applyFont(info);
@@ -280,7 +277,7 @@ void createUi(HWND hwnd) {
                             30, 488, 690, 42, hwnd, reinterpret_cast<HMENU>(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
-    HWND ver = CreateWindowW(L"STATIC", L"Version 1.2.0 experimental", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+    HWND ver = CreateWindowW(L"STATIC", L"Version 1.3.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
                              500, 548, 217, 22, hwnd, nullptr, nullptr, nullptr);
     applyFont(ver);
     DragAcceptFiles(hwnd, TRUE);
