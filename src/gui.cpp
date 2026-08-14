@@ -37,6 +37,9 @@ constexpr int IDC_SUBTITLE = 114;
 constexpr int IDC_INFO = 115;
 constexpr int IDC_CUSTOM_STIMULUS_PATH = 116;
 constexpr int IDC_BROWSE_CUSTOM_STIMULUS = 117;
+constexpr int IDC_APPLY_CORRECTIVE_IR = 118;
+constexpr int IDC_CORRECTIVE_IR_PATH = 119;
+constexpr int IDC_BROWSE_CORRECTIVE_IR = 120;
 
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
@@ -59,6 +62,7 @@ struct UiMetrics {
     RECT sectionStimulus{};
     RECT sectionTail{};
     RECT sectionRecorded{};
+    RECT sectionCorrective{};
     RECT buttonArea{};
     RECT footer{};
     RECT infoBox{};
@@ -78,6 +82,9 @@ HWND gBrowseCustomStimulusButton = nullptr;
 HWND gTailCombo = nullptr;
 HWND gRecordedEdit = nullptr;
 HWND gBrowseRecordedButton = nullptr;
+HWND gCorrectiveCheck = nullptr;
+HWND gCorrectiveEdit = nullptr;
+HWND gBrowseCorrectiveButton = nullptr;
 HWND gVersion = nullptr;
 HWND gInfo = nullptr;
 HWND gSubtitle = nullptr;
@@ -182,6 +189,7 @@ void enableControls(bool enable) {
     EnableWindow(gOpenButton, enable);
     EnableWindow(gStimulusCombo, enable);
     EnableWindow(gTailCombo, enable);
+    EnableWindow(gCorrectiveCheck, enable);
     if (!enable) {
         EnableWindow(gCustomStimulusEdit, FALSE);
         EnableWindow(gBrowseCustomStimulusButton, FALSE);
@@ -189,6 +197,8 @@ void enableControls(bool enable) {
     if (!enable) {
         EnableWindow(gRecordedEdit, FALSE);
         EnableWindow(gBrowseRecordedButton, FALSE);
+        EnableWindow(gCorrectiveEdit, FALSE);
+        EnableWindow(gBrowseCorrectiveButton, FALSE);
     }
     InvalidateRect(GetParent(gConvertButton), nullptr, FALSE);
 }
@@ -318,6 +328,19 @@ void chooseRecordedAudio(HWND owner) {
     if (GetOpenFileNameW(&ofn)) setText(gRecordedEdit, fs::path(file).wstring());
 }
 
+void chooseCorrectiveIr(HWND owner) {
+    wchar_t file[32768]{};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"WAV impulse response (*.wav)\0*.wav\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(file));
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrDefExt = L"wav";
+    if (GetOpenFileNameW(&ofn)) setText(gCorrectiveEdit, fs::path(file).wstring());
+}
+
 ntc::TailMode selectedTailMode() {
     return SendMessageW(gTailCombo, CB_GETCURSEL, 0, 0) == 1
         ? ntc::TailMode::RecordedAudio
@@ -336,6 +359,10 @@ void updateTailControls() {
     const bool recorded = soundCloneMode && selectedTailMode() == ntc::TailMode::RecordedAudio;
     EnableWindow(gRecordedEdit, recorded ? TRUE : FALSE);
     EnableWindow(gBrowseRecordedButton, recorded ? TRUE : FALSE);
+
+    const bool correctiveEnabled = SendMessageW(gCorrectiveCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    EnableWindow(gCorrectiveEdit, correctiveEnabled ? TRUE : FALSE);
+    EnableWindow(gBrowseCorrectiveButton, correctiveEnabled ? TRUE : FALSE);
 }
 
 void postStatus(HWND hwnd, const std::wstring& s) {
@@ -372,19 +399,27 @@ void startConversion(HWND hwnd) {
         return;
     }
 
+    ntc::CorrectiveIrConfig correction;
+    correction.enabled = SendMessageW(gCorrectiveCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    correction.wav = fs::path(getText(gCorrectiveEdit));
+    if (correction.enabled && correction.wav.empty()) {
+        MessageBoxW(hwnd, L"Select a Corrective IR WAV file.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
+        return;
+    }
+
     enableControls(false);
     if (gInputMode == InputMode::SingleNam) {
         setText(gStatus, L"Starting conversion...");
-        std::thread([hwnd, input, out, stimulus] {
+        std::thread([hwnd, input, out, stimulus, correction] {
             auto result = std::make_unique<ntc::ConversionResult>(
-                ntc::convertNamToBoth(input, out, stimulus, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
+                ntc::convertNamToBoth(input, out, stimulus, correction, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
             PostMessageW(hwnd, WM_APP_DONE_SINGLE, 0, reinterpret_cast<LPARAM>(result.release()));
         }).detach();
     } else {
         setText(gStatus, L"Starting batch conversion...");
-        std::thread([hwnd, input, out, stimulus] {
+        std::thread([hwnd, input, out, stimulus, correction] {
             auto result = std::make_unique<ntc::BatchConversionResult>(
-                ntc::convertNamFolder(input, out, stimulus, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
+                ntc::convertNamFolder(input, out, stimulus, correction, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
             PostMessageW(hwnd, WM_APP_DONE_BATCH, 0, reinterpret_cast<LPARAM>(result.release()));
         }).detach();
     }
@@ -413,6 +448,7 @@ void computeLayout(int clientW, int clientH) {
     gUi.sectionStimulus = RECT{ margin, y, clientW - margin, y + 105 }; y += 105 + gap;
     gUi.sectionTail = RECT{ margin, y, clientW - margin, y + 66 }; y += 66 + gap;
     gUi.sectionRecorded = RECT{ margin, y, clientW - margin, y + 105 }; y += 105 + gap;
+    gUi.sectionCorrective = RECT{ margin, y, clientW - margin, y + 86 }; y += 86 + gap;
     gUi.buttonArea = RECT{ margin, y, clientW - margin, y + 38 };
     gUi.footer = RECT{ 0, clientH - footerH, clientW, clientH };
     gUi.infoBox = RECT{ gUi.sectionRecorded.left + 108, gUi.sectionRecorded.top + 62,
@@ -462,6 +498,13 @@ void layoutControls(HWND hwnd) {
     moveCtrl(gInfo, gUi.infoBox.left + 36, gUi.infoBox.top + 5,
              (gUi.infoBox.right - gUi.infoBox.left) - 44, 24);
 
+    moveCtrl(GetDlgItem(hwnd, 1008), contentX, gUi.sectionCorrective.top + 8, 180, 22);
+    moveCtrl(gCorrectiveCheck, contentX, gUi.sectionCorrective.top + 31, 170, 24);
+    const int correctiveEditX = contentX + 180;
+    const int correctiveEditW = (gUi.sectionCorrective.right - sectionRightInset - 124 - 8) - correctiveEditX;
+    moveCtrl(gCorrectiveEdit, correctiveEditX, gUi.sectionCorrective.top + 29, correctiveEditW, 28);
+    moveCtrl(gBrowseCorrectiveButton, gUi.sectionCorrective.right - sectionRightInset - 124, gUi.sectionCorrective.top + 27, 124, 32);
+
     const int center = rc.right / 2;
     moveCtrl(gConvertButton, center - 222, gUi.buttonArea.top, 200, 36);
     moveCtrl(gOpenButton, center - 10, gUi.buttonArea.top, 200, 36);
@@ -494,6 +537,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1007, L"Custom stimulus WAV (adapted automatically to 50.000 s)");
     createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
+    createSectionLabel(hwnd, 1008, L"Corrective IR");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                  0, 0, 100, 30, hwnd, controlId(IDC_INPUT_PATH), nullptr, nullptr);
@@ -543,6 +587,18 @@ void createUi(HWND hwnd) {
     gBrowseRecordedButton = CreateWindowW(L"BUTTON", L"Browse WAV...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                           0, 0, 120, 34, hwnd, controlId(IDC_BROWSE_RECORDED), nullptr, nullptr);
 
+    gCorrectiveCheck = CreateWindowW(L"BUTTON", L"Apply corrective IR",
+                                     WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                     0, 0, 170, 24, hwnd, controlId(IDC_APPLY_CORRECTIVE_IR), nullptr, nullptr);
+    applyFont(gCorrectiveCheck);
+    gCorrectiveEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                      WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+                                      0, 0, 100, 30, hwnd, controlId(IDC_CORRECTIVE_IR_PATH), nullptr, nullptr);
+    applyFont(gCorrectiveEdit);
+    gBrowseCorrectiveButton = CreateWindowW(L"BUTTON", L"Browse WAV...",
+                                             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                             0, 0, 120, 34, hwnd, controlId(IDC_BROWSE_CORRECTIVE_IR), nullptr, nullptr);
+
     gInfo = CreateWindowW(L"STATIC",
                           L"CLO files will be created as Mono, PCM16, 44.1 kHz.\r\n"
                           L"Audio will be trimmed or padded to exactly 20.000 seconds.",
@@ -561,7 +617,7 @@ void createUi(HWND hwnd) {
                             0, 0, 100, 22, hwnd, controlId(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
-    gVersion = CreateWindowW(L"STATIC", L"Version 1.6.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+    gVersion = CreateWindowW(L"STATIC", L"Version 1.7.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
                              0, 0, 110, 22, hwnd, controlId(IDC_VERSION), nullptr, nullptr);
     applyFont(gVersion);
 
@@ -642,6 +698,7 @@ void paintBackground(HWND hwnd, HDC hdc) {
     drawSectionCard(hdc, gUi.sectionStimulus, 2);
     drawSectionCard(hdc, gUi.sectionTail, 3);
     drawSectionCard(hdc, gUi.sectionRecorded, 4);
+    drawSectionCard(hdc, gUi.sectionCorrective, 4);
     drawInfoBox(hdc);
     fillRect(hdc, gUi.footer, kColorFooter);
 
@@ -735,7 +792,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (ctrl == gSubtitle || ctrl == GetDlgItem(hwnd, 1001)
             || ctrl == GetDlgItem(hwnd, 1002) || ctrl == GetDlgItem(hwnd, 1003) || ctrl == GetDlgItem(hwnd, 1004)
-            || ctrl == GetDlgItem(hwnd, 1005) || ctrl == GetDlgItem(hwnd, 1006) || ctrl == GetDlgItem(hwnd, 1007)) {
+            || ctrl == GetDlgItem(hwnd, 1005) || ctrl == GetDlgItem(hwnd, 1006) || ctrl == GetDlgItem(hwnd, 1007)
+            || ctrl == GetDlgItem(hwnd, 1008)) {
             SetTextColor(hdc, ctrl == gSubtitle ? kColorSubtleText : kColorText);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
@@ -760,6 +818,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_BROWSE_OUTPUT: chooseOutput(hwnd); return 0;
         case IDC_BROWSE_RECORDED: chooseRecordedAudio(hwnd); return 0;
         case IDC_BROWSE_CUSTOM_STIMULUS: chooseCustomStimulus(hwnd); return 0;
+        case IDC_BROWSE_CORRECTIVE_IR: chooseCorrectiveIr(hwnd); return 0;
+        case IDC_APPLY_CORRECTIVE_IR:
+            if (HIWORD(wParam) == BN_CLICKED) updateTailControls();
+            return 0;
         case IDC_STIMULUS_MODE:
             if (HIWORD(wParam) == CBN_SELCHANGE) updateTailControls();
             return 0;
@@ -867,9 +929,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = nullptr;
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.6",
+    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.7",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 685,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 790,
                                 nullptr, nullptr, instance, nullptr);
     if (!hwnd) { CoUninitialize(); return 1; }
     ShowWindow(hwnd, show);

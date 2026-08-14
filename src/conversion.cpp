@@ -1,5 +1,6 @@
 #include "conversion.hpp"
 #include "common.hpp"
+#include "corrective_ir.hpp"
 
 #include <algorithm>
 #include <cwctype>
@@ -331,7 +332,8 @@ bool validateRuntime(const RuntimePaths& r, std::string& error) {
 }
 
 ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outputDirectory,
-                                  const StimulusConfig stimulus, const StatusCallback& status) {
+                                  const StimulusConfig stimulus, const CorrectiveIrConfig correction,
+                                  const StatusCallback& status) {
     ConversionResult result;
     result.inputNam = inputNam;
     std::error_code ec;
@@ -402,9 +404,37 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
         return result;
     }
 
+    fs::path sourceForOutput = worker.outputClo;
+    if (correction.enabled) {
+        if (correction.wav.empty()) {
+            result.exitCode = kExitStageFailure;
+            result.error = "Select a Corrective IR WAV file.";
+            fs::remove_all(work, ec);
+            return result;
+        }
+
+        report(status, L"Applying corrective IR...");
+        const fs::path correctedClo = work / L"ampero_2048_corrected.clo";
+        CorrectiveIrStats correctionStats;
+        if (!applyCorrectiveIrToClo(worker.outputClo, correction.wav, correctedClo, correctionStats, error)
+            || !valid2048(correctedClo)) {
+            result.exitCode = kExitStageFailure;
+            result.error = error.empty() ? "The corrected Ampero CLO failed validation." : error;
+            fs::remove_all(work, ec);
+            return result;
+        }
+
+        const std::wstring correctionStatus =
+            L"Corrective IR applied: linear convolution, RMS match, -6 dB post gain. RMS gain "
+            + std::to_wstring(correctionStats.rmsGainDb) + L" dB; total "
+            + std::to_wstring(correctionStats.totalGainDb) + L" dB.";
+        if (status) status(correctionStatus);
+        sourceForOutput = correctedClo;
+    }
+
     const std::wstring base = inputNam.stem().wstring();
     result.ampero2048 = uniquePath(outDir / (base + L"_Ampero_2048.clo"));
-    if (!copyFileCreatingParents(worker.outputClo, result.ampero2048, error)) {
+    if (!copyFileCreatingParents(sourceForOutput, result.ampero2048, error)) {
         result.exitCode = kExitCopyFailure;
         result.error = error;
         fs::remove_all(work, ec);
@@ -413,7 +443,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
 
     report(status, L"Generating GP-200 1024 compact CLO...");
     result.gp2001024 = uniquePath(outDir / (base + L"_GP200_1024.clo"));
-    if (!makeGp200CompactClo(worker.outputClo, result.gp2001024, error) || !valid1024(result.gp2001024)) {
+    if (!makeGp200CompactClo(sourceForOutput, result.gp2001024, error) || !valid1024(result.gp2001024)) {
         result.exitCode = kExitCopyFailure;
         result.error = error.empty() ? "The GP-200 compact CLO failed validation." : error;
         fs::remove_all(work, ec);
@@ -429,7 +459,8 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
 
 
 BatchConversionResult convertNamFolder(const fs::path& inputDirectory, const fs::path& outputDirectory,
-                                       const StimulusConfig stimulus, const StatusCallback& status) {
+                                       const StimulusConfig stimulus, const CorrectiveIrConfig correction,
+                                       const StatusCallback& status) {
     BatchConversionResult batch;
     std::error_code ec;
     if (!fs::exists(inputDirectory, ec) || ec || !fs::is_directory(inputDirectory, ec)) {
@@ -461,7 +492,7 @@ BatchConversionResult convertNamFolder(const fs::path& inputDirectory, const fs:
             status(L"[" + std::to_wstring(i + 1) + L"/" + std::to_wstring(namFiles.size()) +
                    L"] " + nam.filename().wstring());
         }
-        auto item = convertNamToBoth(nam, outDir, stimulus, [&, i, nam](const std::wstring& text) {
+        auto item = convertNamToBoth(nam, outDir, stimulus, correction, [&, i, nam](const std::wstring& text) {
             if (status) {
                 status(L"[" + std::to_wstring(i + 1) + L"/" + std::to_wstring(namFiles.size()) +
                        L"] " + nam.filename().wstring() + L" - " + text);
