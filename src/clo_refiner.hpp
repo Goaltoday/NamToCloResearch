@@ -49,9 +49,10 @@ using RefineStatusCallback = std::function<void(const std::wstring&)>;
 // Experimental full-length P/K refiner. PRE/A/POST/B stay fixed and only
 // Ppos/Pneg/Kpos/Kneg are optimised. The complete conversion render is used
 // (normally 50 s stimulus + 20 s tail). Output level is calibrated ONCE from
-// the original CLO and frozen. Candidates are accepted only when temporal NMSE,
-// logarithmic-band spectral error and RMS-envelope error all do not worsen.
-// This prevents a lower time-domain NMSE from hiding worse tone or dynamics.
+// the original CLO and frozen. The optimiser minimises a combined full-render research loss (temporal NMSE,
+// multi-resolution STFT, and multi-scale RMS envelope) without hard guards on
+// intermediate steps. Strict safety guards are applied only to the FINAL
+// candidate, preventing tonal/dynamic regressions while avoiding local traps.
 bool refineCloPk(const fs::path& inputClo2048,
                  const fs::path& stimulusWav,
                  const fs::path& targetWav,

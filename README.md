@@ -1,4 +1,4 @@
-# NAM to CLO 1.9.4
+# NAM to CLO 1.9.5
 
 Windows GUI utility that converts one Neural Amp Model (`.nam`) or batch-converts all `.nam` files in a selected folder into two CLO files per model:
 
@@ -135,3 +135,15 @@ The full-render refiner now uses a research-oriented objective over the complete
 The optimizer only writes a refined P/K set when the candidate does not regress in raw NMSE or MR-STFT versus the original CLO, stays within a very small envelope tolerance, and improves the normalized composite objective. PRE, POST, FIR A and FIR B remain unchanged.
 
 A-weighted ESR was reviewed but intentionally deferred in this revision so low-frequency/low-mid mismatches are not de-emphasized while validating the new objective.
+
+
+### v1.9.5 free-search + final safety gate
+
+Version 1.9.5 keeps the v1.9.4 research metrics and full 70-second comparison,
+but changes the optimiser. Intermediate P/K candidates are ranked by the
+combined research loss and are allowed to trade metrics temporarily. A
+deterministic 24-point Halton coarse search in log-parameter space is followed
+by local pattern refinement. Strict temporal/spectral/envelope guards are
+applied only to the final candidate; if it does not pass, the original CLO is
+written unchanged. This is intended to avoid the 0% local-trap behaviour seen
+with v1.9.4 while retaining conservative output validation.

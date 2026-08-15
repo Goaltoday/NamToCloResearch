@@ -351,16 +351,37 @@ Eval evaluate(const Model& base,const std::vector<float>& aout,const std::vector
     return e;
 }
 
-bool acceptableAndBetter(const Eval& candidate,const Eval& best,const Eval& original){
+bool compositeBetter(const Eval& candidate,const Eval& best){
     constexpr double tol=1.0e-9;
-    // Hard guards are relative to the ORIGINAL CLO, not the immediately
-    // previous coordinate-search point. This allows useful trade-offs while
-    // guaranteeing that the two primary metrics never regress versus the
-    // official conversion. Dynamics gets only a tiny numerical tolerance.
-    const bool guards=candidate.nmse<=original.nmse*(1.0+tol)
-                   && candidate.spectral<=original.spectral*(1.0+tol)
-                   && candidate.envelope<=original.envelope*1.0005;
-    return guards && candidate.composite<best.composite*(1.0-tol);
+    return std::isfinite(candidate.composite)
+        && candidate.composite < best.composite * (1.0 - tol);
+}
+
+bool finalCandidateAcceptable(const Eval& candidate,const Eval& original){
+    // v1.9.5: optimisation is deliberately free to cross intermediate points
+    // that trade one metric for another. These guards apply ONLY to the final
+    // candidate. MR-STFT is kept essentially non-regressing because our
+    // PluginDoctor checks showed that tonal drift is immediately audible.
+    // Temporal ESR/NMSE and envelope get small tolerances so the optimiser can
+    // find a genuinely better joint solution without being trapped at the
+    // official P/K point.
+    constexpr double maxNmseRegression = 0.0010;      // +0.10 %
+    constexpr double maxSpectralRegression = 0.00001; // +0.001 %
+    constexpr double maxEnvelopeRegression = 0.0050;  // +0.50 %
+    constexpr double minCompositeImprovement = 0.00025; // 0.025 %
+    return candidate.composite <= original.composite * (1.0 - minCompositeImprovement)
+        && candidate.nmse <= original.nmse * (1.0 + maxNmseRegression)
+        && candidate.spectral <= original.spectral * (1.0 + maxSpectralRegression)
+        && candidate.envelope <= original.envelope * (1.0 + maxEnvelopeRegression);
+}
+
+// Deterministic Halton sequence for a reproducible coarse exploration in
+// log-parameter space. This avoids relying on a path of individually accepted
+// coordinate steps and can jump directly to a better P/K region.
+double halton(unsigned index,unsigned base){
+    double f=1.0, r=0.0;
+    while(index){ f/=static_cast<double>(base); r+=f*static_cast<double>(index%base); index/=base; }
+    return r;
 }
 
 bool renderOriginal(const Model& base,const std::vector<float>& aout,const FirFftPlan& bPlan,std::vector<float>& candidate){
@@ -406,24 +427,57 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
     best.nmse=stats.originalNmse; best.stimulusNmse=stats.originalStimulusNmse; best.tailNmse=stats.originalTailNmse;
     best.spectral=stats.originalSpectralError; best.envelope=stats.originalEnvelopeError; best.composite=1.0;
     const Eval originalEval=best;
-    std::array<float,4> p={m.pp,m.pn,m.kp,m.kn};
-    std::array<double,4> step={0.10,0.10,0.10,0.10};
+    const std::array<float,4> originalP={m.pp,m.pn,m.kp,m.kn};
+    std::array<float,4> p=originalP;
+
+    // Phase 1: global/coarse deterministic exploration. Search in log space so
+    // positive P/K parameters move proportionally. We allow up to +/-35 % in
+    // log-domain around the official conversion. Every point is judged ONLY
+    // by the research composite loss; individual metric guards are deferred
+    // until the final candidate.
+    if(status)status(L"Refine P/K: coarse research-loss exploration (24 candidates)...");
+    constexpr std::array<unsigned,4> bases={2,3,5,7};
+    constexpr double coarseRadius=0.35;
+    for(unsigned sample=1;sample<=24;++sample){
+        std::array<float,4> test{};
+        for(int j=0;j<4;++j){
+            const double u=halton(sample,bases[j]);
+            const double q=(2.0*u-1.0)*coarseRadius;
+            test[j]=std::max(1e-7f, float(double(originalP[j])*std::exp(q)));
+        }
+        const auto e=evaluate(m,aout,target,bPlan,fixedScale,metricRef,stats.originalNmse,stats.originalSpectralError,stats.originalEnvelopeError,
+                              test[0],test[1],test[2],test[3]);
+        if(compositeBetter(e,best)){best=e;p=test;}
+    }
+
+    // Phase 2: local pattern refinement around the best coarse point. Unlike
+    // v1.9.4, intermediate points do NOT have to beat each original metric.
+    // This is intentional: only the final solution is subjected to the strict
+    // safety guards below.
+    std::array<double,4> step={0.12,0.12,0.12,0.12};
     const int passes=std::clamp(config.passes,1,8);
     for(int pass=0;pass<passes;++pass){
-        if(status)status(L"Refine P/K full 70 s: pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes));
+        if(status)status(L"Refine P/K full 70 s: free composite pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes));
         bool any=false;
         for(int j=0;j<4;++j){
             auto localP=p; Eval local=best;
             for(int dir:{-1,1}){
                 auto test=p;
                 test[j]=std::max(1e-7f,float(double(p[j])*std::exp(dir*step[j])));
-                auto e=evaluate(m,aout,target,bPlan,fixedScale,metricRef,stats.originalNmse,stats.originalSpectralError,stats.originalEnvelopeError,test[0],test[1],test[2],test[3]);
-                if(acceptableAndBetter(e,local,originalEval)){local=e;localP=test;}
+                const auto e=evaluate(m,aout,target,bPlan,fixedScale,metricRef,stats.originalNmse,stats.originalSpectralError,stats.originalEnvelopeError,
+                                      test[0],test[1],test[2],test[3]);
+                if(compositeBetter(e,local)){local=e;localP=test;}
             }
-            if(acceptableAndBetter(local,best,originalEval)){best=local;p=localP;any=true;}
+            if(compositeBetter(local,best)){best=local;p=localP;any=true;}
         }
-        for(auto& s:step)s*=any?0.65:0.45;
+        for(auto& st:step) st*=any?0.62:0.45;
     }
+
+    // Safety gate is FINAL-only. If the best joint-loss point regresses tone,
+    // time-domain accuracy or dynamics beyond the small tolerances, keep the
+    // official CLO unchanged.
+    const bool accepted=finalCandidateAcceptable(best,originalEval);
+    if(!accepted){best=originalEval;p=originalP;}
 
     stats.refinedNmse=best.nmse;
     stats.refinedStimulusNmse=best.stimulusNmse;
@@ -432,8 +486,7 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
     stats.refinedEnvelopeError=best.envelope;
     stats.spectralImprovementPercent=stats.originalSpectralError>0?100.0*(stats.originalSpectralError-best.spectral)/stats.originalSpectralError:0;
     stats.envelopeImprovementPercent=stats.originalEnvelopeError>0?100.0*(stats.originalEnvelopeError-best.envelope)/stats.originalEnvelopeError:0;
-    stats.improved=best.nmse<=stats.originalNmse && best.spectral<=stats.originalSpectralError && best.envelope<=stats.originalEnvelopeError
-                && (best.nmse<stats.originalNmse || best.spectral<stats.originalSpectralError || best.envelope<stats.originalEnvelopeError);
+    stats.improved=accepted;
     stats.improvementPercent=stats.originalNmse>0?100.0*(stats.originalNmse-best.nmse)/stats.originalNmse:0;
     stats.stimulusImprovementPercent=stats.originalStimulusNmse>0?100.0*(stats.originalStimulusNmse-best.stimulusNmse)/stats.originalStimulusNmse:0;
     stats.tailImprovementPercent=stats.originalTailNmse>0?100.0*(stats.originalTailNmse-best.tailNmse)/stats.originalTailNmse:0;
