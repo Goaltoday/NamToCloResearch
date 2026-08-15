@@ -18,9 +18,9 @@ constexpr std::uint32_t kSampleRate = 44100;
 constexpr std::size_t kCoeffBase = 0x88;
 constexpr std::size_t kStimulusFrames = 50u * kSampleRate;
 constexpr std::size_t kPreferredFftSize = 32768;
-constexpr std::size_t kMetricFftSize = 4096;
-constexpr std::size_t kEnvelopeWindow = 2048;
-constexpr int kLogBands = 48;
+constexpr std::array<std::size_t,3> kStftFftSizes = {512, 2048, 8192};
+constexpr std::array<std::size_t,3> kStftHopSizes = {256, 1024, 4096};
+constexpr std::array<std::size_t,3> kEnvelopeWindows = {256, 2048, 8192};
 constexpr double kMetricEpsilon = 1.0e-12;
 
 std::uint16_t le16(const std::uint8_t* p) { return static_cast<std::uint16_t>(p[0] | (p[1] << 8)); }
@@ -193,49 +193,97 @@ double nmseRange(const std::vector<float>& candidate,const std::vector<float>& t
     return tt>1e-30L?static_cast<double>(er/tt):0.0;
 }
 
-std::vector<double> logBandSpectrum(const std::vector<float>& signal,double scale){
-    std::vector<long double> power(kMetricFftSize/2+1,0.0L);
-    std::vector<std::complex<float>> buf(kMetricFftSize);
-    std::vector<float> window(kMetricFftSize);
+struct StftReference {
+    std::size_t fftSize = 0;
+    std::size_t hopSize = 0;
+    std::size_t bins = 0;
+    std::size_t frames = 0;
+    std::vector<float> magnitude;
+    long double energy = 0.0L;
+};
+
+std::vector<float> hannWindow(std::size_t n){
+    std::vector<float> w(n);
     constexpr double pi=3.14159265358979323846;
-    for(std::size_t i=0;i<kMetricFftSize;++i) window[i]=static_cast<float>(0.5-0.5*std::cos(2.0*pi*double(i)/double(kMetricFftSize-1)));
-    std::size_t blocks=0;
-    for(std::size_t pos=0;pos<signal.size();pos+=kMetricFftSize){
+    if(n<=1){ if(n==1)w[0]=1.0f; return w; }
+    for(std::size_t i=0;i<n;++i) w[i]=static_cast<float>(0.5-0.5*std::cos(2.0*pi*double(i)/double(n-1)));
+    return w;
+}
+
+StftReference buildStftReference(const std::vector<float>& signal,std::size_t fftSize,std::size_t hopSize,double scale){
+    StftReference r;
+    r.fftSize=fftSize; r.hopSize=hopSize; r.bins=fftSize/2+1;
+    r.frames=signal.empty()?0:((signal.size()+hopSize-1)/hopSize);
+    r.magnitude.resize(r.frames*r.bins);
+    const auto window=hannWindow(fftSize);
+    std::vector<std::complex<float>> buf(fftSize);
+    for(std::size_t frame=0;frame<r.frames;++frame){
+        const std::size_t pos=frame*hopSize;
         std::fill(buf.begin(),buf.end(),std::complex<float>{});
-        const std::size_t count=std::min(kMetricFftSize,signal.size()-pos);
+        const std::size_t count=pos<signal.size()?std::min(fftSize,signal.size()-pos):0;
         for(std::size_t i=0;i<count;++i) buf[i]=std::complex<float>(static_cast<float>(scale*signal[pos+i])*window[i],0.0f);
         fft(buf,false);
-        for(std::size_t k=0;k<power.size();++k) power[k]+=static_cast<long double>(std::norm(buf[k]));
-        ++blocks;
+        for(std::size_t k=0;k<r.bins;++k){
+            const float mag=std::abs(buf[k]);
+            r.magnitude[frame*r.bins+k]=mag;
+            r.energy+=static_cast<long double>(mag)*mag;
+        }
     }
-    if(blocks==0) blocks=1;
-    const double minHz=30.0,maxHz=18000.0;
-    std::vector<double> bands(kLogBands,-120.0);
-    for(int b=0;b<kLogBands;++b){
-        const double f0=minHz*std::pow(maxHz/minHz,double(b)/kLogBands);
-        const double f1=minHz*std::pow(maxHz/minHz,double(b+1)/kLogBands);
-        const std::size_t k0=std::max<std::size_t>(1,static_cast<std::size_t>(std::floor(f0*kMetricFftSize/kSampleRate)));
-        const std::size_t k1=std::min<std::size_t>(power.size()-1,static_cast<std::size_t>(std::ceil(f1*kMetricFftSize/kSampleRate)));
-        long double p=0.0L; std::size_t bins=0;
-        for(std::size_t k=k0;k<=k1 && k<power.size();++k){p+=power[k];++bins;}
-        const double mean=bins?static_cast<double>(p/(static_cast<long double>(blocks)*bins)):0.0;
-        bands[b]=10.0*std::log10(std::max(mean,kMetricEpsilon));
-    }
-    return bands;
+    return r;
 }
 
-double spectralError(const std::vector<double>& candidate,const std::vector<double>& target){
-    const std::size_t n=std::min(candidate.size(),target.size()); if(n==0)return 0.0;
-    long double e=0.0L;
-    for(std::size_t i=0;i<n;++i){const long double d=candidate[i]-target[i];e+=d*d;}
-    return static_cast<double>(e/n);
+struct StftLossParts { double spectralConvergence=0.0, logMagnitude=0.0, total=0.0; };
+
+StftLossParts stftLoss(const std::vector<float>& candidate,double scale,const StftReference& target){
+    if(target.frames==0 || target.bins==0) return {};
+    const auto window=hannWindow(target.fftSize);
+    std::vector<std::complex<float>> buf(target.fftSize);
+    long double diff2=0.0L, logAbs=0.0L;
+    std::size_t used=0;
+    constexpr double eps=1.0e-7;
+    for(std::size_t frame=0;frame<target.frames;++frame){
+        const std::size_t pos=frame*target.hopSize;
+        std::fill(buf.begin(),buf.end(),std::complex<float>{});
+        const std::size_t count=pos<candidate.size()?std::min(target.fftSize,candidate.size()-pos):0;
+        for(std::size_t i=0;i<count;++i) buf[i]=std::complex<float>(static_cast<float>(scale*candidate[pos+i])*window[i],0.0f);
+        fft(buf,false);
+        for(std::size_t k=0;k<target.bins;++k){
+            const double cm=std::abs(buf[k]);
+            const double tm=target.magnitude[frame*target.bins+k];
+            const long double d=cm-tm;
+            diff2+=d*d;
+            logAbs+=std::abs(std::log(cm+eps)-std::log(tm+eps));
+            ++used;
+        }
+    }
+    StftLossParts out;
+    out.spectralConvergence=target.energy>1e-30L?std::sqrt(static_cast<double>(diff2/target.energy)):0.0;
+    out.logMagnitude=used?static_cast<double>(logAbs/used):0.0;
+    // Parallel WaveGAN-style combination: spectral convergence + log-magnitude.
+    out.total=out.spectralConvergence+out.logMagnitude;
+    return out;
 }
 
-std::vector<double> envelopeDb(const std::vector<float>& signal,double scale){
+struct MultiStftReference { std::array<StftReference,3> resolutions; };
+
+MultiStftReference buildMultiStftReference(const std::vector<float>& target){
+    MultiStftReference r;
+    for(std::size_t i=0;i<r.resolutions.size();++i)
+        r.resolutions[i]=buildStftReference(target,kStftFftSizes[i],kStftHopSizes[i],1.0);
+    return r;
+}
+
+double multiResolutionStftLoss(const std::vector<float>& candidate,double scale,const MultiStftReference& target){
+    double total=0.0;
+    for(const auto& r:target.resolutions) total+=stftLoss(candidate,scale,r).total;
+    return total/static_cast<double>(target.resolutions.size());
+}
+
+std::vector<double> envelopeDb(const std::vector<float>& signal,double scale,std::size_t windowSize){
     std::vector<double> out;
-    out.reserve((signal.size()+kEnvelopeWindow-1)/kEnvelopeWindow);
-    for(std::size_t pos=0;pos<signal.size();pos+=kEnvelopeWindow){
-        const std::size_t end=std::min(signal.size(),pos+kEnvelopeWindow);
+    out.reserve((signal.size()+windowSize-1)/windowSize);
+    for(std::size_t pos=0;pos<signal.size();pos+=windowSize){
+        const std::size_t end=std::min(signal.size(),pos+windowSize);
         long double ss=0.0L;
         for(std::size_t i=pos;i<end;++i){const long double x=scale*static_cast<long double>(signal[i]);ss+=x*x;}
         const double rms=end>pos?std::sqrt(static_cast<double>(ss/(end-pos))):0.0;
@@ -244,21 +292,34 @@ std::vector<double> envelopeDb(const std::vector<float>& signal,double scale){
     return out;
 }
 
-double envelopeError(const std::vector<double>& candidate,const std::vector<double>& target){
+double envelopeMae(const std::vector<double>& candidate,const std::vector<double>& target){
     const std::size_t n=std::min(candidate.size(),target.size()); if(n==0)return 0.0;
     long double e=0.0L; std::size_t used=0;
     for(std::size_t i=0;i<n;++i){
-        // Ignore windows where both signals are effectively silence; otherwise
-        // a tiny numerical floor can dominate the metric during long gaps.
         if(candidate[i]<-95.0 && target[i]<-95.0) continue;
-        const long double d=candidate[i]-target[i]; e+=d*d; ++used;
+        e+=std::abs(candidate[i]-target[i]); ++used;
     }
     return used?static_cast<double>(e/used):0.0;
 }
 
+struct MultiEnvelopeReference { std::array<std::vector<double>,3> scales; };
+
+MultiEnvelopeReference buildMultiEnvelopeReference(const std::vector<float>& target){
+    MultiEnvelopeReference r;
+    for(std::size_t i=0;i<r.scales.size();++i) r.scales[i]=envelopeDb(target,1.0,kEnvelopeWindows[i]);
+    return r;
+}
+
+double multiScaleEnvelopeError(const std::vector<float>& candidate,double scale,const MultiEnvelopeReference& target){
+    double e=0.0;
+    for(std::size_t i=0;i<target.scales.size();++i)
+        e+=envelopeMae(envelopeDb(candidate,scale,kEnvelopeWindows[i]),target.scales[i]);
+    return e/static_cast<double>(target.scales.size());
+}
+
 struct MetricReference {
-    std::vector<double> spectrum;
-    std::vector<double> envelope;
+    MultiStftReference mrstft;
+    MultiEnvelopeReference envelope;
 };
 
 struct Eval {
@@ -278,21 +339,28 @@ Eval evaluate(const Model& base,const std::vector<float>& aout,const std::vector
     e.nmse=nmseRange(candidate,target,fixedScale,0,n);
     e.stimulusNmse=nmseRange(candidate,target,fixedScale,0,split);
     e.tailNmse=nmseRange(candidate,target,fixedScale,split,n);
-    e.spectral=spectralError(logBandSpectrum(candidate,fixedScale),metricRef.spectrum);
-    e.envelope=envelopeError(envelopeDb(candidate,fixedScale),metricRef.envelope);
+    e.spectral=multiResolutionStftLoss(candidate,fixedScale,metricRef.mrstft);
+    e.envelope=multiScaleEnvelopeError(candidate,fixedScale,metricRef.envelope);
     const double nNorm=e.nmse/std::max(originalNmse,kMetricEpsilon);
     const double sNorm=e.spectral/std::max(originalSpectral,kMetricEpsilon);
     const double dNorm=e.envelope/std::max(originalEnvelope,kMetricEpsilon);
-    e.composite=nNorm+sNorm+0.5*dNorm;
+    // Time accuracy remains mandatory, but MR-STFT receives the largest
+    // share because the previous NMSE-only refinements could move tonal
+    // balance in the wrong direction. Envelope is a dynamics guard.
+    e.composite=0.35*nNorm+0.50*sNorm+0.15*dNorm;
     return e;
 }
 
-bool noWorseAndBetter(const Eval& candidate,const Eval& current){
+bool acceptableAndBetter(const Eval& candidate,const Eval& best,const Eval& original){
     constexpr double tol=1.0e-9;
-    const bool guards=candidate.nmse<=current.nmse*(1.0+tol)
-                   && candidate.spectral<=current.spectral*(1.0+tol)
-                   && candidate.envelope<=current.envelope*(1.0+tol);
-    return guards && candidate.composite<current.composite*(1.0-tol);
+    // Hard guards are relative to the ORIGINAL CLO, not the immediately
+    // previous coordinate-search point. This allows useful trade-offs while
+    // guaranteeing that the two primary metrics never regress versus the
+    // official conversion. Dynamics gets only a tiny numerical tolerance.
+    const bool guards=candidate.nmse<=original.nmse*(1.0+tol)
+                   && candidate.spectral<=original.spectral*(1.0+tol)
+                   && candidate.envelope<=original.envelope*1.0005;
+    return guards && candidate.composite<best.composite*(1.0-tol);
 }
 
 bool renderOriginal(const Model& base,const std::vector<float>& aout,const FirFftPlan& bPlan,std::vector<float>& candidate){
@@ -329,14 +397,15 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
     stats.originalNmse=nmseRange(originalCandidate,target,fixedScale,0,n);
     stats.originalStimulusNmse=nmseRange(originalCandidate,target,fixedScale,0,split);
     stats.originalTailNmse=nmseRange(originalCandidate,target,fixedScale,split,n);
-    if(status)status(L"Refine P/K: computing full-render spectral + envelope references...");
-    MetricReference metricRef{logBandSpectrum(target,1.0), envelopeDb(target,1.0)};
-    stats.originalSpectralError=spectralError(logBandSpectrum(originalCandidate,fixedScale),metricRef.spectrum);
-    stats.originalEnvelopeError=envelopeError(envelopeDb(originalCandidate,fixedScale),metricRef.envelope);
+    if(status)status(L"Refine P/K: computing full-render MR-STFT + multi-scale envelope references...");
+    MetricReference metricRef{buildMultiStftReference(target), buildMultiEnvelopeReference(target)};
+    stats.originalSpectralError=multiResolutionStftLoss(originalCandidate,fixedScale,metricRef.mrstft);
+    stats.originalEnvelopeError=multiScaleEnvelopeError(originalCandidate,fixedScale,metricRef.envelope);
 
     Eval best;
     best.nmse=stats.originalNmse; best.stimulusNmse=stats.originalStimulusNmse; best.tailNmse=stats.originalTailNmse;
-    best.spectral=stats.originalSpectralError; best.envelope=stats.originalEnvelopeError; best.composite=2.5;
+    best.spectral=stats.originalSpectralError; best.envelope=stats.originalEnvelopeError; best.composite=1.0;
+    const Eval originalEval=best;
     std::array<float,4> p={m.pp,m.pn,m.kp,m.kn};
     std::array<double,4> step={0.10,0.10,0.10,0.10};
     const int passes=std::clamp(config.passes,1,8);
@@ -349,9 +418,9 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
                 auto test=p;
                 test[j]=std::max(1e-7f,float(double(p[j])*std::exp(dir*step[j])));
                 auto e=evaluate(m,aout,target,bPlan,fixedScale,metricRef,stats.originalNmse,stats.originalSpectralError,stats.originalEnvelopeError,test[0],test[1],test[2],test[3]);
-                if(noWorseAndBetter(e,local)){local=e;localP=test;}
+                if(acceptableAndBetter(e,local,originalEval)){local=e;localP=test;}
             }
-            if(noWorseAndBetter(local,best)){best=local;p=localP;any=true;}
+            if(acceptableAndBetter(local,best,originalEval)){best=local;p=localP;any=true;}
         }
         for(auto& s:step)s*=any?0.65:0.45;
     }

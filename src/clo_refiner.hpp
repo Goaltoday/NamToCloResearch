@@ -26,9 +26,9 @@ struct CloRefineStats {
     double refinedTailNmse = 0.0;
     double tailImprovementPercent = 0.0;
 
-    // Full-render secondary metrics. Spectral error is mean squared dB error
-    // across 48 logarithmic bands (30 Hz..18 kHz). Envelope error is mean
-    // squared dB RMS error in 2048-sample windows.
+    // Full-render secondary metrics. Spectral error is a multi-resolution
+    // STFT loss (FFT 512/2048/8192, spectral convergence + log magnitude).
+    // Envelope error is mean absolute dB RMS mismatch at 256/2048/8192 samples.
     double originalSpectralError = 0.0;
     double refinedSpectralError = 0.0;
     double spectralImprovementPercent = 0.0;

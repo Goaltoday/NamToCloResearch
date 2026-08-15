@@ -1,4 +1,4 @@
-# NAM to CLO 1.9.3
+# NAM to CLO 1.9.4
 
 Windows GUI utility that converts one Neural Amp Model (`.nam`) or batch-converts all `.nam` files in a selected folder into two CLO files per model:
 
@@ -64,9 +64,9 @@ build\Release\NamToClo.exe
 
 Copy it to a clean folder together with `runtime\ampero\HTUSBTools.dll` and `runtime\ampero\nam_input_wav.wav`.
 
-## Experimental P/K refinement (v1.9.3)
+## Experimental P/K refinement (v1.9.4)
 
-Version 1.9.3 includes an optional **CLO refinement (experimental)** stage. The normal
+Version 1.9.4 includes an optional **CLO refinement (experimental)** stage. The normal
 HTUSBTools conversion is preserved and the original Ampero B2048 / GP-200 B1024
 files are still generated unchanged.
 
@@ -122,3 +122,16 @@ The experimental P/K refiner still evaluates the complete render (normally 50 s 
 - RMS-envelope error in 2048-sample windows.
 
 The optimizer uses a normalized composite score only after those hard guards pass. This is intentionally conservative: a lower sample-domain NMSE can no longer be accepted if it makes the spectrum or dynamics worse. PRE, POST, FIR A and FIR B remain unchanged.
+
+
+### v1.9.4 research loss
+
+The full-render refiner now uses a research-oriented objective over the complete rendered audio:
+
+- raw time-domain NMSE with one fixed output calibration derived from the original CLO,
+- multi-resolution STFT loss at FFT sizes 512, 2048 and 8192 (spectral convergence + log magnitude),
+- multi-scale RMS-envelope error at 256, 2048 and 8192 samples.
+
+The optimizer only writes a refined P/K set when the candidate does not regress in raw NMSE or MR-STFT versus the original CLO, stays within a very small envelope tolerance, and improves the normalized composite objective. PRE, POST, FIR A and FIR B remain unchanged.
+
+A-weighted ESR was reviewed but intentionally deferred in this revision so low-frequency/low-mid mismatches are not de-emphasized while validating the new objective.
