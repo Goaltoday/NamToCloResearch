@@ -16,9 +16,8 @@ namespace ntc {
 namespace {
 constexpr std::uint32_t kSampleRate = 44100;
 constexpr std::size_t kCoeffBase = 0x88;
-constexpr std::size_t kAnalysisFrames = 12u * kSampleRate; // experimental v1: fast deterministic subset
-constexpr std::size_t kWindow = 1024;
-constexpr int kWindowCount = 6;
+constexpr std::size_t kStimulusFrames = 50u * kSampleRate;
+constexpr std::size_t kPreferredFftSize = 32768;
 
 std::uint16_t le16(const std::uint8_t* p) { return static_cast<std::uint16_t>(p[0] | (p[1] << 8)); }
 std::uint32_t le32(const std::uint8_t* p) { return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) | (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24); }
@@ -60,11 +59,6 @@ bool readMono44100(const fs::path& path, std::vector<float>& out, std::string& e
 
     if(sr==kSampleRate){ out=std::move(decoded); return true; }
 
-    // HTUSBTools may render its NAM reference WAV at a rate different from the
-    // 44.1 kHz stimulus. For refinement we adapt both sides to the CLO engine
-    // rate instead of rejecting an otherwise valid render. Linear interpolation
-    // is sufficient here because the refinement metric is evaluated at 44.1 kHz
-    // and the same deterministic adaptation is used for every candidate.
     const double ratio=static_cast<double>(sr)/static_cast<double>(kSampleRate);
     const std::size_t outFrames=static_cast<std::size_t>(std::llround(static_cast<double>(decoded.size())/ratio));
     out.resize(outFrames);
@@ -72,15 +66,14 @@ bool readMono44100(const fs::path& path, std::vector<float>& out, std::string& e
         const double pos=static_cast<double>(i)*ratio;
         const std::size_t i0=std::min(static_cast<std::size_t>(pos),decoded.size()-1);
         const std::size_t i1=std::min(i0+1,decoded.size()-1);
-        const double f=pos-static_cast<double>(i0);
-        out[i]=static_cast<float>(decoded[i0]+(decoded[i1]-decoded[i0])*f);
+        const double frac=pos-static_cast<double>(i0);
+        out[i]=static_cast<float>(decoded[i0]+(decoded[i1]-decoded[i0])*frac);
     }
     return true;
 }
 
 struct Biquad { double b0=1,b1=0,b2=0,a1=0,a2=0,z1=0,z2=0; float process(float x){ double y=b0*x+z1; z1=b1*x-a1*y+z2; z2=b2*x-a2*y; return static_cast<float>(y);} };
 struct AP { float a=0,s=0; float process(float x){ float y=s+a*x; s=x-a*y; return y; } };
-template<std::size_t N> float run(std::array<AP,N>& a,float x){ for(auto& s:a)x=s.process(x); return x; }
 struct Poly {
     std::vector<AP> a,b; float delay=0;
     Poly(std::initializer_list<float> aa,std::initializer_list<float> bb){ for(float x:aa)a.push_back({x,0}); for(float x:bb)b.push_back({x,0}); }
@@ -88,9 +81,7 @@ struct Poly {
     void up(float x,float& e,float& o){e=r(a,x);o=r(b,x);} float down(float e,float o){float x=r(a,e), y=r(b,o); float z=.5f*(x+delay);delay=y;return z;}
 };
 
-struct Model {
-    Biquad pre,post; std::vector<float>A,B; float pp=0,pn=0,kp=0,kn=0;
-};
+struct Model { Biquad pre,post; std::vector<float>A,B; float pp=0,pn=0,kp=0,kn=0; };
 bool parseModel(const std::vector<std::uint8_t>& d, Model& m, std::string& error){
     if(d.size()<0x88 || std::memcmp(d.data(),"VTSI",4)!=0){error="Invalid VTSI CLO.";return false;}
     m.pre={led(d.data()+0x18),led(d.data()+0x20),led(d.data()+0x28),led(d.data()+0x30),led(d.data()+0x38)};
@@ -106,41 +97,181 @@ std::vector<float> precomputeA(const Model& src,const std::vector<float>& in,std
     for(std::size_t i=0;i<n;++i){ float x=m.pre.process(in[i]); hist[ix]=x; double s=0;std::size_t h=ix;for(float t:m.A){s+=double(t)*hist[h];h=h? h-1:hist.size()-1;}ix=(ix+1)%hist.size();out[i]=float(s);}return out;
 }
 
-std::vector<std::pair<std::size_t,std::size_t>> chooseWindows(const std::vector<float>& target,std::size_t n){
-    struct E{double e;std::size_t s;};std::vector<E> blocks; for(std::size_t s=0;s+kWindow<=n;s+=kWindow){double e=0;for(std::size_t i=0;i<kWindow;++i)e+=double(target[s+i])*target[s+i];blocks.push_back({e/kWindow,s});}
-    std::sort(blocks.begin(),blocks.end(),[](auto&a,auto&b){return a.e<b.e;});std::vector<std::pair<std::size_t,std::size_t>> w; if(blocks.empty())return w;
-    constexpr double q[kWindowCount]={0.10,0.25,0.45,0.65,0.82,0.96}; for(double x:q){auto idx=std::min(blocks.size()-1,std::size_t(x*(blocks.size()-1)));w.push_back({blocks[idx].s,blocks[idx].s+kWindow});} std::sort(w.begin(),w.end());return w;
+void fft(std::vector<std::complex<float>>& a, bool inverse){
+    const std::size_t n=a.size();
+    for(std::size_t i=1,j=0;i<n;++i){
+        std::size_t bit=n>>1;
+        for(;j&bit;bit>>=1) j^=bit;
+        j^=bit;
+        if(i<j) std::swap(a[i],a[j]);
+    }
+    constexpr float pi=3.14159265358979323846f;
+    for(std::size_t len=2;len<=n;len<<=1){
+        const float ang=(inverse?2.0f:-2.0f)*pi/static_cast<float>(len);
+        const std::complex<float> wlen(std::cos(ang),std::sin(ang));
+        for(std::size_t i=0;i<n;i+=len){
+            std::complex<float> w(1.0f,0.0f);
+            for(std::size_t j=0;j<len/2;++j){
+                const auto u=a[i+j];
+                const auto v=a[i+j+len/2]*w;
+                a[i+j]=u+v;
+                a[i+j+len/2]=u-v;
+                w*=wlen;
+            }
+        }
+    }
+    if(inverse){ const float inv=1.0f/static_cast<float>(n); for(auto& v:a)v*=inv; }
 }
 
-struct Eval { double nmse=1e100,scale=1; };
-Eval evaluate(const Model& base,const std::vector<float>& aout,const std::vector<float>& target,const std::vector<std::pair<std::size_t,std::size_t>>& windows,float pp,float pn,float kp,float kn){
+std::size_t nextPow2(std::size_t n){ std::size_t p=1; while(p<n)p<<=1; return p; }
+
+struct FirFftPlan {
+    std::size_t fftSize=0, filterLen=0, hop=0;
+    std::vector<std::complex<float>> filterSpectrum;
+
+    explicit FirFftPlan(const std::vector<float>& h){
+        filterLen=h.size();
+        fftSize=nextPow2(std::max(kPreferredFftSize,filterLen*2));
+        hop=fftSize-filterLen+1;
+        filterSpectrum.assign(fftSize,{});
+        for(std::size_t i=0;i<h.size();++i) filterSpectrum[i]=std::complex<float>(h[i],0.0f);
+        fft(filterSpectrum,false);
+    }
+
+    void process(const std::vector<float>& input,std::vector<float>& output) const {
+        output.assign(input.size(),0.0f);
+        std::vector<std::complex<float>> buf(fftSize);
+        const std::size_t overlap=filterLen-1;
+        for(std::size_t pos=0;pos<input.size();pos+=hop){
+            std::fill(buf.begin(),buf.end(),std::complex<float>{});
+            for(std::size_t j=0;j<overlap;++j){
+                if(pos+j>=overlap) buf[j]=std::complex<float>(input[pos+j-overlap],0.0f);
+            }
+            const std::size_t count=std::min(hop,input.size()-pos);
+            for(std::size_t j=0;j<count;++j) buf[overlap+j]=std::complex<float>(input[pos+j],0.0f);
+            fft(buf,false);
+            for(std::size_t k=0;k<fftSize;++k) buf[k]*=filterSpectrum[k];
+            fft(buf,true);
+            for(std::size_t j=0;j<count;++j) output[pos+j]=buf[overlap+j].real();
+        }
+    }
+};
+
+void renderPreB(const Model& base,const std::vector<float>& aout,float pp,float pn,float kp,float kn,std::vector<float>& out){
     Biquad post=base.post;
     Poly u1({.045728147029876709f,.3325011134147644f,.66320204734802246f,.93385583162307739f},{.16808754205703735f,.50448572635650635f,.80378085374832153f});
     Poly u2({.054230779409408569f,.39879697561264038f,.86291784048080444f},{.19969958066940308f,.62109684944152832f});
     Poly d1({.070765949785709381f,.51316756010055542f},{.25785309076309204f,.81731736660003662f});
     Poly d2({.054217524826526642f,.38308733701705933f,.74872094392776489f},{.19679796695709229f,.57313638925552368f,.91429370641708374f});
-    std::vector<float> hist(base.B.size(),0);std::size_t bix=0, wi=0;std::vector<double> c,t;c.reserve(windows.size()*kWindow);t.reserve(c.capacity());
+    out.resize(aout.size());
     auto shape=[&](float x){return x>0?pp*(1-std::exp(-kp*x)):pn*(std::exp(kn*x)-1);};
-    for(std::size_t i=0;i<aout.size();++i){float a,b,c0,c1;u1.up(aout[i],a,b);u2.up(a,c0,c1);c0=shape(c0);c1=shape(c1);float e0=d1.down(c0,c1);u2.up(b,c0,c1);c0=shape(c0);c1=shape(c1);float e1=d1.down(c0,c1);float y=d2.down(e0,e1);y=post.process(y);hist[bix]=y;
-        bool take=wi<windows.size() && i>=windows[wi].first && i<windows[wi].second; if(take){double s=0;std::size_t h=bix;for(float q:base.B){s+=double(q)*hist[h];h=h?h-1:hist.size()-1;}c.push_back(s);t.push_back(target[i]);}
-        bix=(bix+1)%hist.size(); if(wi<windows.size() && i+1>=windows[wi].second)++wi;
+    for(std::size_t i=0;i<aout.size();++i){
+        float a,b,c0,c1;
+        u1.up(aout[i],a,b);
+        u2.up(a,c0,c1); c0=shape(c0); c1=shape(c1); const float e0=d1.down(c0,c1);
+        u2.up(b,c0,c1); c0=shape(c0); c1=shape(c1); const float e1=d1.down(c0,c1);
+        out[i]=post.process(d2.down(e0,e1));
     }
-    if(c.empty())return {};double cc=0,ct=0,tt=0;for(std::size_t i=0;i<c.size();++i){cc+=c[i]*c[i];ct+=c[i]*t[i];tt+=t[i]*t[i];}double scale=cc>1e-30?ct/cc:1;double er=0;for(std::size_t i=0;i<c.size();++i){double d=scale*c[i]-t[i];er+=d*d;}return {tt>1e-30?er/tt:1e100,scale};
+}
+
+double fitScale(const std::vector<float>& candidate,const std::vector<float>& target){
+    const std::size_t n=std::min(candidate.size(),target.size());
+    long double cc=0.0L,ct=0.0L;
+    for(std::size_t i=0;i<n;++i){ cc+=static_cast<long double>(candidate[i])*candidate[i]; ct+=static_cast<long double>(candidate[i])*target[i]; }
+    return cc>1e-30L?static_cast<double>(ct/cc):1.0;
+}
+
+double nmseRange(const std::vector<float>& candidate,const std::vector<float>& target,double scale,std::size_t begin,std::size_t end){
+    const std::size_t n=std::min(candidate.size(),target.size());
+    begin=std::min(begin,n); end=std::min(end,n); if(end<=begin)return 0.0;
+    long double er=0.0L,tt=0.0L;
+    for(std::size_t i=begin;i<end;++i){ const long double t=target[i]; const long double d=scale*static_cast<long double>(candidate[i])-t; er+=d*d; tt+=t*t; }
+    return tt>1e-30L?static_cast<double>(er/tt):0.0;
+}
+
+struct Eval { double nmse=1e100, stimulusNmse=1e100, tailNmse=1e100; };
+Eval evaluate(const Model& base,const std::vector<float>& aout,const std::vector<float>& target,const FirFftPlan& bPlan,double fixedScale,float pp,float pn,float kp,float kn){
+    std::vector<float> preB,candidate;
+    renderPreB(base,aout,pp,pn,kp,kn,preB);
+    bPlan.process(preB,candidate);
+    const std::size_t n=std::min(candidate.size(),target.size());
+    const std::size_t split=std::min(kStimulusFrames,n);
+    return {
+        nmseRange(candidate,target,fixedScale,0,n),
+        nmseRange(candidate,target,fixedScale,0,split),
+        nmseRange(candidate,target,fixedScale,split,n)
+    };
+}
+
+bool renderOriginal(const Model& base,const std::vector<float>& aout,const FirFftPlan& bPlan,std::vector<float>& candidate){
+    std::vector<float> preB;
+    renderPreB(base,aout,base.pp,base.pn,base.kp,base.kn,preB);
+    bPlan.process(preB,candidate);
+    return !candidate.empty();
 }
 }
 
 bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const fs::path& targetWav,const fs::path& outputClo2048,const CloRefineConfig& config,CloRefineStats& stats,std::string& error,const RefineStatusCallback& status){
     std::vector<std::uint8_t> bytes;if(!readFileBytes(inputClo2048,bytes,error))return false;Model m;if(!parseModel(bytes,m,error))return false;
-    std::vector<float> in,target;if(!readMono44100(stimulusWav,in,error)||!readMono44100(targetWav,target,error))return false;std::size_t n=std::min({in.size(),target.size(),kAnalysisFrames});if(n<kWindow*4){error="Not enough rendered audio for refinement.";return false;}in.resize(n);target.resize(n);
-    if(status)status(L"Refine P/K: precomputing fixed PRE + FIR A...");auto aout=precomputeA(m,in,n);auto windows=chooseWindows(target,n);if(windows.empty()){error="Could not select refinement windows.";return false;}
+    std::vector<float> in,target;if(!readMono44100(stimulusWav,in,error)||!readMono44100(targetWav,target,error))return false;
+    const std::size_t n=std::min(in.size(),target.size());
+    if(n<static_cast<std::size_t>(kSampleRate)){error="Not enough rendered audio for full-length refinement.";return false;}
+    in.resize(n);target.resize(n);
+
+    if(status)status(L"Refine P/K: precomputing full PRE + FIR A...");
+    auto aout=precomputeA(m,in,n);
+    if(status)status(L"Refine P/K: preparing fixed FIR B FFT plan...");
+    FirFftPlan bPlan(m.B);
+
     stats.pPosBefore=m.pp;stats.pNegBefore=m.pn;stats.kPosBefore=m.kp;stats.kNegBefore=m.kn;
-    Eval best=evaluate(m,aout,target,windows,m.pp,m.pn,m.kp,m.kn);stats.originalNmse=best.nmse;
-    std::array<float,4> p={m.pp,m.pn,m.kp,m.kn};std::array<double,4> step={0.10,0.10,0.10,0.10};
-    const int passes=std::clamp(config.passes,1,8);for(int pass=0;pass<passes;++pass){if(status)status(L"Refine P/K: pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes));bool any=false;for(int j=0;j<4;++j){auto localP=p;Eval local=best;for(int dir:{-1,1}){auto test=p;test[j]=std::max(1e-7f,float(double(p[j])*std::exp(dir*step[j])));auto e=evaluate(m,aout,target,windows,test[0],test[1],test[2],test[3]);if(e.nmse<local.nmse){local=e;localP=test;}}if(local.nmse<best.nmse){best=local;p=localP;any=true;}}for(auto& s:step)s*= any?0.65:0.45;}
-    stats.refinedNmse=best.nmse;stats.outputScale=best.scale;stats.improved=best.nmse<stats.originalNmse;stats.improvementPercent=stats.originalNmse>0?100.0*(stats.originalNmse-best.nmse)/stats.originalNmse:0;
+
+    // Calibrate output level once from the original CLO. This scale is then
+    // frozen for every candidate so the optimiser cannot hide excess gain or
+    // compression by re-normalising each P/K proposal independently.
+    if(status)status(L"Refine P/K: calibrating original CLO level over full render...");
+    std::vector<float> originalCandidate;
+    if(!renderOriginal(m,aout,bPlan,originalCandidate)){error="Could not render original CLO for refinement.";return false;}
+    const double fixedScale=fitScale(originalCandidate,target);
+    stats.outputScale=fixedScale;
+    const std::size_t split=std::min(kStimulusFrames,n);
+    stats.originalNmse=nmseRange(originalCandidate,target,fixedScale,0,n);
+    stats.originalStimulusNmse=nmseRange(originalCandidate,target,fixedScale,0,split);
+    stats.originalTailNmse=nmseRange(originalCandidate,target,fixedScale,split,n);
+
+    Eval best{stats.originalNmse,stats.originalStimulusNmse,stats.originalTailNmse};
+    std::array<float,4> p={m.pp,m.pn,m.kp,m.kn};
+    std::array<double,4> step={0.10,0.10,0.10,0.10};
+    const int passes=std::clamp(config.passes,1,8);
+    for(int pass=0;pass<passes;++pass){
+        if(status)status(L"Refine P/K full 70 s: pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes));
+        bool any=false;
+        for(int j=0;j<4;++j){
+            auto localP=p; Eval local=best;
+            for(int dir:{-1,1}){
+                auto test=p;
+                test[j]=std::max(1e-7f,float(double(p[j])*std::exp(dir*step[j])));
+                auto e=evaluate(m,aout,target,bPlan,fixedScale,test[0],test[1],test[2],test[3]);
+                if(e.nmse<local.nmse){local=e;localP=test;}
+            }
+            if(local.nmse<best.nmse){best=local;p=localP;any=true;}
+        }
+        for(auto& s:step)s*=any?0.65:0.45;
+    }
+
+    stats.refinedNmse=best.nmse;
+    stats.refinedStimulusNmse=best.stimulusNmse;
+    stats.refinedTailNmse=best.tailNmse;
+    stats.improved=best.nmse<stats.originalNmse;
+    stats.improvementPercent=stats.originalNmse>0?100.0*(stats.originalNmse-best.nmse)/stats.originalNmse:0;
+    stats.stimulusImprovementPercent=stats.originalStimulusNmse>0?100.0*(stats.originalStimulusNmse-best.stimulusNmse)/stats.originalStimulusNmse:0;
+    stats.tailImprovementPercent=stats.originalTailNmse>0?100.0*(stats.originalTailNmse-best.tailNmse)/stats.originalTailNmse:0;
     stats.pPosAfter=p[0];stats.pNegAfter=p[1];stats.kPosAfter=p[2];stats.kNegAfter=p[3];
+
     if(stats.improved){putf(bytes.data()+0x68,p[0]);putf(bytes.data()+0x6c,p[1]);putf(bytes.data()+0x70,p[2]);putf(bytes.data()+0x74,p[3]);}
-    if(!writeFileBytes(outputClo2048,bytes.data(),bytes.size(),error))return false;return true;
+    else { stats.pPosAfter=m.pp;stats.pNegAfter=m.pn;stats.kPosAfter=m.kp;stats.kNegAfter=m.kn; }
+
+    if(!writeFileBytes(outputClo2048,bytes.data(),bytes.size(),error))return false;
+    return true;
 }
 
 } // namespace ntc

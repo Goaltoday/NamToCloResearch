@@ -634,7 +634,7 @@ void createUi(HWND hwnd) {
                             0, 0, 100, 22, hwnd, controlId(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
-    gVersion = CreateWindowW(L"STATIC", L"Version 1.9.1", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+    gVersion = CreateWindowW(L"STATIC", L"Version 1.9.2", WS_CHILD | WS_VISIBLE | SS_RIGHT,
                              0, 0, 110, 22, hwnd, controlId(IDC_VERSION), nullptr, nullptr);
     applyFont(gVersion);
 
@@ -878,8 +878,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (!r->refinedAmpero2048.empty()) {
                 resultMessage += L"\r\n\r\nRefined Ampero 2048:\r\n" + r->refinedAmpero2048.wstring()
                               + L"\r\n\r\nRefined GP-200 1024:\r\n" + r->refinedGp2001024.wstring()
-                              + L"\r\n\r\nP/K NMSE improvement: "
-                              + std::to_wstring(r->refineStats.improvementPercent) + L"%";
+                              + L"\r\n\r\nP/K full-render NMSE improvement: "
+                              + std::to_wstring(r->refineStats.improvementPercent) + L"%"
+                              + L"\r\nStimulus (first 50 s): "
+                              + std::to_wstring(r->refineStats.stimulusImprovementPercent) + L"%"
+                              + L"\r\nTail (remaining audio): "
+                              + std::to_wstring(r->refineStats.tailImprovementPercent) + L"%";
             }
             setText(gStatus, L"Done. Two CLO files were generated successfully.");
             MessageBoxW(hwnd, resultMessage.c_str(), L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
@@ -953,7 +957,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = nullptr;
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.9.1",
+    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.9.2",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                 CW_USEDEFAULT, CW_USEDEFAULT, 1040, 870,
                                 nullptr, nullptr, instance, nullptr);

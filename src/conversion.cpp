@@ -421,9 +421,11 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
             return result;
         }
         const std::wstring refineStatus =
-            L"Refine P/K complete: NMSE " + std::to_wstring(result.refineStats.originalNmse)
+            L"Refine P/K full render complete: NMSE " + std::to_wstring(result.refineStats.originalNmse)
             + L" -> " + std::to_wstring(result.refineStats.refinedNmse)
-            + L" (" + std::to_wstring(result.refineStats.improvementPercent) + L"% improvement).";
+            + L" (" + std::to_wstring(result.refineStats.improvementPercent) + L"% improvement; stimulus "
+            + std::to_wstring(result.refineStats.stimulusImprovementPercent) + L"%; tail "
+            + std::to_wstring(result.refineStats.tailImprovementPercent) + L"%).";
         report(status, refineStatus.c_str());
     }
 

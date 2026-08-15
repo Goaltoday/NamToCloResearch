@@ -1,4 +1,4 @@
-# NAM to CLO 1.1
+# NAM to CLO 1.9.2
 
 Windows GUI utility that converts one Neural Amp Model (`.nam`) or batch-converts all `.nam` files in a selected folder into two CLO files per model:
 
@@ -64,9 +64,9 @@ build\Release\NamToClo.exe
 
 Copy it to a clean folder together with `runtime\ampero\HTUSBTools.dll` and `runtime\ampero\nam_input_wav.wav`.
 
-## Experimental P/K refinement (v1.9)
+## Experimental P/K refinement (v1.9.2)
 
-Version 1.9 adds an optional **CLO refinement (experimental)** stage. The normal
+Version 1.9.2 includes an optional **CLO refinement (experimental)** stage. The normal
 HTUSBTools conversion is preserved and the original Ampero B2048 / GP-200 B1024
 files are still generated unchanged.
 
@@ -85,8 +85,7 @@ parameters at CLO offsets `0x68..0x74`:
 - `Kneg`
 
 PRE, POST, FIR A and FIR B are kept byte-for-byte unchanged in this first
-experiment. Output level is fitted independently in the objective so the search
-focuses on nonlinear shape rather than Patch Volume / output routing.
+experiment. Output level is calibrated once from the original CLO against the NAM render and then frozen for every candidate. This prevents the optimiser from hiding excess gain/compression behind a new per-candidate normalisation.
 
 Additional outputs:
 
@@ -98,9 +97,17 @@ the percentage improvement. If the search does not improve the objective, the
 `_REFINE` CLO is written with the original P/K values rather than making the
 model worse.
 
-### Scope of the v1.9 experiment
+### Scope of the v1.9.2 experiment
 
-For speed, the first implementation evaluates a deterministic 12-second subset
-of the NAM render and six windows spanning different target-energy quantiles.
-This is intentional: v1.9 is designed to answer whether the official P/K fit
-leaves measurable improvement headroom before expanding the search to FIR A/B.
+The refinement objective is evaluated on the complete rendered conversion audio
+(normally 50 seconds of stimulus plus the 20-second tail), not on a short window
+subset. The UI reports global NMSE plus separate stimulus and tail improvements.
+
+For each conversion the original CLO is rendered first. A single output-level
+calibration is fitted from that original render to the NAM target. That exact
+scale is then frozen for all P/K candidates, so changes in saturation, compression
+or effective gain are penalised instead of being normalised away.
+
+FIR B remains fixed during P/K refinement but is evaluated efficiently over the
+full signal with FFT overlap-save convolution. Quality is prioritised over speed.
+PRE, POST, FIR A and FIR B remain unchanged in the generated refined CLO.

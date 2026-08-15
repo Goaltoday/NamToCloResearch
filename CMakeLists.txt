@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(NamToClo VERSION 1.9.1 LANGUAGES CXX RC)
+project(NamToClo VERSION 1.9.2 LANGUAGES CXX RC)
 
 if(NOT WIN32)
     message(FATAL_ERROR "NAM to CLO targets Windows x64 because HTUSBTools.dll is a Windows x64 DLL.")
