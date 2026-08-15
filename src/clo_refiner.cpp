@@ -357,22 +357,38 @@ bool compositeBetter(const Eval& candidate,const Eval& best){
         && candidate.composite < best.composite * (1.0 - tol);
 }
 
-bool finalCandidateAcceptable(const Eval& candidate,const Eval& original){
-    // v1.9.5: optimisation is deliberately free to cross intermediate points
-    // that trade one metric for another. These guards apply ONLY to the final
-    // candidate. MR-STFT is kept essentially non-regressing because our
-    // PluginDoctor checks showed that tonal drift is immediately audible.
-    // Temporal ESR/NMSE and envelope get small tolerances so the optimiser can
-    // find a genuinely better joint solution without being trapped at the
-    // official P/K point.
-    constexpr double maxNmseRegression = 0.0010;      // +0.10 %
-    constexpr double maxSpectralRegression = 0.00001; // +0.001 %
-    constexpr double maxEnvelopeRegression = 0.0050;  // +0.50 %
-    constexpr double minCompositeImprovement = 0.00025; // 0.025 %
-    return candidate.composite <= original.composite * (1.0 - minCompositeImprovement)
-        && candidate.nmse <= original.nmse * (1.0 + maxNmseRegression)
-        && candidate.spectral <= original.spectral * (1.0 + maxSpectralRegression)
-        && candidate.envelope <= original.envelope * (1.0 + maxEnvelopeRegression);
+struct FinalDecision {
+    bool accepted = false;
+    std::string reason;
+};
+
+FinalDecision finalCandidateDecision(const Eval& candidate,const Eval& original){
+    // v1.9.6 keeps the v1.9.5 gate unchanged on purpose. The change in this
+    // version is diagnostic: the best searched point is preserved and exposed
+    // even when this gate rejects it, so we can tune these tolerances from real
+    // data instead of guessing.
+    constexpr double maxNmseRegression = 0.0010;       // +0.10 %
+    constexpr double maxSpectralRegression = 0.00001;  // +0.001 %
+    constexpr double maxEnvelopeRegression = 0.0050;   // +0.50 %
+    constexpr double minCompositeImprovement = 0.00025;// 0.025 %
+
+    std::vector<std::string> failures;
+    if(!(candidate.composite <= original.composite * (1.0 - minCompositeImprovement)))
+        failures.emplace_back("combined loss did not improve by at least 0.025%");
+    if(!(candidate.nmse <= original.nmse * (1.0 + maxNmseRegression)))
+        failures.emplace_back("NMSE regressed by more than 0.10%");
+    if(!(candidate.spectral <= original.spectral * (1.0 + maxSpectralRegression)))
+        failures.emplace_back("MR-STFT regressed by more than 0.001%");
+    if(!(candidate.envelope <= original.envelope * (1.0 + maxEnvelopeRegression)))
+        failures.emplace_back("envelope RMS regressed by more than 0.50%");
+
+    if(failures.empty()) return {true, "accepted by final safety gate"};
+    std::string reason;
+    for(std::size_t i=0;i<failures.size();++i){
+        if(i) reason += "; ";
+        reason += failures[i];
+    }
+    return {false, reason};
 }
 
 // Deterministic Halton sequence for a reproducible coarse exploration in
@@ -473,10 +489,39 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
         for(auto& st:step) st*=any?0.62:0.45;
     }
 
-    // Safety gate is FINAL-only. If the best joint-loss point regresses tone,
-    // time-domain accuracy or dynamics beyond the small tolerances, keep the
-    // official CLO unchanged.
-    const bool accepted=finalCandidateAcceptable(best,originalEval);
+    // Preserve the actual best point found BEFORE applying the final safety
+    // gate. v1.9.5 overwrote it with the original CLO, making every rejected
+    // run look like 0% in the UI and hiding the useful diagnostic information.
+    const Eval searchedBest = best;
+    const std::array<float,4> searchedP = p;
+    const FinalDecision decision = finalCandidateDecision(searchedBest,originalEval);
+    const bool accepted=decision.accepted;
+
+    stats.searchedCandidateAccepted = accepted;
+    stats.searchedComposite = searchedBest.composite;
+    stats.searchedCompositeImprovementPercent = 100.0 * (originalEval.composite - searchedBest.composite) / std::max(originalEval.composite,kMetricEpsilon);
+    stats.searchedNmse = searchedBest.nmse;
+    stats.searchedNmseImprovementPercent = stats.originalNmse>0?100.0*(stats.originalNmse-searchedBest.nmse)/stats.originalNmse:0.0;
+    stats.searchedStimulusNmse = searchedBest.stimulusNmse;
+    stats.searchedStimulusImprovementPercent = stats.originalStimulusNmse>0?100.0*(stats.originalStimulusNmse-searchedBest.stimulusNmse)/stats.originalStimulusNmse:0.0;
+    stats.searchedTailNmse = searchedBest.tailNmse;
+    stats.searchedTailImprovementPercent = stats.originalTailNmse>0?100.0*(stats.originalTailNmse-searchedBest.tailNmse)/stats.originalTailNmse:0.0;
+    stats.searchedSpectralError = searchedBest.spectral;
+    stats.searchedSpectralImprovementPercent = stats.originalSpectralError>0?100.0*(stats.originalSpectralError-searchedBest.spectral)/stats.originalSpectralError:0.0;
+    stats.searchedEnvelopeError = searchedBest.envelope;
+    stats.searchedEnvelopeImprovementPercent = stats.originalEnvelopeError>0?100.0*(stats.originalEnvelopeError-searchedBest.envelope)/stats.originalEnvelopeError:0.0;
+    stats.searchedPPos=searchedP[0]; stats.searchedPNeg=searchedP[1]; stats.searchedKPos=searchedP[2]; stats.searchedKNeg=searchedP[3];
+    stats.searchedDecisionReason = decision.reason;
+
+    if(status){
+        std::wstring msg = L"Refine diagnostics: best searched composite " + std::to_wstring(stats.searchedCompositeImprovementPercent)
+            + L"%; NMSE " + std::to_wstring(stats.searchedNmseImprovementPercent)
+            + L"%; MR-STFT " + std::to_wstring(stats.searchedSpectralImprovementPercent)
+            + L"%; envelope " + std::to_wstring(stats.searchedEnvelopeImprovementPercent)
+            + L"%. Final gate: " + (accepted?L"ACCEPTED":L"REJECTED") + L".";
+        status(msg);
+    }
+
     if(!accepted){best=originalEval;p=originalP;}
 
     stats.refinedNmse=best.nmse;

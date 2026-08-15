@@ -40,6 +40,26 @@ struct CloRefineStats {
     // every candidate. It is intentionally not re-fitted during optimisation.
     double outputScale = 1.0;
 
+    // v1.9.6 diagnostics: keep the best point found by the free search even
+    // when the final safety gate rejects it. This avoids reporting a misleading
+    // 0% across all metrics just because the accepted output falls back to the
+    // official CLO.
+    bool searchedCandidateAccepted = false;
+    double searchedComposite = 1.0;
+    double searchedCompositeImprovementPercent = 0.0;
+    double searchedNmse = 0.0;
+    double searchedNmseImprovementPercent = 0.0;
+    double searchedStimulusNmse = 0.0;
+    double searchedStimulusImprovementPercent = 0.0;
+    double searchedTailNmse = 0.0;
+    double searchedTailImprovementPercent = 0.0;
+    double searchedSpectralError = 0.0;
+    double searchedSpectralImprovementPercent = 0.0;
+    double searchedEnvelopeError = 0.0;
+    double searchedEnvelopeImprovementPercent = 0.0;
+    float searchedPPos = 0.0f, searchedPNeg = 0.0f, searchedKPos = 0.0f, searchedKNeg = 0.0f;
+    std::string searchedDecisionReason;
+
     float pPosBefore = 0.0f, pNegBefore = 0.0f, kPosBefore = 0.0f, kNegBefore = 0.0f;
     float pPosAfter = 0.0f, pNegAfter = 0.0f, kPosAfter = 0.0f, kNegAfter = 0.0f;
 };

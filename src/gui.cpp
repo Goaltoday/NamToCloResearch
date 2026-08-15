@@ -533,7 +533,8 @@ void createSectionLabel(HWND hwnd, int id, const wchar_t* text) {
 void createUi(HWND hwnd) {
     createResources();
 
-    HWND title = CreateWindowW(L"STATIC", L"NAM to CLO", WS_CHILD | WS_VISIBLE,
+    const std::wstring appHeader = std::wstring(L"NAM to CLO ") + ntc::kVersion;
+    HWND title = CreateWindowW(L"STATIC", appHeader.c_str(), WS_CHILD | WS_VISIBLE,
                                0, 0, 100, 30, hwnd, controlId(1001), nullptr, nullptr);
     applyFont(title, gTitleFont);
 
@@ -634,7 +635,8 @@ void createUi(HWND hwnd) {
                             0, 0, 100, 22, hwnd, controlId(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
-    gVersion = CreateWindowW(L"STATIC", L"Version 1.9.2", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+    const std::wstring versionLabel = std::wstring(L"Version ") + ntc::kVersion;
+    gVersion = CreateWindowW(L"STATIC", versionLabel.c_str(), WS_CHILD | WS_VISIBLE | SS_RIGHT,
                              0, 0, 110, 22, hwnd, controlId(IDC_VERSION), nullptr, nullptr);
     applyFont(gVersion);
 
@@ -887,10 +889,32 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + L"\r\nMR-STFT (512/2048/8192): "
                               + std::to_wstring(r->refineStats.spectralImprovementPercent) + L"%"
                               + L"\r\nEnvelope RMS (256/2048/8192): "
-                              + std::to_wstring(r->refineStats.envelopeImprovementPercent) + L"%";
+                              + std::to_wstring(r->refineStats.envelopeImprovementPercent) + L"%"
+                              + L"\r\n\r\n--- v1.9.6 search diagnostics ---"
+                              + L"\r\nBest searched candidate: "
+                              + std::wstring(r->refineStats.searchedCandidateAccepted ? L"ACCEPTED" : L"REJECTED")
+                              + L"\r\nCombined research loss improvement: "
+                              + std::to_wstring(r->refineStats.searchedCompositeImprovementPercent) + L"%"
+                              + L"\r\nBest searched NMSE improvement: "
+                              + std::to_wstring(r->refineStats.searchedNmseImprovementPercent) + L"%"
+                              + L"\r\nBest searched stimulus improvement: "
+                              + std::to_wstring(r->refineStats.searchedStimulusImprovementPercent) + L"%"
+                              + L"\r\nBest searched tail improvement: "
+                              + std::to_wstring(r->refineStats.searchedTailImprovementPercent) + L"%"
+                              + L"\r\nBest searched MR-STFT improvement: "
+                              + std::to_wstring(r->refineStats.searchedSpectralImprovementPercent) + L"%"
+                              + L"\r\nBest searched envelope improvement: "
+                              + std::to_wstring(r->refineStats.searchedEnvelopeImprovementPercent) + L"%"
+                              + L"\r\nBest searched P/K: "
+                              + std::to_wstring(r->refineStats.searchedPPos) + L" / "
+                              + std::to_wstring(r->refineStats.searchedPNeg) + L" / "
+                              + std::to_wstring(r->refineStats.searchedKPos) + L" / "
+                              + std::to_wstring(r->refineStats.searchedKNeg)
+                              + L"\r\nDecision: " + ntc::fromUtf8(r->refineStats.searchedDecisionReason);
             }
             setText(gStatus, L"Done. Two CLO files were generated successfully.");
-            MessageBoxW(hwnd, resultMessage.c_str(), L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
+            const std::wstring doneTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;
+            MessageBoxW(hwnd, resultMessage.c_str(), doneTitle.c_str(), MB_ICONINFORMATION | MB_OK);
         } else {
             const std::wstring err = r ? ntc::fromUtf8(r->error) : L"Unknown conversion error.";
             setText(gStatus, L"Conversion failed.");
@@ -961,7 +985,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = nullptr;
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.9.2",
+    const std::wstring windowTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;
+    HWND hwnd = CreateWindowExW(0, kClassName, windowTitle.c_str(),
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                 CW_USEDEFAULT, CW_USEDEFAULT, 1040, 870,
                                 nullptr, nullptr, instance, nullptr);
