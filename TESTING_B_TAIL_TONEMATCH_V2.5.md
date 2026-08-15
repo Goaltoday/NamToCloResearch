@@ -7,7 +7,7 @@ This branch replaces the v2.4 custom spectral matcher with a direct standalone p
 - ToneAnalysis: FFT order 14 (16384), Hann, 75% overlap, silence rejection below -55 dBFS, clipping rejection at 0.999, 30 Hz–20 kHz.
 - Robust spectrum: 11 interleaved groups, median-of-means in dB and MAD-based stability confidence.
 - ToneMatchComparison: 512 logarithmic points from 40 Hz to 18 kHz, canonical RAW correction = TARGET - SOURCE, no automatic level offset removal.
-- SolverV1: minimum-phase 2048-sample IR (v2.5.2 extension; analysis and smoothing unchanged).
+- SolverV1: minimum-phase 2048-sample IR (v2.5.3 extension; analysis and smoothing unchanged).
 - Smooth is fixed at 5%, corresponding through the VST slider mapping to 1/120-octave CAB smoothing.
 
 ## Converter-specific integration
@@ -27,5 +27,5 @@ This branch replaces the v2.4 custom spectral matcher with a direct standalone p
 The main diagnostic is `VST final-20-s tone-match error`, not the older v2.4 direct-spectrum MAE.
 
 
-## v2.5.2 change
+## v2.5.3 change
 Only the SolverV1 IR length changes from 1024 to 2048 samples. The cepstral synthesis FFT is increased from 2048 to 4096 so the minimum-phase construction has the corresponding support. All tail-selection, analysis, comparison and smoothing settings remain identical to v2.5.0.

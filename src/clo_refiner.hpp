@@ -87,7 +87,7 @@ struct CloRefineStats {
 
 using RefineStatusCallback = std::function<void(const std::wstring&)>;
 
-// Experimental v2.5.2 VST CAB Tone Match port with 2048-sample SolverV1 IR. PRE, A, P/K and POST stay fixed.
+// Experimental v2.5.3 VST CAB Tone Match port with 2048-sample SolverV1 IR. PRE, A, P/K and POST stay fixed.
 // The final 20 seconds of the HTUSBTools NAM render and official CLO render are analysed
 // with the SOURCE_latest_19 robust Welch / median-of-means CAB Tone Match algorithm.
 // SolverV1 generates a 2048-sample minimum-phase IR at Smooth 5% (1/120 octave),
