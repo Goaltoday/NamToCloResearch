@@ -87,11 +87,11 @@ struct CloRefineStats {
 
 using RefineStatusCallback = std::function<void(const std::wstring&)>;
 
-// Experimental v2.4 automatic corrective-IR tone matcher. PRE, A, P/K and POST stay fixed.
-// The exact stimulus, HTUSBTools NAM render and official CLO render are used to
-// measure a smooth final-output spectral residual. The correction is absorbed
-// into the Ampero 2048-tap Block B, then the normal GP-200 compaction runs later.
-// Candidate selection is driven by direct output spectral-shape improvement with broad NMSE/MR-STFT safety guards.
+// Experimental v2.5.1 VST CAB Tone Match port with 2048-sample SolverV1 IR. PRE, A, P/K and POST stay fixed.
+// The final 20 seconds of the HTUSBTools NAM render and official CLO render are analysed
+// with the SOURCE_latest_19 robust Welch / median-of-means CAB Tone Match algorithm.
+// SolverV1 generates a 2048-sample minimum-phase IR at Smooth 50% (1/12 octave),
+// which is absorbed into the Ampero 2048-tap Block B before normal GP-200 compaction.
 bool refineCloBOnly(const fs::path& inputClo2048,
                  const fs::path& stimulusWav,
                  const fs::path& targetWav,

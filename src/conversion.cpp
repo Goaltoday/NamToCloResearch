@@ -411,9 +411,9 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     fs::path refinedWorkClo;
     fs::path bestWorkClo;
     if (refine.enabled) {
-        report(status, L"Automatic tone matching of Block B to NAM render (v2.4 corrective-IR match)...");
-        refinedWorkClo = work / L"ampero_2048_B_TONEMATCH_REFINE.clo";
-        bestWorkClo = work / L"ampero_2048_B_TONEMATCH_BEST.clo";
+        report(status, L"VST CAB Tone Match 2048-IR of Block B using final 20 seconds (v2.5.1)...");
+        refinedWorkClo = work / L"ampero_2048_B_TAIL_TONEMATCH_REFINE.clo";
+        bestWorkClo = work / L"ampero_2048_B_TAIL_TONEMATCH_BEST.clo";
         if (!refineCloBOnly(worker.outputClo, worker.inputWav, worker.outputWav, refinedWorkClo, bestWorkClo,
                          refine, result.refineStats, error, status)
             || !valid2048(refinedWorkClo) || !valid2048(bestWorkClo)) {
@@ -484,12 +484,12 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     }
 
     if (refine.enabled) {
-        result.bestAmpero2048 = uniquePath(outDir / (base + L"_Ampero_2048_B_TONEMATCH_BEST.clo"));
+        result.bestAmpero2048 = uniquePath(outDir / (base + L"_Ampero_2048_B_TAIL_TONEMATCH_BEST.clo"));
         if (!copyFileCreatingParents(bestWorkClo, result.bestAmpero2048, error)) {
             result.exitCode = kExitCopyFailure; result.error = error; fs::remove_all(work, ec); return result;
         }
         report(status, L"Generating BEST GP-200 1024 compact CLO for audition...");
-        result.bestGp2001024 = uniquePath(outDir / (base + L"_GP200_1024_B_TONEMATCH_BEST.clo"));
+        result.bestGp2001024 = uniquePath(outDir / (base + L"_GP200_1024_B_TAIL_TONEMATCH_BEST.clo"));
         if (!makeGp200CompactClo(bestWorkClo, result.bestGp2001024, error)
             || !valid1024(result.bestGp2001024)) {
             result.exitCode = kExitCopyFailure;
@@ -497,12 +497,12 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
             fs::remove_all(work, ec); return result;
         }
 
-        result.refinedAmpero2048 = uniquePath(outDir / (base + L"_Ampero_2048_B_TONEMATCH_REFINE.clo"));
+        result.refinedAmpero2048 = uniquePath(outDir / (base + L"_Ampero_2048_B_TAIL_TONEMATCH_REFINE.clo"));
         if (!copyFileCreatingParents(refinedWorkClo, result.refinedAmpero2048, error)) {
             result.exitCode = kExitCopyFailure; result.error = error; fs::remove_all(work, ec); return result;
         }
         report(status, L"Generating refined GP-200 1024 compact CLO...");
-        result.refinedGp2001024 = uniquePath(outDir / (base + L"_GP200_1024_B_TONEMATCH_REFINE.clo"));
+        result.refinedGp2001024 = uniquePath(outDir / (base + L"_GP200_1024_B_TAIL_TONEMATCH_REFINE.clo"));
         if (!makeGp200CompactClo(refinedWorkClo, result.refinedGp2001024, error)
             || !valid1024(result.refinedGp2001024)) {
             result.exitCode = kExitCopyFailure;

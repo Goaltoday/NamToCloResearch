@@ -1,8 +1,8 @@
-# NAM to CLO 2.4.0
+# NAM to CLO 2.5.1
 
-## v2.4 Automatic Corrective-IR Tone Match
+## v2.5.1 Automatic Corrective-IR Tone Match — 2048-sample IR
 
-v2.4 replaces the experimental global Wiener fit with a simpler automatic tone-matching stage that mirrors the existing manual Corrective IR workflow. It compares the final HTUSBTools NAM render with the final official CLO render, derives a smooth broad-band dB correction, absorbs that correction only into the 2048-tap Block B, and iterates conservatively before the normal GP-200 B1024 compaction. PRE, A, P/K and POST remain unchanged.
+v2.5.1 is the same final-20-second VST-style CAB Tone Match experiment as v2.5, but the minimum-phase SolverV1 corrective IR is extended from 1024 to 2048 samples. The analysis remains FFT 16384 / Hann / 75% overlap / median-of-means / MAD / 512 log-frequency comparison points / Smooth 50% (1/12 octave). The 2048-sample corrective IR is absorbed only into the Ampero 2048-tap Block B before the normal GP-200 B1024 compaction. PRE, A, P/K and POST remain unchanged.
 
 ## v2.3 Automatic Wiener Block-B Match
 
