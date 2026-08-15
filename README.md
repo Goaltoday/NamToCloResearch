@@ -1,8 +1,8 @@
 # NAM to CLO 2.5.1
 
-## v2.5.3 Automatic Corrective-IR Tone Match — 2048-sample IR
+## v2.5.4 Automatic Corrective-IR Tone Match — 2048-sample IR
 
-v2.5.3 is the same final-20-second VST-style CAB Tone Match experiment as v2.5, but the minimum-phase SolverV1 corrective IR is extended from 1024 to 2048 samples. The analysis remains FFT 16384 / Hann / 75% overlap / median-of-means / MAD / 512 log-frequency comparison points / Smooth 5% (1/120 octave). The 2048-sample corrective IR is absorbed only into the Ampero 2048-tap Block B before the normal GP-200 B1024 compaction. PRE, A, P/K and POST remain unchanged.
+v2.5.4 is the same final-20-second VST-style CAB Tone Match experiment as v2.5, but the minimum-phase SolverV1 corrective IR is extended from 1024 to 2048 samples. The analysis remains FFT 16384 / Hann / 75% overlap / median-of-means / MAD / 512 log-frequency comparison points / Smooth 5% (1/120 octave). The 2048-sample corrective IR is absorbed only into the Ampero 2048-tap Block B before the normal GP-200 B1024 compaction. PRE, A, P/K and POST remain unchanged.
 
 ## v2.3 Automatic Wiener Block-B Match
 
