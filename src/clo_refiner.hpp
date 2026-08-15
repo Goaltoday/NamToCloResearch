@@ -40,7 +40,7 @@ struct CloRefineStats {
     // every candidate. It is intentionally not re-fitted during optimisation.
     double outputScale = 1.0;
 
-    // v1.9.9 constrained P/K search: keep the best feasible point found inside
+    // v2.0 A+P/K search: keep the best feasible point found inside
     // global and low/mid/high temporal-error limits. This avoids reporting a misleading
     // 0% across all metrics just because the accepted output falls back to the
     // official CLO.
@@ -77,15 +77,12 @@ struct CloRefineStats {
 
 using RefineStatusCallback = std::function<void(const std::wstring&)>;
 
-// Experimental full-length P/K refiner. PRE/A/POST/B stay fixed and only
-// Ppos/Pneg/Kpos/Kneg are optimised. The complete conversion render is used
-// (normally 50 s stimulus + 20 s tail). Output level is calibrated ONCE from
-// the original CLO and frozen. v1.9.9 uses a constrained P/K search: global temporal NMSE must not worsen,
-// low/mid/high excitation NMSE may regress by at most 0.50%, and the composite
-// temporal + MR-STFT + envelope metric is minimized only inside that feasible
-// region. This is deliberately different from the loss we will use
-// later for linear A/B optimisation.
-bool refineCloPk(const fs::path& inputClo2048,
+// Experimental v2.0 full-length A + P/K refiner. PRE, POST and B stay fixed.
+// Block A is adjusted through a smooth 10-band log-frequency envelope while
+// Ppos/Pneg/Kpos/Kneg are optimized jointly. Every evaluation uses the complete
+// conversion render (normally 50 s stimulus + 20 s tail). Output level is
+// calibrated once from the original CLO and frozen for all candidates.
+bool refineCloAPlusPk(const fs::path& inputClo2048,
                  const fs::path& stimulusWav,
                  const fs::path& targetWav,
                  const fs::path& outputClo2048,

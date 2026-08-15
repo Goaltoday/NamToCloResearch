@@ -23,6 +23,8 @@ constexpr std::array<std::size_t,3> kStftHopSizes = {256, 1024, 4096};
 constexpr std::array<std::size_t,3> kEnvelopeWindows = {256, 2048, 8192};
 constexpr std::size_t kLevelWindow = 2048;
 constexpr double kMetricEpsilon = 1.0e-12;
+constexpr std::size_t kABandCount = 10;
+constexpr std::array<double,kABandCount> kABandHz = {40.0, 80.0, 160.0, 315.0, 630.0, 1250.0, 2500.0, 5000.0, 10000.0, 18000.0};
 
 std::uint16_t le16(const std::uint8_t* p) { return static_cast<std::uint16_t>(p[0] | (p[1] << 8)); }
 std::uint32_t le32(const std::uint8_t* p) { return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) | (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24); }
@@ -102,6 +104,12 @@ std::vector<float> precomputeA(const Model& src,const std::vector<float>& in,std
     for(std::size_t i=0;i<n;++i){ float x=m.pre.process(in[i]); hist[ix]=x; double s=0;std::size_t h=ix;for(float t:m.A){s+=double(t)*hist[h];h=h? h-1:hist.size()-1;}ix=(ix+1)%hist.size();out[i]=float(s);}return out;
 }
 
+std::vector<float> precomputePre(const Model& src,const std::vector<float>& in,std::size_t n){
+    Model m=src; std::vector<float> out(n);
+    for(std::size_t i=0;i<n;++i) out[i]=m.pre.process(in[i]);
+    return out;
+}
+
 void fft(std::vector<std::complex<float>>& a, bool inverse){
     const std::size_t n=a.size();
     for(std::size_t i=1,j=0;i<n;++i){
@@ -161,6 +169,55 @@ struct FirFftPlan {
         }
     }
 };
+
+void renderPreB(const Model& base,const std::vector<float>& aout,float pp,float pn,float kp,float kn,std::vector<float>& out);
+
+double interpABandDb(double hz,const std::array<double,kABandCount>& db){
+    if(hz<=kABandHz.front()) return db.front();
+    if(hz>=kABandHz.back()) return db.back();
+    const double x=std::log(std::max(hz,1.0));
+    for(std::size_t i=0;i+1<kABandCount;++i){
+        if(hz<=kABandHz[i+1]){
+            const double x0=std::log(kABandHz[i]), x1=std::log(kABandHz[i+1]);
+            const double t=(x-x0)/std::max(x1-x0,1.0e-12);
+            return db[i]+(db[i+1]-db[i])*t;
+        }
+    }
+    return db.back();
+}
+
+std::vector<float> synthesizeA(const std::vector<float>& original,const std::array<double,kABandCount>& bandDb){
+    // Preserve the original phase response and modify only a smooth magnitude
+    // envelope. A 512-point workspace gives sufficient interpolation density
+    // for the 128-tap Block A while keeping the resulting FIR causal/truncated.
+    constexpr std::size_t N=512;
+    std::vector<std::complex<float>> H(N);
+    for(std::size_t i=0;i<std::min(original.size(),N);++i) H[i]=std::complex<float>(original[i],0.0f);
+    fft(H,false);
+    for(std::size_t k=0;k<=N/2;++k){
+        const double hz=double(k)*double(kSampleRate)/double(N);
+        const double db=interpABandDb(hz,bandDb);
+        const float g=static_cast<float>(std::pow(10.0,db/20.0));
+        H[k]*=g;
+        if(k>0 && k<N/2) H[N-k]*=g;
+    }
+    fft(H,true);
+    std::vector<float> out(original.size());
+    for(std::size_t i=0;i<out.size();++i) out[i]=H[i].real();
+    return out;
+}
+
+void renderAPlusPk(const Model& base,const std::vector<float>& preOut,const FirFftPlan& bPlan,
+                   const std::array<double,kABandCount>& aBandDb,
+                   float pp,float pn,float kp,float kn,
+                   std::vector<float>& candidate){
+    const auto a=synthesizeA(base.A,aBandDb);
+    FirFftPlan aPlan(a);
+    std::vector<float> aout,preB;
+    aPlan.process(preOut,aout);
+    renderPreB(base,aout,pp,pn,kp,kn,preB);
+    bPlan.process(preB,candidate);
+}
 
 void renderPreB(const Model& base,const std::vector<float>& aout,float pp,float pn,float kp,float kn,std::vector<float>& out){
     Biquad post=base.post;
@@ -519,33 +576,42 @@ bool renderOriginal(const Model& base,const std::vector<float>& aout,const FirFf
 }
 }
 
-bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const fs::path& targetWav,const fs::path& outputClo2048,const fs::path& bestClo2048,const CloRefineConfig& config,CloRefineStats& stats,std::string& error,const RefineStatusCallback& status){
-    std::vector<std::uint8_t> bytes;if(!readFileBytes(inputClo2048,bytes,error))return false;Model m;if(!parseModel(bytes,m,error))return false;
-    std::vector<float> in,target;if(!readMono44100(stimulusWav,in,error)||!readMono44100(targetWav,target,error))return false;
-    const std::size_t n=std::min(in.size(),target.size());
-    if(n<static_cast<std::size_t>(kSampleRate)){error="Not enough rendered audio for full-length refinement.";return false;}
-    in.resize(n);target.resize(n);
+bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const fs::path& targetWav,const fs::path& outputClo2048,const fs::path& bestClo2048,const CloRefineConfig& config,CloRefineStats& stats,std::string& error,const RefineStatusCallback& status){
+    std::vector<std::uint8_t> bytes;
+    if(!readFileBytes(inputClo2048,bytes,error)) return false;
+    Model m;
+    if(!parseModel(bytes,m,error)) return false;
+    if(m.A.size()!=128){ error="v2.0 A+P/K refiner expects a 128-tap Block A."; return false; }
 
-    if(status)status(L"Refine P/K: precomputing full PRE + FIR A...");
-    auto aout=precomputeA(m,in,n);
-    if(status)status(L"Refine P/K: preparing fixed FIR B FFT plan...");
+    std::vector<float> in,target;
+    if(!readMono44100(stimulusWav,in,error)||!readMono44100(targetWav,target,error)) return false;
+    const std::size_t n=std::min(in.size(),target.size());
+    if(n<static_cast<std::size_t>(kSampleRate)){ error="Not enough rendered audio for full-length v2.0 refinement."; return false; }
+    in.resize(n); target.resize(n);
+
+    if(status) status(L"v2.0 A+P/K: precomputing PRE over the complete render...");
+    const auto preOut=precomputePre(m,in,n);
+    if(status) status(L"v2.0 A+P/K: preparing fixed FIR B FFT plan...");
     FirFftPlan bPlan(m.B);
 
-    stats.pPosBefore=m.pp;stats.pNegBefore=m.pn;stats.kPosBefore=m.kp;stats.kNegBefore=m.kn;
+    stats.pPosBefore=m.pp; stats.pNegBefore=m.pn; stats.kPosBefore=m.kp; stats.kNegBefore=m.kn;
 
-    // Calibrate output level once from the original CLO. This scale is then
-    // frozen for every candidate so the optimiser cannot hide excess gain or
-    // compression by re-normalising each P/K proposal independently.
-    if(status)status(L"Refine P/K: calibrating original CLO level over full render...");
+    std::array<double,kABandCount> originalABands{};
     std::vector<float> originalCandidate;
-    if(!renderOriginal(m,aout,bPlan,originalCandidate)){error="Could not render original CLO for refinement.";return false;}
+    renderAPlusPk(m,preOut,bPlan,originalABands,m.pp,m.pn,m.kp,m.kn,originalCandidate);
+    if(originalCandidate.empty()){ error="Could not render original CLO for v2.0 refinement."; return false; }
+
+    // Freeze one output-level calibration from the official CLO. Candidates
+    // are never independently normalized, so A/P/K changes must account for
+    // their real effect on drive and dynamics.
     const double fixedScale=fitScale(originalCandidate,target);
     stats.outputScale=fixedScale;
     const std::size_t split=std::min(kStimulusFrames,n);
     stats.originalNmse=nmseRange(originalCandidate,target,fixedScale,0,n);
     stats.originalStimulusNmse=nmseRange(originalCandidate,target,fixedScale,0,split);
     stats.originalTailNmse=nmseRange(originalCandidate,target,fixedScale,split,n);
-    if(status)status(L"Refine P/K: computing full-render MR-STFT + multi-scale envelope references...");
+
+    if(status) status(L"v2.0 A+P/K: building full-render temporal, MR-STFT and envelope references...");
     MetricReference metricRef;
     metricRef.mrstft=buildMultiStftReference(target);
     metricRef.envelope=buildMultiEnvelopeReference(target);
@@ -557,139 +623,145 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
     stats.originalMidLevelNmse=metricRef.originalLevelNmse[1];
     stats.originalHighLevelNmse=metricRef.originalLevelNmse[2];
 
-    Eval best;
-    best.nmse=stats.originalNmse; best.stimulusNmse=stats.originalStimulusNmse; best.tailNmse=stats.originalTailNmse;
-    best.spectral=stats.originalSpectralError; best.envelope=stats.originalEnvelopeError;
-    best.levelNmse=metricRef.originalLevelNmse; best.levelBalanced=1.0; best.composite=1.0;
-    const Eval originalEval=best;
-    const std::array<float,4> originalP={m.pp,m.pn,m.kp,m.kn};
-    std::array<float,4> p=originalP;
-
-    // v1.9.9 constrained search. The previous free-search versions were able
-    // to find candidates with much better aggregate spectrum/envelope but
-    // audibly excessive distortion because low-level temporal error regressed.
-    // We therefore search only inside the physically relevant feasible region:
-    // global NMSE may not worsen, and low/mid/high excitation NMSE may regress
-    // by at most 0.50%. Within that region the composite metric chooses the
-    // best trade-off.
-    if(status)status(L"Refine P/K: constrained coarse exploration (64 candidates)...");
-    constexpr std::array<unsigned,4> bases={2,3,5,7};
-    constexpr double coarseRadius=0.35;
-    unsigned feasibleCoarse=0;
-    for(unsigned sample=1;sample<=64;++sample){
-        std::array<float,4> test{};
-        for(int j=0;j<4;++j){
-            const double u=halton(sample,bases[j]);
-            const double q=(2.0*u-1.0)*coarseRadius;
-            test[j]=std::max(1e-7f, float(double(originalP[j])*std::exp(q)));
+    auto evalCandidate=[&](const std::array<double,kABandCount>& aBands,const std::array<float,4>& pk)->Eval{
+        std::vector<float> candidate;
+        renderAPlusPk(m,preOut,bPlan,aBands,pk[0],pk[1],pk[2],pk[3],candidate);
+        const std::size_t nn=std::min(candidate.size(),target.size());
+        Eval e;
+        e.nmse=nmseRange(candidate,target,fixedScale,0,nn);
+        e.stimulusNmse=nmseRange(candidate,target,fixedScale,0,std::min(kStimulusFrames,nn));
+        e.tailNmse=nmseRange(candidate,target,fixedScale,std::min(kStimulusFrames,nn),nn);
+        e.spectral=multiResolutionStftLoss(candidate,fixedScale,metricRef.mrstft);
+        e.envelope=multiScaleEnvelopeError(candidate,fixedScale,metricRef.envelope);
+        e.levelNmse=levelNmse(candidate,target,fixedScale,metricRef.levels);
+        const double nNorm=e.nmse/std::max(stats.originalNmse,kMetricEpsilon);
+        const double sNorm=e.spectral/std::max(stats.originalSpectralError,kMetricEpsilon);
+        const double dNorm=e.envelope/std::max(stats.originalEnvelopeError,kMetricEpsilon);
+        double levelNorm=0.0; int levelCount=0;
+        for(std::size_t i=0;i<3;++i){
+            if(metricRef.originalLevelNmse[i]>kMetricEpsilon){ levelNorm+=e.levelNmse[i]/metricRef.originalLevelNmse[i]; ++levelCount; }
         }
-        const auto e=evaluate(m,aout,target,bPlan,fixedScale,metricRef,stats.originalNmse,stats.originalSpectralError,stats.originalEnvelopeError,
-                              test[0],test[1],test[2],test[3]);
-        if(feasiblePkCandidate(e,originalEval)){
-            ++feasibleCoarse;
-            if(compositeBetter(e,best)){best=e;p=test;}
-        }
-    }
+        e.levelBalanced=levelCount?levelNorm/double(levelCount):nNorm;
+        // For A+P/K, temporal fidelity remains primary, while the spectral term
+        // is now meaningful because A is a linear pre-emphasis filter.
+        e.composite=0.45*nNorm + 0.25*e.levelBalanced + 0.20*sNorm + 0.10*dNorm;
+        return e;
+    };
 
-    // Local coordinate refinement is also constrained. This prevents the
-    // optimizer from walking through the high-distortion basin discovered in
-    // v1.9.7/v1.9.8 merely because MR-STFT and envelope improve there.
-    std::array<double,4> step={0.10,0.10,0.10,0.10};
-    const int passes=std::clamp(config.passes,1,8);
+    Eval originalEval;
+    originalEval.nmse=stats.originalNmse; originalEval.stimulusNmse=stats.originalStimulusNmse; originalEval.tailNmse=stats.originalTailNmse;
+    originalEval.spectral=stats.originalSpectralError; originalEval.envelope=stats.originalEnvelopeError;
+    originalEval.levelNmse=metricRef.originalLevelNmse; originalEval.levelBalanced=1.0; originalEval.composite=1.0;
+
+    Eval best=originalEval;
+    std::array<double,kABandCount> bestABands=originalABands;
+    std::array<float,4> bestPk={m.pp,m.pn,m.kp,m.kn};
+
+    // Stage 1: optimize the smooth Block-A spectral envelope with P/K fixed.
+    // Stage 2: alternate A and P/K so drive shaping and nonlinearity can settle
+    // jointly instead of forcing P/K to compensate an incorrect A.
+    double aStepDb=0.75;
+    double pkStepLog=0.055; // ~5.7 % multiplicative step
+    const int passes=std::clamp(config.passes,2,6);
     for(int pass=0;pass<passes;++pass){
-        if(status)status(L"Refine P/K full 70 s: constrained pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes));
-        bool any=false;
-        for(int j=0;j<4;++j){
-            auto localP=p; Eval local=best;
-            for(int dir:{-1,1}){
-                auto test=p;
-                test[j]=std::max(1e-7f,float(double(p[j])*std::exp(dir*step[j])));
-                const auto e=evaluate(m,aout,target,bPlan,fixedScale,metricRef,stats.originalNmse,stats.originalSpectralError,stats.originalEnvelopeError,
-                                      test[0],test[1],test[2],test[3]);
-                if(constrainedBetter(e,local,originalEval)){local=e;localP=test;}
+        if(status) status(L"v2.0 A+P/K full 70 s: pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes)+L" (Block A)...");
+        bool improvedA=false;
+        for(std::size_t band=0;band<kABandCount;++band){
+            Eval local=best; auto localBands=bestABands;
+            for(int dir : {-1,1}){
+                auto test=bestABands;
+                test[band]=std::clamp(test[band]+dir*aStepDb,-4.0,4.0);
+                const Eval e=evalCandidate(test,bestPk);
+                if(compositeBetter(e,local)){ local=e; localBands=test; }
             }
-            if(constrainedBetter(local,best,originalEval)){best=local;p=localP;any=true;}
+            if(compositeBetter(local,best)){ best=local; bestABands=localBands; improvedA=true; }
         }
-        for(auto& st:step) st*=any?0.62:0.45;
+
+        if(status) status(L"v2.0 A+P/K full 70 s: pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes)+L" (P/K)...");
+        bool improvedPk=false;
+        for(int j=0;j<4;++j){
+            Eval local=best; auto localPk=bestPk;
+            for(int dir : {-1,1}){
+                auto test=bestPk;
+                test[j]=std::max(1e-7f,float(double(bestPk[j])*std::exp(dir*pkStepLog)));
+                const Eval e=evalCandidate(bestABands,test);
+                if(compositeBetter(e,local)){ local=e; localPk=test; }
+            }
+            if(compositeBetter(local,best)){ best=local; bestPk=localPk; improvedPk=true; }
+        }
+        aStepDb *= (improvedA?0.58:0.40);
+        pkStepLog *= (improvedPk?0.60:0.42);
     }
 
-    if(status){
-        status(L"Refine P/K: constrained search retained "+std::to_wstring(feasibleCoarse)+L"/64 feasible coarse candidates.");
+    // Final safety gate is deliberately less rigid than v1.9 because A and P/K
+    // are coupled. It still rejects candidates that obtain a nicer spectrum by
+    // materially degrading waveform fidelity or excitation-level behaviour.
+    std::vector<std::string> failures;
+    if(!(best.composite < originalEval.composite*0.9995)) failures.emplace_back("combined A+P/K loss did not improve by at least 0.05%");
+    if(best.nmse > originalEval.nmse*1.0025) failures.emplace_back("global NMSE regressed by more than 0.25%");
+    static constexpr const char* levelNames[3]={"low-level NMSE","mid-level NMSE","high-level NMSE"};
+    for(std::size_t i=0;i<3;++i){
+        if(originalEval.levelNmse[i]>kMetricEpsilon && best.levelNmse[i]>originalEval.levelNmse[i]*1.01)
+            failures.emplace_back(std::string(levelNames[i])+" regressed by more than 1.0%");
     }
+    if(best.spectral > originalEval.spectral*1.02) failures.emplace_back("MR-STFT regressed by more than 2%");
+    if(best.envelope > originalEval.envelope*1.03) failures.emplace_back("envelope RMS regressed by more than 3%");
+    const bool accepted=failures.empty();
+    std::string decision=accepted?"accepted by v2.0 A+P/K safety gate":"";
+    if(!accepted){ for(std::size_t i=0;i<failures.size();++i){ if(i)decision+="; "; decision+=failures[i]; } }
 
-    // Preserve the actual best point found BEFORE applying the final safety
-    // gate. v1.9.5 overwrote it with the original CLO, making every rejected
-    // run look like 0% in the UI and hiding the useful diagnostic information.
-    const Eval searchedBest = best;
-    const std::array<float,4> searchedP = p;
-    const FinalDecision decision = finalCandidateDecision(searchedBest,originalEval);
-    const bool accepted=decision.accepted;
+    stats.searchedCandidateAccepted=accepted;
+    stats.searchedComposite=best.composite;
+    stats.searchedCompositeImprovementPercent=100.0*(1.0-best.composite);
+    stats.searchedNmse=best.nmse;
+    stats.searchedNmseImprovementPercent=stats.originalNmse>0?100.0*(stats.originalNmse-best.nmse)/stats.originalNmse:0.0;
+    stats.searchedStimulusNmse=best.stimulusNmse;
+    stats.searchedStimulusImprovementPercent=stats.originalStimulusNmse>0?100.0*(stats.originalStimulusNmse-best.stimulusNmse)/stats.originalStimulusNmse:0.0;
+    stats.searchedTailNmse=best.tailNmse;
+    stats.searchedTailImprovementPercent=stats.originalTailNmse>0?100.0*(stats.originalTailNmse-best.tailNmse)/stats.originalTailNmse:0.0;
+    stats.searchedSpectralError=best.spectral;
+    stats.searchedSpectralImprovementPercent=stats.originalSpectralError>0?100.0*(stats.originalSpectralError-best.spectral)/stats.originalSpectralError:0.0;
+    stats.searchedEnvelopeError=best.envelope;
+    stats.searchedEnvelopeImprovementPercent=stats.originalEnvelopeError>0?100.0*(stats.originalEnvelopeError-best.envelope)/stats.originalEnvelopeError:0.0;
+    stats.searchedLowLevelNmse=best.levelNmse[0]; stats.searchedMidLevelNmse=best.levelNmse[1]; stats.searchedHighLevelNmse=best.levelNmse[2];
+    stats.searchedLowLevelImprovementPercent=stats.originalLowLevelNmse>0?100.0*(stats.originalLowLevelNmse-best.levelNmse[0])/stats.originalLowLevelNmse:0.0;
+    stats.searchedMidLevelImprovementPercent=stats.originalMidLevelNmse>0?100.0*(stats.originalMidLevelNmse-best.levelNmse[1])/stats.originalMidLevelNmse:0.0;
+    stats.searchedHighLevelImprovementPercent=stats.originalHighLevelNmse>0?100.0*(stats.originalHighLevelNmse-best.levelNmse[2])/stats.originalHighLevelNmse:0.0;
+    stats.searchedLevelBalancedImprovementPercent=100.0*(1.0-best.levelBalanced);
+    stats.searchedPPos=bestPk[0]; stats.searchedPNeg=bestPk[1]; stats.searchedKPos=bestPk[2]; stats.searchedKNeg=bestPk[3];
+    stats.searchedDecisionReason=decision;
 
-    stats.searchedCandidateAccepted = accepted;
-    stats.searchedComposite = searchedBest.composite;
-    stats.searchedCompositeImprovementPercent = 100.0 * (originalEval.composite - searchedBest.composite) / std::max(originalEval.composite,kMetricEpsilon);
-    stats.searchedNmse = searchedBest.nmse;
-    stats.searchedNmseImprovementPercent = stats.originalNmse>0?100.0*(stats.originalNmse-searchedBest.nmse)/stats.originalNmse:0.0;
-    stats.searchedStimulusNmse = searchedBest.stimulusNmse;
-    stats.searchedStimulusImprovementPercent = stats.originalStimulusNmse>0?100.0*(stats.originalStimulusNmse-searchedBest.stimulusNmse)/stats.originalStimulusNmse:0.0;
-    stats.searchedTailNmse = searchedBest.tailNmse;
-    stats.searchedTailImprovementPercent = stats.originalTailNmse>0?100.0*(stats.originalTailNmse-searchedBest.tailNmse)/stats.originalTailNmse:0.0;
-    stats.searchedSpectralError = searchedBest.spectral;
-    stats.searchedSpectralImprovementPercent = stats.originalSpectralError>0?100.0*(stats.originalSpectralError-searchedBest.spectral)/stats.originalSpectralError:0.0;
-    stats.searchedEnvelopeError = searchedBest.envelope;
-    stats.searchedEnvelopeImprovementPercent = stats.originalEnvelopeError>0?100.0*(stats.originalEnvelopeError-searchedBest.envelope)/stats.originalEnvelopeError:0.0;
-    stats.searchedLowLevelNmse=searchedBest.levelNmse[0];
-    stats.searchedMidLevelNmse=searchedBest.levelNmse[1];
-    stats.searchedHighLevelNmse=searchedBest.levelNmse[2];
-    stats.searchedLowLevelImprovementPercent=stats.originalLowLevelNmse>0?100.0*(stats.originalLowLevelNmse-searchedBest.levelNmse[0])/stats.originalLowLevelNmse:0.0;
-    stats.searchedMidLevelImprovementPercent=stats.originalMidLevelNmse>0?100.0*(stats.originalMidLevelNmse-searchedBest.levelNmse[1])/stats.originalMidLevelNmse:0.0;
-    stats.searchedHighLevelImprovementPercent=stats.originalHighLevelNmse>0?100.0*(stats.originalHighLevelNmse-searchedBest.levelNmse[2])/stats.originalHighLevelNmse:0.0;
-    stats.searchedLevelBalancedImprovementPercent=100.0*(1.0-searchedBest.levelBalanced);
-    stats.searchedPPos=searchedP[0]; stats.searchedPNeg=searchedP[1]; stats.searchedKPos=searchedP[2]; stats.searchedKNeg=searchedP[3];
-    stats.searchedDecisionReason = decision.reason;
+    const auto bestA=synthesizeA(m.A,bestABands);
+    const auto sa=le32(bytes.data()+0x78);
+    auto writeCandidate=[&](std::vector<std::uint8_t>& d,const std::vector<float>& A,const std::array<float,4>& pk){
+        for(std::size_t i=0;i<A.size();++i) putf(d.data()+kCoeffBase+4ull*(sa+i),A[i]);
+        putf(d.data()+0x68,pk[0]); putf(d.data()+0x6c,pk[1]); putf(d.data()+0x70,pk[2]); putf(d.data()+0x74,pk[3]);
+    };
 
-    if(status){
-        std::wstring msg = L"Refine diagnostics: best searched composite " + std::to_wstring(stats.searchedCompositeImprovementPercent)
-            + L"%; NMSE " + std::to_wstring(stats.searchedNmseImprovementPercent)
-            + L"%; level-balanced " + std::to_wstring(stats.searchedLevelBalancedImprovementPercent)
-            + L"%; MR-STFT " + std::to_wstring(stats.searchedSpectralImprovementPercent)
-            + L"%; envelope " + std::to_wstring(stats.searchedEnvelopeImprovementPercent)
-            + L"%. Final gate: " + (accepted?L"ACCEPTED":L"REJECTED") + L".";
-        status(msg);
-    }
-
-    // Export the best FEASIBLE searched candidate for audition. In v1.9.9 _BEST
-    // is no longer an unconstrained high-distortion point; it is the best point
-    // found inside the same low/mid/high temporal constraints used by the P/K
-    // search.
-    if (!bestClo2048.empty()) {
-        auto bestBytes = bytes;
-        putf(bestBytes.data()+0x68,searchedP[0]);
-        putf(bestBytes.data()+0x6c,searchedP[1]);
-        putf(bestBytes.data()+0x70,searchedP[2]);
-        putf(bestBytes.data()+0x74,searchedP[3]);
+    if(!bestClo2048.empty()){
+        auto bestBytes=bytes; writeCandidate(bestBytes,bestA,bestPk);
         if(!writeFileBytes(bestClo2048,bestBytes.data(),bestBytes.size(),error)) return false;
     }
 
-    if(!accepted){best=originalEval;p=originalP;}
-
-    stats.refinedNmse=best.nmse;
-    stats.refinedStimulusNmse=best.stimulusNmse;
-    stats.refinedTailNmse=best.tailNmse;
-    stats.refinedSpectralError=best.spectral;
-    stats.refinedEnvelopeError=best.envelope;
-    stats.spectralImprovementPercent=stats.originalSpectralError>0?100.0*(stats.originalSpectralError-best.spectral)/stats.originalSpectralError:0;
-    stats.envelopeImprovementPercent=stats.originalEnvelopeError>0?100.0*(stats.originalEnvelopeError-best.envelope)/stats.originalEnvelopeError:0;
+    Eval finalEval=accepted?best:originalEval;
+    std::array<float,4> finalPk=accepted?bestPk:std::array<float,4>{m.pp,m.pn,m.kp,m.kn};
+    stats.refinedNmse=finalEval.nmse; stats.refinedStimulusNmse=finalEval.stimulusNmse; stats.refinedTailNmse=finalEval.tailNmse;
+    stats.refinedSpectralError=finalEval.spectral; stats.refinedEnvelopeError=finalEval.envelope;
     stats.improved=accepted;
-    stats.improvementPercent=stats.originalNmse>0?100.0*(stats.originalNmse-best.nmse)/stats.originalNmse:0;
-    stats.stimulusImprovementPercent=stats.originalStimulusNmse>0?100.0*(stats.originalStimulusNmse-best.stimulusNmse)/stats.originalStimulusNmse:0;
-    stats.tailImprovementPercent=stats.originalTailNmse>0?100.0*(stats.originalTailNmse-best.tailNmse)/stats.originalTailNmse:0;
-    stats.pPosAfter=p[0];stats.pNegAfter=p[1];stats.kPosAfter=p[2];stats.kNegAfter=p[3];
+    stats.improvementPercent=stats.originalNmse>0?100.0*(stats.originalNmse-finalEval.nmse)/stats.originalNmse:0.0;
+    stats.stimulusImprovementPercent=stats.originalStimulusNmse>0?100.0*(stats.originalStimulusNmse-finalEval.stimulusNmse)/stats.originalStimulusNmse:0.0;
+    stats.tailImprovementPercent=stats.originalTailNmse>0?100.0*(stats.originalTailNmse-finalEval.tailNmse)/stats.originalTailNmse:0.0;
+    stats.spectralImprovementPercent=stats.originalSpectralError>0?100.0*(stats.originalSpectralError-finalEval.spectral)/stats.originalSpectralError:0.0;
+    stats.envelopeImprovementPercent=stats.originalEnvelopeError>0?100.0*(stats.originalEnvelopeError-finalEval.envelope)/stats.originalEnvelopeError:0.0;
+    stats.pPosAfter=finalPk[0]; stats.pNegAfter=finalPk[1]; stats.kPosAfter=finalPk[2]; stats.kNegAfter=finalPk[3];
 
-    if(stats.improved){putf(bytes.data()+0x68,p[0]);putf(bytes.data()+0x6c,p[1]);putf(bytes.data()+0x70,p[2]);putf(bytes.data()+0x74,p[3]);}
-    else { stats.pPosAfter=m.pp;stats.pNegAfter=m.pn;stats.kPosAfter=m.kp;stats.kNegAfter=m.kn; }
+    if(accepted) writeCandidate(bytes,bestA,bestPk);
+    if(!writeFileBytes(outputClo2048,bytes.data(),bytes.size(),error)) return false;
 
-    if(!writeFileBytes(outputClo2048,bytes.data(),bytes.size(),error))return false;
+    if(status){
+        status(L"v2.0 A+P/K complete. Combined research loss improvement: "+std::to_wstring(stats.searchedCompositeImprovementPercent)
+               +L"%; final gate: "+(accepted?L"ACCEPTED":L"REJECTED")+L".");
+    }
     return true;
 }
 

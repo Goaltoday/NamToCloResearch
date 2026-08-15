@@ -411,10 +411,10 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     fs::path refinedWorkClo;
     fs::path bestWorkClo;
     if (refine.enabled) {
-        report(status, L"Refining CLO P/K against NAM render (experimental)...");
-        refinedWorkClo = work / L"ampero_2048_REFINE.clo";
-        bestWorkClo = work / L"ampero_2048_BEST.clo";
-        if (!refineCloPk(worker.outputClo, worker.inputWav, worker.outputWav, refinedWorkClo, bestWorkClo,
+        report(status, L"Refining CLO A + P/K against NAM render (v2.0 experimental)...");
+        refinedWorkClo = work / L"ampero_2048_A_PK_REFINE.clo";
+        bestWorkClo = work / L"ampero_2048_A_PK_BEST.clo";
+        if (!refineCloAPlusPk(worker.outputClo, worker.inputWav, worker.outputWav, refinedWorkClo, bestWorkClo,
                          refine, result.refineStats, error, status)
             || !valid2048(refinedWorkClo) || !valid2048(bestWorkClo)) {
             result.exitCode = kExitStageFailure;
@@ -423,7 +423,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
             return result;
         }
         const std::wstring refineStatus =
-            L"Refine P/K level-aware full render complete: NMSE " + std::to_wstring(result.refineStats.originalNmse)
+            L"Refine A+P/K full render complete: NMSE " + std::to_wstring(result.refineStats.originalNmse)
             + L" -> " + std::to_wstring(result.refineStats.refinedNmse)
             + L" (" + std::to_wstring(result.refineStats.improvementPercent) + L"% improvement; stimulus "
             + std::to_wstring(result.refineStats.stimulusImprovementPercent) + L"%; tail "
