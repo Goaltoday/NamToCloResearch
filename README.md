@@ -1,8 +1,8 @@
 # NAM to CLO 2.5.1
 
-## v2.5.4 Automatic Corrective-IR Tone Match — 2048-sample IR
+## v2.5.5 Band-wise Residual-Guard VST Tail Tone Match
 
-v2.5.4 is the same final-20-second VST-style CAB Tone Match experiment as v2.5, but the minimum-phase SolverV1 corrective IR is extended from 1024 to 2048 samples. The analysis remains FFT 16384 / Hann / 75% overlap / median-of-means / MAD / 512 log-frequency comparison points / Smooth 5% (1/120 octave). The 2048-sample corrective IR is absorbed only into the Ampero 2048-tap Block B before the normal GP-200 B1024 compaction. PRE, A, P/K and POST remain unchanged.
+v2.5.5 keeps the SOURCE_latest_19 final-20-second CAB Tone Match analysis, Smooth 5%, 2048-sample minimum-phase IR and Block-B-only architecture, but no longer trusts the full correction curve blindly. It validates nine logarithmic frequency regions by re-rendering the CLO and only enables 25/50/75/100% of a band correction when that band gets measurably closer to the NAM without materially worsening the global tail match. The existing confidence mask, +/-3 dB cap, 6-8 kHz fade and >8 kHz no-correction guard remain in place.
 
 ## v2.3 Automatic Wiener Block-B Match
 

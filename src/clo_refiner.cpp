@@ -896,7 +896,7 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
 
 
 namespace {
-// v2.5.4: SOURCE_latest_19 VST CAB Tone Match analysis with a 2048-sample SolverV1 IR.
+// v2.5.5: SOURCE_latest_19 VST CAB Tone Match analysis with a 2048-sample SolverV1 IR.
 // Single-pass final-20-second tone match. The correction is treated as an EQ-shape only:
 // global dB offset is removed, correction is limited to +/-3 dB, low-confidence bins are
 // ignored, and the correction is faded from 6-8 kHz to zero above 8 kHz.
@@ -1100,6 +1100,41 @@ VstToneComparison makeTrustedTailToneComparison(const VstToneComparison& in){
     return out;
 }
 
+constexpr std::array<double,10> kTailToneBandEdgesHz = {40.0,80.0,150.0,300.0,600.0,1000.0,2000.0,4000.0,6000.0,8000.0};
+constexpr std::size_t kTailToneBandCount = kTailToneBandEdgesHz.size()-1;
+
+double vstToneBandErrorDb(const VstToneComparison& c,double loHz,double hiHz){
+    if(!c.valid()) return 1.0e100;
+    long double e=0.0L,w=0.0L;
+    for(std::size_t i=0;i<c.frequencyHz.size();++i){
+        const double hz=c.frequencyHz[i];
+        if(hz<loHz || hz>=hiHz) continue;
+        const double ww=std::max(0.0,c.confidence[i]);
+        e+=static_cast<long double>(c.rawCorrectionDb[i])*c.rawCorrectionDb[i]*ww;
+        w+=ww;
+    }
+    return w>1.0e-12L?std::sqrt(static_cast<double>(e/w)):1.0e100;
+}
+
+std::size_t tailToneBandForHz(double hz){
+    for(std::size_t b=0;b<kTailToneBandCount;++b)
+        if(hz>=kTailToneBandEdgesHz[b] && hz<kTailToneBandEdgesHz[b+1]) return b;
+    return kTailToneBandCount;
+}
+
+VstToneComparison applyTailToneBandScales(const VstToneComparison& base,const std::array<double,kTailToneBandCount>& scales){
+    VstToneComparison out=base;
+    if(!out.valid()) return out;
+    for(std::size_t i=0;i<out.frequencyHz.size();++i){
+        const auto b=tailToneBandForHz(out.frequencyHz[i]);
+        if(b>=kTailToneBandCount){ out.rawCorrectionDb[i]=0.0; out.confidence[i]=0.0; continue; }
+        const double scale=std::clamp(scales[b],0.0,1.0);
+        out.rawCorrectionDb[i]*=scale;
+        out.confidence[i]*=scale;
+    }
+    return out;
+}
+
 std::vector<float> solveMinimumPhaseIrLikeVst(const VstToneComparison& c,double smoothingAmount){
     const auto curve=smoothLikeVst(c,smoothingAmount);
     const std::size_t fftSize=4096; // next power of two >= 2 * 2048; same SolverV1 method at higher IR length
@@ -1135,16 +1170,16 @@ bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,con
     (void)config;
     std::vector<std::uint8_t> bytes; if(!readFileBytes(inputClo2048,bytes,error)) return false;
     Model m; if(!parseModel(bytes,m,error)) return false;
-    if(m.B.size()<512){ error="v2.5.4 tail tone match expects the Ampero 2048-tap Block B."; return false; }
+    if(m.B.size()<512){ error="v2.5.5 tail tone match expects the Ampero 2048-tap Block B."; return false; }
 
     std::vector<float> in,target; if(!readMono44100(stimulusWav,in,error)||!readMono44100(targetWav,target,error)) return false;
     const std::size_t n=std::min(in.size(),target.size());
     const std::size_t tailFrames=20u*kSampleRate;
-    if(n<tailFrames+kTailToneFft){ error="Not enough rendered audio for the final-20-second v2.5.4 tone match."; return false; }
+    if(n<tailFrames+kTailToneFft){ error="Not enough rendered audio for the final-20-second v2.5.5 tone match."; return false; }
     in.resize(n); target.resize(n);
     const std::size_t tailStart=n-tailFrames;
 
-    if(status) status(L"v2.5.4 VST tail tone match: rendering official CLO...");
+    if(status) status(L"v2.5.5 VST tail tone match: rendering official CLO...");
     const auto aout=precomputeA(m,in,n); std::vector<float> preB; renderPreB(m,aout,m.pp,m.pn,m.kp,m.kn,preB);
     std::vector<float> originalCandidate; renderWithB(preB,m.B,originalCandidate);
 
@@ -1163,25 +1198,75 @@ bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,con
     stats.originalEnvelopeError=multiScaleEnvelopeError(originalCandidate,fixedScale,envRef);
     const auto ol=levelNmse(originalCandidate,target,fixedScale,levels); stats.originalLowLevelNmse=ol[0];stats.originalMidLevelNmse=ol[1];stats.originalHighLevelNmse=ol[2];
 
-    if(status) status(L"v2.5.4 VST tail tone match: analysing final 20 s with SOURCE_latest_19 CAB Match algorithm...");
+    if(status) status(L"v2.5.5 VST tail tone match: analysing final 20 s with SOURCE_latest_19 CAB Match algorithm...");
     const auto sourceProfile=analyseLikeSourceLatest19(originalCandidate,fixedScale,tailStart,tailFrames);
     const auto targetProfile=analyseLikeSourceLatest19(target,1.0,tailStart,tailFrames);
-    if(!sourceProfile.valid()||!targetProfile.valid()){ error="v2.5.4 could not obtain valid VST-style tone profiles from the final 20 seconds."; return false; }
+    if(!sourceProfile.valid()||!targetProfile.valid()){ error="v2.5.5 could not obtain valid VST-style tone profiles from the final 20 seconds."; return false; }
     const auto beforeComparison=compareLikeSourceLatest19(sourceProfile,targetProfile);
-    if(!beforeComparison.valid()){ error="v2.5.4 VST-style tone comparison is invalid."; return false; }
+    if(!beforeComparison.valid()){ error="v2.5.5 VST-style tone comparison is invalid."; return false; }
     const double beforeToneError=vstToneErrorDb(beforeComparison); stats.originalResponseSpectralError=beforeToneError;
 
-    // v2.5.4 single pass: use the VST-style final-20-s correction, but make it
-    // safe for embedding in Block B. Remove global gain, reject low-confidence
-    // bins, clamp the EQ move to +/-3 dB, and fade 6-8 kHz to zero above 8 kHz.
+    // v2.5.5 band-wise residual guard. Start from the original B (all scales 0)
+    // and enable each logarithmic region only when a real re-render proves that
+    // TARGET-SOURCE residual error is reduced in that same region.
     const auto trustedComparison=makeTrustedTailToneComparison(beforeComparison);
-    const auto ir=solveMinimumPhaseIrLikeVst(trustedComparison,kTailToneSmoothingAmount);
-    const auto candidateB=convolveBWithToneIr(m.B,ir);
-    std::vector<float> candidateAudio; renderWithB(preB,candidateB,candidateAudio);
+    std::array<double,kTailToneBandCount> bandScales{};
 
-    const auto afterSourceProfile=analyseLikeSourceLatest19(candidateAudio,fixedScale,tailStart,tailFrames);
-    const auto afterComparison=compareLikeSourceLatest19(afterSourceProfile,targetProfile);
-    const double afterToneError=vstToneErrorDb(afterComparison);
+    struct BandEval {
+        std::vector<float> B,audio;
+        VstToneComparison comparison;
+        double globalError=1.0e100;
+        std::array<double,kTailToneBandCount> bandError{};
+    };
+    auto evaluateBandScales=[&](const std::array<double,kTailToneBandCount>& scales){
+        BandEval e;
+        const auto shaped=applyTailToneBandScales(trustedComparison,scales);
+        const auto ir=solveMinimumPhaseIrLikeVst(shaped,kTailToneSmoothingAmount);
+        e.B=convolveBWithToneIr(m.B,ir);
+        renderWithB(preB,e.B,e.audio);
+        const auto prof=analyseLikeSourceLatest19(e.audio,fixedScale,tailStart,tailFrames);
+        e.comparison=compareLikeSourceLatest19(prof,targetProfile);
+        e.globalError=vstToneErrorDb(e.comparison);
+        for(std::size_t b=0;b<kTailToneBandCount;++b)
+            e.bandError[b]=vstToneBandErrorDb(e.comparison,kTailToneBandEdgesHz[b],kTailToneBandEdgesHz[b+1]);
+        return e;
+    };
+
+    std::array<double,kTailToneBandCount> originalBandError{};
+    for(std::size_t b=0;b<kTailToneBandCount;++b)
+        originalBandError[b]=vstToneBandErrorDb(beforeComparison,kTailToneBandEdgesHz[b],kTailToneBandEdgesHz[b+1]);
+
+    BandEval bestEval=evaluateBandScales(bandScales);
+    constexpr std::array<double,4> trialScales={0.25,0.50,0.75,1.00};
+    for(int pass=0;pass<2;++pass){
+        bool changed=false;
+        for(std::size_t b=0;b<kTailToneBandCount;++b){
+            auto localBest=bestEval;
+            double localScale=bandScales[b];
+            for(double scale:trialScales){
+                auto testScales=bandScales;
+                testScales[b]=scale;
+                auto e=evaluateBandScales(testScales);
+                if(e.bandError[b] < originalBandError[b]*0.9995 &&
+                   e.bandError[b] < localBest.bandError[b]*0.9995 &&
+                   e.globalError <= bestEval.globalError*1.001){
+                    localBest=std::move(e);
+                    localScale=scale;
+                }
+            }
+            if(localScale!=bandScales[b]){
+                bandScales[b]=localScale;
+                bestEval=std::move(localBest);
+                changed=true;
+            }
+        }
+        if(!changed) break;
+    }
+
+    const auto candidateB=bestEval.B;
+    const auto candidateAudio=bestEval.audio;
+    const auto afterComparison=bestEval.comparison;
+    const double afterToneError=bestEval.globalError;
 
     auto imp=[](double a,double b){return a>0?100.0*(a-b)/a:0.0;};
     stats.searchedResponseSpectralError=afterToneError; stats.searchedResponseSpectralImprovementPercent=imp(beforeToneError,afterToneError);
@@ -1205,7 +1290,7 @@ bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,con
     if(stats.searchedNmse>stats.originalNmse*1.10) failures.emplace_back("full-render NMSE regressed by more than 10%");
     if(stats.searchedSpectralError>stats.originalSpectralError*1.10) failures.emplace_back("MR-STFT regressed by more than 10%");
     const bool accepted=failures.empty(); stats.searchedCandidateAccepted=accepted;
-    if(accepted) stats.searchedDecisionReason="accepted by v2.5.4 guarded single-pass VST CAB Tone Match gate (final 20 s; global level removed; +/-3 dB; confidence mask; 6-8 kHz fade; >8 kHz unchanged)";
+    if(accepted) stats.searchedDecisionReason="accepted by v2.5.5 band-wise residual-guard VST CAB Tone Match gate (final 20 s; per-band re-render validation; global level removed; +/-3 dB; confidence mask; 6-8 kHz fade; >8 kHz unchanged)";
     else for(std::size_t i=0;i<failures.size();++i){if(i)stats.searchedDecisionReason+="; ";stats.searchedDecisionReason+=failures[i];}
 
     const auto sb=le32(bytes.data()+0x80);
@@ -1218,7 +1303,7 @@ bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,con
     stats.refinedSpectralError=accepted?stats.searchedSpectralError:stats.originalSpectralError; stats.refinedEnvelopeError=accepted?stats.searchedEnvelopeError:stats.originalEnvelopeError; stats.refinedResponseSpectralError=accepted?afterToneError:beforeToneError;
     stats.improved=accepted; stats.improvementPercent=imp(stats.originalNmse,stats.refinedNmse); stats.stimulusImprovementPercent=imp(stats.originalStimulusNmse,stats.refinedStimulusNmse); stats.tailImprovementPercent=imp(stats.originalTailNmse,stats.refinedTailNmse); stats.spectralImprovementPercent=imp(stats.originalSpectralError,stats.refinedSpectralError); stats.envelopeImprovementPercent=imp(stats.originalEnvelopeError,stats.refinedEnvelopeError); stats.responseSpectralImprovementPercent=imp(beforeToneError,stats.refinedResponseSpectralError);
 
-    if(status) status(L"v2.5.4 guarded VST tail tone match complete. Final-20-s CAB Match error improvement: "+std::to_wstring(stats.searchedResponseSpectralImprovementPercent)+L"%; final gate: "+(accepted?L"ACCEPTED":L"REJECTED")+L".");
+    if(status) status(L"v2.5.5 band-wise residual-guard VST tail tone match complete. Final-20-s CAB Match error improvement: "+std::to_wstring(stats.searchedResponseSpectralImprovementPercent)+L"%; final gate: "+(accepted?L"ACCEPTED":L"REJECTED")+L".");
     return true;
 }
 

@@ -550,7 +550,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
     createSectionLabel(hwnd, 1008, L"Corrective IR");
-    createSectionLabel(hwnd, 1009, L"CLO refinement v2.5.4 (guarded VST CAB Tone Match - final 20 s)");
+    createSectionLabel(hwnd, 1009, L"CLO refinement v2.5.5 (band-wise residual-guard VST CAB Tone Match - final 20 s)");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                  0, 0, 100, 30, hwnd, controlId(IDC_INPUT_PATH), nullptr, nullptr);
@@ -892,7 +892,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + std::to_wstring(r->refineStats.spectralImprovementPercent) + L"%"
                               + L"\r\nEnvelope RMS (256/2048/8192): "
                               + std::to_wstring(r->refineStats.envelopeImprovementPercent) + L"%"
-                              + L"\r\n\r\n--- v2.5.4 guarded VST CAB Tone Match diagnostics (final 20 s) ---"
+                              + L"\r\n\r\n--- v2.5.5 band-wise residual-guard VST CAB Tone Match diagnostics (final 20 s) ---"
                               + L"\r\nBest searched candidate: "
                               + std::wstring(r->refineStats.searchedCandidateAccepted ? L"ACCEPTED" : L"REJECTED")
                               + L"\r\nVST final-20-s tone-match error improvement: "
@@ -912,7 +912,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + L"\r\nNMSE: " + std::to_wstring(r->refineStats.originalNmse) + L" -> " + std::to_wstring(r->refineStats.searchedNmse)
                               + L"\r\nMR-STFT: " + std::to_wstring(r->refineStats.originalSpectralError) + L" -> " + std::to_wstring(r->refineStats.searchedSpectralError)
                               + L"\r\nDecision: " + ntc::fromUtf8(r->refineStats.searchedDecisionReason)
-                              + L"\r\n\r\nNote: v2.5.4 freezes PRE, Block A, P/K and POST. It uses the SOURCE_latest_19 VST CAB Tone Match on the final 20 seconds at Smooth 5%, removes global gain offset, limits trusted correction to +/-3 dB, rejects low-confidence/low-energy bins, keeps full correction through 6 kHz, fades it from 6-8 kHz, and applies 0 dB correction above 8 kHz. It uses a single 2048-sample minimum-phase IR before GP-200 compaction.";
+                              + L"\r\n\r\nNote: v2.5.5 freezes PRE, Block A, P/K and POST. It starts from the guarded SOURCE_latest_19 final-20-s Tone Match curve, then validates nine logarithmic bands (40-80-150-300-600-1k-2k-4k-6k-8k Hz) by actual CLO re-render. Each band is enabled at 25/50/75/100% only when its own residual TARGET-SOURCE error improves without materially worsening the global tail match. Smooth remains 5%, global gain is removed, correction is limited to +/-3 dB, low-confidence bins are ignored, 6-8 kHz is faded and >8 kHz is unchanged. The accepted curve is converted to one 2048-sample minimum-phase IR before GP-200 compaction.";
             }
             setText(gStatus, L"Done. Two CLO files were generated successfully.");
             const std::wstring doneTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;
