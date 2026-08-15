@@ -550,7 +550,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
     createSectionLabel(hwnd, 1008, L"Corrective IR");
-    createSectionLabel(hwnd, 1009, L"CLO refinement v2.0 (A + P/K)");
+    createSectionLabel(hwnd, 1009, L"CLO refinement v2.1 (A + P/K + spectral guard)");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                  0, 0, 100, 30, hwnd, controlId(IDC_INPUT_PATH), nullptr, nullptr);
@@ -892,7 +892,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + std::to_wstring(r->refineStats.spectralImprovementPercent) + L"%"
                               + L"\r\nEnvelope RMS (256/2048/8192): "
                               + std::to_wstring(r->refineStats.envelopeImprovementPercent) + L"%"
-                              + L"\r\n\r\n--- v2.0 A + P/K diagnostics ---"
+                              + L"\r\n\r\n--- v2.1 A + P/K + spectral-profile diagnostics ---"
                               + L"\r\nBest searched candidate: "
                               + std::wstring(r->refineStats.searchedCandidateAccepted ? L"ACCEPTED" : L"REJECTED")
                               + L"\r\nCombined A+P/K loss improvement: "
@@ -905,6 +905,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + std::to_wstring(r->refineStats.searchedTailImprovementPercent) + L"%"
                               + L"\r\nBest searched MR-STFT improvement: "
                               + std::to_wstring(r->refineStats.searchedSpectralImprovementPercent) + L"%"
+                              + L"\r\nBest searched transfer-profile improvement: "
+                              + std::to_wstring(r->refineStats.searchedResponseSpectralImprovementPercent) + L"%"
                               + L"\r\nBest searched envelope improvement: "
                               + std::to_wstring(r->refineStats.searchedEnvelopeImprovementPercent) + L"%"
                               + L"\r\nLevel-balanced temporal improvement: "
@@ -923,12 +925,13 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + L"\r\n\r\nAbsolute metrics (original -> BEST):"
                               + L"\r\nNMSE: " + std::to_wstring(r->refineStats.originalNmse) + L" -> " + std::to_wstring(r->refineStats.searchedNmse)
                               + L"\r\nMR-STFT: " + std::to_wstring(r->refineStats.originalSpectralError) + L" -> " + std::to_wstring(r->refineStats.searchedSpectralError)
+                              + L"\r\nTransfer-profile dB-shape MAE: " + std::to_wstring(r->refineStats.originalResponseSpectralError) + L" -> " + std::to_wstring(r->refineStats.searchedResponseSpectralError)
                               + L"\r\nEnvelope RMS dB error: " + std::to_wstring(r->refineStats.originalEnvelopeError) + L" -> " + std::to_wstring(r->refineStats.searchedEnvelopeError)
                               + L"\r\nLow-level NMSE: " + std::to_wstring(r->refineStats.originalLowLevelNmse) + L" -> " + std::to_wstring(r->refineStats.searchedLowLevelNmse)
                               + L"\r\nMid-level NMSE: " + std::to_wstring(r->refineStats.originalMidLevelNmse) + L" -> " + std::to_wstring(r->refineStats.searchedMidLevelNmse)
                               + L"\r\nHigh-level NMSE: " + std::to_wstring(r->refineStats.originalHighLevelNmse) + L" -> " + std::to_wstring(r->refineStats.searchedHighLevelNmse)
                               + L"\r\nDecision: " + ntc::fromUtf8(r->refineStats.searchedDecisionReason)
-                              + L"\r\n\r\nNote: v2.0 jointly optimizes a smooth 10-band representation of Block A and P/K over the full render. PRE, POST and B remain fixed. _BEST is the lowest research-loss candidate; _REFINE is only accepted if the final temporal/spectral/dynamic safety gate passes.";
+                              + L"\r\n\r\nNote: v2.1 jointly optimizes Block A and P/K, but _BEST/_REFINE are taken only from candidates that preserve the input-referenced 30 Hz-20 kHz transfer-magnitude contour (96 log-frequency bands, max +0.10% profile-error regression). PRE, POST and B remain fixed.";
             }
             setText(gStatus, L"Done. Two CLO files were generated successfully.");
             const std::wstring doneTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;

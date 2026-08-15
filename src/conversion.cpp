@@ -411,7 +411,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     fs::path refinedWorkClo;
     fs::path bestWorkClo;
     if (refine.enabled) {
-        report(status, L"Refining CLO A + P/K against NAM render (v2.0 experimental)...");
+        report(status, L"Refining CLO A + P/K against NAM render (v2.1 spectral guard)...");
         refinedWorkClo = work / L"ampero_2048_A_PK_REFINE.clo";
         bestWorkClo = work / L"ampero_2048_A_PK_BEST.clo";
         if (!refineCloAPlusPk(worker.outputClo, worker.inputWav, worker.outputWav, refinedWorkClo, bestWorkClo,
@@ -428,7 +428,8 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
             + L" (" + std::to_wstring(result.refineStats.improvementPercent) + L"% improvement; stimulus "
             + std::to_wstring(result.refineStats.stimulusImprovementPercent) + L"%; tail "
             + std::to_wstring(result.refineStats.tailImprovementPercent) + L"%; MR-STFT "
-            + std::to_wstring(result.refineStats.spectralImprovementPercent) + L"%; envelope "
+            + std::to_wstring(result.refineStats.spectralImprovementPercent) + L"%; transfer-profile "
+            + std::to_wstring(result.refineStats.responseSpectralImprovementPercent) + L"%; envelope "
             + std::to_wstring(result.refineStats.envelopeImprovementPercent) + L"%; searched low/mid/high "
             + std::to_wstring(result.refineStats.searchedLowLevelImprovementPercent) + L"/"
             + std::to_wstring(result.refineStats.searchedMidLevelImprovementPercent) + L"/"

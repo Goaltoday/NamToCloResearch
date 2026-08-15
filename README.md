@@ -1,9 +1,15 @@
-# NAM to CLO 1.9.9
+# NAM to CLO 2.1.0
 
 Windows GUI utility that converts one Neural Amp Model (`.nam`) or batch-converts all `.nam` files in a selected folder into two CLO files per model:
 
 - `<name>_Ampero_2048.clo` — the 2048-coefficient VTSI generated through Hotone `HTUSBTools.dll`.
 - `<name>_GP200_1024.clo` — an experimental GP-200 compact serialization using the 1024-coefficient structure observed in the official Valeton editor.
+
+## v2.1.0 A+P/K spectral-response guard
+
+v2.1 keeps the v2.0 joint Block-A + P/K search, but adds a second spectral metric designed to follow the broad transfer-function curve seen in external analysers. The metric uses the known 50-second stimulus as a reference, estimates Welch input/output power spectra at 4096 samples / 2048 hop, removes the stimulus spectral tilt, and collapses 30 Hz-20 kHz into 96 equal-log-frequency bands. Error is the mean absolute dB difference in response shape after removing one global level offset.
+
+The v2.1 composite objective is 35% full-render NMSE, 20% level-conditioned NMSE, 20% input-referenced response-profile error, 15% multi-resolution STFT and 10% envelope error. The optimiser may traverse unconstrained A/P-K points internally, but `_BEST` and `_REFINE` are selected only from candidates whose response-profile error is no more than 0.10% worse than the original CLO. This specifically addresses cases where MR-STFT improved while an external spectral analyser showed the original CLO was still closer to the NAM.
 
 ## What is confirmed
 
@@ -137,9 +143,9 @@ The optimizer only writes a refined P/K set when the candidate does not regress 
 A-weighted ESR was reviewed but intentionally deferred in this revision so low-frequency/low-mid mismatches are not de-emphasized while validating the new objective.
 
 
-### v1.9.9 free-search + final safety gate
+### v2.0.0 free-search + final safety gate
 
-Version 1.9.9 keeps the v1.9.4 research metrics and full 70-second comparison,
+Version 2.0.0 keeps the v1.9.4 research metrics and full 70-second comparison,
 but changes the optimiser. Intermediate P/K candidates are ranked by the
 combined research loss and are allowed to trade metrics temporarily. A
 deterministic 24-point Halton coarse search in log-parameter space is followed
@@ -149,11 +155,11 @@ written unchanged. This is intended to avoid the 0% local-trap behaviour seen
 with v1.9.4 while retaining conservative output validation.
 
 
-## v1.9.9 P/K nonlinearity-specific refinement
+## v2.0.0 P/K nonlinearity-specific refinement
 
 The experimental P/K refinement now prioritises temporal waveform fidelity at the actual input excitation levels. The full 70 s render is split into non-silent 2048-sample windows and classified into low/mid/high RMS thirds. The loss weights are 35% global NMSE, 35% level-balanced NMSE, 15% MR-STFT and 15% multi-scale RMS envelope. This is intentionally a P/K-specific loss; later A/B refinement will use a different balance.
 
-## v1.9.9 constrained P/K search
+## v2.0.0 constrained P/K search
 
 P/K optimisation now enforces waveform fidelity during the search itself rather
 than optimising an unconstrained scalar loss and rejecting the result only at
@@ -161,3 +167,7 @@ the end. Global NMSE cannot worsen, low/mid/high excitation NMSE may regress by
 at most 0.50%, and MR-STFT/envelope remain secondary guards. The deterministic
 coarse search uses 64 Halton points, followed by constrained local refinement.
 `_BEST` is now the best feasible candidate, not the unconstrained candidate.
+
+
+## v2.0 experimental branch
+The old v1.9 P/K-only refiner is retired. v2.0 jointly refines Block A (smooth 10-band frequency envelope) and P/K against the full NAM render while keeping PRE/POST/B fixed.

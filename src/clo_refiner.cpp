@@ -375,6 +375,102 @@ double multiScaleEnvelopeError(const std::vector<float>& candidate,double scale,
     return e/static_cast<double>(target.scales.size());
 }
 
+
+
+// v2.1: input-referenced spectral profile, intended to track the same broad
+// frequency-response contour that is visible in external transfer-function
+// analysers.  The known stimulus is used to remove its own spectral tilt.  We
+// average Welch power spectra over the first 50 seconds and collapse them into
+// equal-log-frequency bands so treble bins do not dominate merely because a
+// linear FFT has more bins there.
+constexpr std::size_t kResponseFftSize = 4096;
+constexpr std::size_t kResponseHopSize = 2048;
+constexpr std::size_t kResponseBandCount = 96;
+constexpr double kResponseMinHz = 30.0;
+constexpr double kResponseMaxHz = 20000.0;
+
+struct ResponseSpectralReference {
+    std::array<double,kResponseBandCount> targetDb{};
+    std::array<double,kResponseBandCount> inputPower{};
+    std::array<bool,kResponseBandCount> valid{};
+};
+
+std::size_t responseBandForHz(double hz){
+    if(hz<=kResponseMinHz) return 0;
+    if(hz>=kResponseMaxHz) return kResponseBandCount-1;
+    const double t=std::log(hz/kResponseMinHz)/std::log(kResponseMaxHz/kResponseMinHz);
+    return std::min<std::size_t>(kResponseBandCount-1,static_cast<std::size_t>(t*kResponseBandCount));
+}
+
+std::array<double,kResponseBandCount> responseTransferDb(const std::vector<float>& input,
+                                                          const std::vector<float>& output,
+                                                          double outputScale,
+                                                          std::array<double,kResponseBandCount>* inputPowerOut=nullptr){
+    std::array<long double,kResponseBandCount> pin{}, pout{};
+    std::array<std::size_t,kResponseBandCount> count{};
+    const std::size_t n=std::min({input.size(),output.size(),kStimulusFrames});
+    const auto window=hannWindow(kResponseFftSize);
+    std::vector<std::complex<float>> xi(kResponseFftSize), yo(kResponseFftSize);
+    for(std::size_t pos=0;pos<n;pos+=kResponseHopSize){
+        std::fill(xi.begin(),xi.end(),std::complex<float>{});
+        std::fill(yo.begin(),yo.end(),std::complex<float>{});
+        const std::size_t used=std::min(kResponseFftSize,n-pos);
+        long double frameInput=0.0L;
+        for(std::size_t i=0;i<used;++i){
+            const float x=input[pos+i]*window[i];
+            const float y=static_cast<float>(outputScale*output[pos+i])*window[i];
+            xi[i]=std::complex<float>(x,0.0f); yo[i]=std::complex<float>(y,0.0f);
+            frameInput+=static_cast<long double>(x)*x;
+        }
+        if(frameInput<1.0e-12L) continue;
+        fft(xi,false); fft(yo,false);
+        for(std::size_t k=1;k<=kResponseFftSize/2;++k){
+            const double hz=double(k)*double(kSampleRate)/double(kResponseFftSize);
+            if(hz<kResponseMinHz || hz>kResponseMaxHz) continue;
+            const std::size_t b=responseBandForHz(hz);
+            const long double ip=std::norm(xi[k]);
+            const long double op=std::norm(yo[k]);
+            pin[b]+=ip; pout[b]+=op; ++count[b];
+        }
+    }
+    long double maxPin=0.0L; for(auto v:pin) maxPin=std::max(maxPin,v);
+    std::array<double,kResponseBandCount> db{};
+    for(std::size_t b=0;b<kResponseBandCount;++b){
+        if(inputPowerOut) (*inputPowerOut)[b]=static_cast<double>(pin[b]);
+        if(count[b]==0 || pin[b] <= maxPin*1.0e-8L){ db[b]=std::numeric_limits<double>::quiet_NaN(); continue; }
+        db[b]=10.0*std::log10(std::max(static_cast<double>(pout[b]/pin[b]),1.0e-20));
+    }
+    return db;
+}
+
+ResponseSpectralReference buildResponseSpectralReference(const std::vector<float>& input,const std::vector<float>& target){
+    ResponseSpectralReference r;
+    r.targetDb=responseTransferDb(input,target,1.0,&r.inputPower);
+    for(std::size_t b=0;b<kResponseBandCount;++b) r.valid[b]=std::isfinite(r.targetDb[b]);
+    return r;
+}
+
+double responseSpectralError(const std::vector<float>& input,const std::vector<float>& candidate,double scale,
+                             const ResponseSpectralReference& target){
+    const auto cand=responseTransferDb(input,candidate,scale,nullptr);
+    // Compare spectral SHAPE.  A single broad output-level offset is removed,
+    // because level is already frozen by the original-CLO calibration and the
+    // external analyser comparison is about the contour itself.
+    long double meanDelta=0.0L; std::size_t used=0;
+    for(std::size_t b=0;b<kResponseBandCount;++b){
+        if(!target.valid[b] || !std::isfinite(cand[b])) continue;
+        meanDelta+=cand[b]-target.targetDb[b]; ++used;
+    }
+    if(!used) return 0.0;
+    meanDelta/=static_cast<long double>(used);
+    long double mae=0.0L;
+    for(std::size_t b=0;b<kResponseBandCount;++b){
+        if(!target.valid[b] || !std::isfinite(cand[b])) continue;
+        mae+=std::abs((cand[b]-target.targetDb[b])-static_cast<double>(meanDelta));
+    }
+    return static_cast<double>(mae/used);
+}
+
 struct LevelReference {
     std::size_t windowSize = kLevelWindow;
     std::vector<std::uint8_t> band; // 0=inactive, 1=low, 2=mid, 3=high
@@ -446,13 +542,14 @@ std::array<double,3> levelNmse(const std::vector<float>& candidate,const std::ve
 struct MetricReference {
     MultiStftReference mrstft;
     MultiEnvelopeReference envelope;
+    ResponseSpectralReference responseSpectral;
     LevelReference levels;
     std::array<double,3> originalLevelNmse{};
 };
 
 struct Eval {
     double nmse=1e100, stimulusNmse=1e100, tailNmse=1e100;
-    double spectral=1e100, envelope=1e100, levelBalanced=1e100, composite=1e100;
+    double spectral=1e100, responseSpectral=1e100, envelope=1e100, levelBalanced=1e100, composite=1e100;
     std::array<double,3> levelNmse{1e100,1e100,1e100};
 };
 
@@ -581,17 +678,17 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
     if(!readFileBytes(inputClo2048,bytes,error)) return false;
     Model m;
     if(!parseModel(bytes,m,error)) return false;
-    if(m.A.size()!=128){ error="v2.0 A+P/K refiner expects a 128-tap Block A."; return false; }
+    if(m.A.size()!=128){ error="v2.1 A+P/K refiner expects a 128-tap Block A."; return false; }
 
     std::vector<float> in,target;
     if(!readMono44100(stimulusWav,in,error)||!readMono44100(targetWav,target,error)) return false;
     const std::size_t n=std::min(in.size(),target.size());
-    if(n<static_cast<std::size_t>(kSampleRate)){ error="Not enough rendered audio for full-length v2.0 refinement."; return false; }
+    if(n<static_cast<std::size_t>(kSampleRate)){ error="Not enough rendered audio for full-length v2.1 refinement."; return false; }
     in.resize(n); target.resize(n);
 
-    if(status) status(L"v2.0 A+P/K: precomputing PRE over the complete render...");
+    if(status) status(L"v2.1 A+P/K: precomputing PRE over the complete render...");
     const auto preOut=precomputePre(m,in,n);
-    if(status) status(L"v2.0 A+P/K: preparing fixed FIR B FFT plan...");
+    if(status) status(L"v2.1 A+P/K: preparing fixed FIR B FFT plan...");
     FirFftPlan bPlan(m.B);
 
     stats.pPosBefore=m.pp; stats.pNegBefore=m.pn; stats.kPosBefore=m.kp; stats.kNegBefore=m.kn;
@@ -599,7 +696,7 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
     std::array<double,kABandCount> originalABands{};
     std::vector<float> originalCandidate;
     renderAPlusPk(m,preOut,bPlan,originalABands,m.pp,m.pn,m.kp,m.kn,originalCandidate);
-    if(originalCandidate.empty()){ error="Could not render original CLO for v2.0 refinement."; return false; }
+    if(originalCandidate.empty()){ error="Could not render original CLO for v2.1 refinement."; return false; }
 
     // Freeze one output-level calibration from the official CLO. Candidates
     // are never independently normalized, so A/P/K changes must account for
@@ -611,14 +708,16 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
     stats.originalStimulusNmse=nmseRange(originalCandidate,target,fixedScale,0,split);
     stats.originalTailNmse=nmseRange(originalCandidate,target,fixedScale,split,n);
 
-    if(status) status(L"v2.0 A+P/K: building full-render temporal, MR-STFT and envelope references...");
+    if(status) status(L"v2.1 A+P/K: building temporal, MR-STFT, envelope and input-referenced spectral-profile references...");
     MetricReference metricRef;
     metricRef.mrstft=buildMultiStftReference(target);
     metricRef.envelope=buildMultiEnvelopeReference(target);
+    metricRef.responseSpectral=buildResponseSpectralReference(in,target);
     metricRef.levels=buildLevelReference(in);
     metricRef.originalLevelNmse=levelNmse(originalCandidate,target,fixedScale,metricRef.levels);
     stats.originalSpectralError=multiResolutionStftLoss(originalCandidate,fixedScale,metricRef.mrstft);
     stats.originalEnvelopeError=multiScaleEnvelopeError(originalCandidate,fixedScale,metricRef.envelope);
+    stats.originalResponseSpectralError=responseSpectralError(in,originalCandidate,fixedScale,metricRef.responseSpectral);
     stats.originalLowLevelNmse=metricRef.originalLevelNmse[0];
     stats.originalMidLevelNmse=metricRef.originalLevelNmse[1];
     stats.originalHighLevelNmse=metricRef.originalLevelNmse[2];
@@ -632,30 +731,47 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
         e.stimulusNmse=nmseRange(candidate,target,fixedScale,0,std::min(kStimulusFrames,nn));
         e.tailNmse=nmseRange(candidate,target,fixedScale,std::min(kStimulusFrames,nn),nn);
         e.spectral=multiResolutionStftLoss(candidate,fixedScale,metricRef.mrstft);
+        e.responseSpectral=responseSpectralError(in,candidate,fixedScale,metricRef.responseSpectral);
         e.envelope=multiScaleEnvelopeError(candidate,fixedScale,metricRef.envelope);
         e.levelNmse=levelNmse(candidate,target,fixedScale,metricRef.levels);
         const double nNorm=e.nmse/std::max(stats.originalNmse,kMetricEpsilon);
         const double sNorm=e.spectral/std::max(stats.originalSpectralError,kMetricEpsilon);
+        const double rNorm=e.responseSpectral/std::max(stats.originalResponseSpectralError,kMetricEpsilon);
         const double dNorm=e.envelope/std::max(stats.originalEnvelopeError,kMetricEpsilon);
         double levelNorm=0.0; int levelCount=0;
         for(std::size_t i=0;i<3;++i){
             if(metricRef.originalLevelNmse[i]>kMetricEpsilon){ levelNorm+=e.levelNmse[i]/metricRef.originalLevelNmse[i]; ++levelCount; }
         }
         e.levelBalanced=levelCount?levelNorm/double(levelCount):nNorm;
-        // For A+P/K, temporal fidelity remains primary, while the spectral term
-        // is now meaningful because A is a linear pre-emphasis filter.
-        e.composite=0.45*nNorm + 0.25*e.levelBalanced + 0.20*sNorm + 0.10*dNorm;
+        // v2.1: keep temporal fidelity primary but reserve a dedicated 20% for
+        // the input-referenced log-frequency response contour. MR-STFT remains
+        // useful for time/frequency texture, but can no longer stand in for the
+        // transfer-function curve seen in an external spectral analyser.
+        e.composite=0.35*nNorm + 0.20*e.levelBalanced + 0.20*rNorm + 0.15*sNorm + 0.10*dNorm;
         return e;
     };
 
     Eval originalEval;
     originalEval.nmse=stats.originalNmse; originalEval.stimulusNmse=stats.originalStimulusNmse; originalEval.tailNmse=stats.originalTailNmse;
-    originalEval.spectral=stats.originalSpectralError; originalEval.envelope=stats.originalEnvelopeError;
+    originalEval.spectral=stats.originalSpectralError; originalEval.responseSpectral=stats.originalResponseSpectralError; originalEval.envelope=stats.originalEnvelopeError;
     originalEval.levelNmse=metricRef.originalLevelNmse; originalEval.levelBalanced=1.0; originalEval.composite=1.0;
 
+    // Keep two fronts: an unconstrained search path (useful for traversing the
+    // coupled A/P-K space), and the best candidate that also preserves the
+    // input-referenced spectral contour. _BEST and _REFINE are taken only from
+    // the spectrally guarded front.
     Eval best=originalEval;
     std::array<double,kABandCount> bestABands=originalABands;
     std::array<float,4> bestPk={m.pp,m.pn,m.kp,m.kn};
+    Eval safeBest=originalEval;
+    std::array<double,kABandCount> safeBestABands=originalABands;
+    std::array<float,4> safeBestPk={m.pp,m.pn,m.kp,m.kn};
+    auto considerSpectrallySafe=[&](const Eval& e,const std::array<double,kABandCount>& bands,const std::array<float,4>& pk){
+        const double limit=std::max(originalEval.responseSpectral*1.001,originalEval.responseSpectral+1.0e-8);
+        if(e.responseSpectral<=limit && compositeBetter(e,safeBest)){
+            safeBest=e; safeBestABands=bands; safeBestPk=pk;
+        }
+    };
 
     // Stage 1: optimize the smooth Block-A spectral envelope with P/K fixed.
     // Stage 2: alternate A and P/K so drive shaping and nonlinearity can settle
@@ -664,7 +780,7 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
     double pkStepLog=0.055; // ~5.7 % multiplicative step
     const int passes=std::clamp(config.passes,2,6);
     for(int pass=0;pass<passes;++pass){
-        if(status) status(L"v2.0 A+P/K full 70 s: pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes)+L" (Block A)...");
+        if(status) status(L"v2.1 A+P/K full 70 s: pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes)+L" (Block A)...");
         bool improvedA=false;
         for(std::size_t band=0;band<kABandCount;++band){
             Eval local=best; auto localBands=bestABands;
@@ -672,12 +788,13 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
                 auto test=bestABands;
                 test[band]=std::clamp(test[band]+dir*aStepDb,-4.0,4.0);
                 const Eval e=evalCandidate(test,bestPk);
+                considerSpectrallySafe(e,test,bestPk);
                 if(compositeBetter(e,local)){ local=e; localBands=test; }
             }
             if(compositeBetter(local,best)){ best=local; bestABands=localBands; improvedA=true; }
         }
 
-        if(status) status(L"v2.0 A+P/K full 70 s: pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes)+L" (P/K)...");
+        if(status) status(L"v2.1 A+P/K full 70 s: pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes)+L" (P/K)...");
         bool improvedPk=false;
         for(int j=0;j<4;++j){
             Eval local=best; auto localPk=bestPk;
@@ -685,6 +802,7 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
                 auto test=bestPk;
                 test[j]=std::max(1e-7f,float(double(bestPk[j])*std::exp(dir*pkStepLog)));
                 const Eval e=evalCandidate(bestABands,test);
+                considerSpectrallySafe(e,bestABands,test);
                 if(compositeBetter(e,local)){ local=e; localPk=test; }
             }
             if(compositeBetter(local,best)){ best=local; bestPk=localPk; improvedPk=true; }
@@ -692,6 +810,13 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
         aStepDb *= (improvedA?0.58:0.40);
         pkStepLog *= (improvedPk?0.60:0.42);
     }
+
+    // Publish only the best point that preserved the dedicated response curve.
+    // The unconstrained path above may temporarily move through worse spectral
+    // contours, but those points are never written to _BEST/_REFINE.
+    best=safeBest;
+    bestABands=safeBestABands;
+    bestPk=safeBestPk;
 
     // Final safety gate is deliberately less rigid than v1.9 because A and P/K
     // are coupled. It still rejects candidates that obtain a nicer spectrum by
@@ -705,9 +830,10 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
             failures.emplace_back(std::string(levelNames[i])+" regressed by more than 1.0%");
     }
     if(best.spectral > originalEval.spectral*1.02) failures.emplace_back("MR-STFT regressed by more than 2%");
+    if(best.responseSpectral > originalEval.responseSpectral*1.001) failures.emplace_back("input-referenced spectral profile regressed by more than 0.10%");
     if(best.envelope > originalEval.envelope*1.03) failures.emplace_back("envelope RMS regressed by more than 3%");
     const bool accepted=failures.empty();
-    std::string decision=accepted?"accepted by v2.0 A+P/K safety gate":"";
+    std::string decision=accepted?"accepted by v2.1 A+P/K spectral-response safety gate":"";
     if(!accepted){ for(std::size_t i=0;i<failures.size();++i){ if(i)decision+="; "; decision+=failures[i]; } }
 
     stats.searchedCandidateAccepted=accepted;
@@ -723,6 +849,8 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
     stats.searchedSpectralImprovementPercent=stats.originalSpectralError>0?100.0*(stats.originalSpectralError-best.spectral)/stats.originalSpectralError:0.0;
     stats.searchedEnvelopeError=best.envelope;
     stats.searchedEnvelopeImprovementPercent=stats.originalEnvelopeError>0?100.0*(stats.originalEnvelopeError-best.envelope)/stats.originalEnvelopeError:0.0;
+    stats.searchedResponseSpectralError=best.responseSpectral;
+    stats.searchedResponseSpectralImprovementPercent=stats.originalResponseSpectralError>0?100.0*(stats.originalResponseSpectralError-best.responseSpectral)/stats.originalResponseSpectralError:0.0;
     stats.searchedLowLevelNmse=best.levelNmse[0]; stats.searchedMidLevelNmse=best.levelNmse[1]; stats.searchedHighLevelNmse=best.levelNmse[2];
     stats.searchedLowLevelImprovementPercent=stats.originalLowLevelNmse>0?100.0*(stats.originalLowLevelNmse-best.levelNmse[0])/stats.originalLowLevelNmse:0.0;
     stats.searchedMidLevelImprovementPercent=stats.originalMidLevelNmse>0?100.0*(stats.originalMidLevelNmse-best.levelNmse[1])/stats.originalMidLevelNmse:0.0;
@@ -746,12 +874,13 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
     Eval finalEval=accepted?best:originalEval;
     std::array<float,4> finalPk=accepted?bestPk:std::array<float,4>{m.pp,m.pn,m.kp,m.kn};
     stats.refinedNmse=finalEval.nmse; stats.refinedStimulusNmse=finalEval.stimulusNmse; stats.refinedTailNmse=finalEval.tailNmse;
-    stats.refinedSpectralError=finalEval.spectral; stats.refinedEnvelopeError=finalEval.envelope;
+    stats.refinedSpectralError=finalEval.spectral; stats.refinedResponseSpectralError=finalEval.responseSpectral; stats.refinedEnvelopeError=finalEval.envelope;
     stats.improved=accepted;
     stats.improvementPercent=stats.originalNmse>0?100.0*(stats.originalNmse-finalEval.nmse)/stats.originalNmse:0.0;
     stats.stimulusImprovementPercent=stats.originalStimulusNmse>0?100.0*(stats.originalStimulusNmse-finalEval.stimulusNmse)/stats.originalStimulusNmse:0.0;
     stats.tailImprovementPercent=stats.originalTailNmse>0?100.0*(stats.originalTailNmse-finalEval.tailNmse)/stats.originalTailNmse:0.0;
     stats.spectralImprovementPercent=stats.originalSpectralError>0?100.0*(stats.originalSpectralError-finalEval.spectral)/stats.originalSpectralError:0.0;
+    stats.responseSpectralImprovementPercent=stats.originalResponseSpectralError>0?100.0*(stats.originalResponseSpectralError-finalEval.responseSpectral)/stats.originalResponseSpectralError:0.0;
     stats.envelopeImprovementPercent=stats.originalEnvelopeError>0?100.0*(stats.originalEnvelopeError-finalEval.envelope)/stats.originalEnvelopeError:0.0;
     stats.pPosAfter=finalPk[0]; stats.pNegAfter=finalPk[1]; stats.kPosAfter=finalPk[2]; stats.kNegAfter=finalPk[3];
 
@@ -759,7 +888,7 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
     if(!writeFileBytes(outputClo2048,bytes.data(),bytes.size(),error)) return false;
 
     if(status){
-        status(L"v2.0 A+P/K complete. Combined research loss improvement: "+std::to_wstring(stats.searchedCompositeImprovementPercent)
+        status(L"v2.1 A+P/K complete. Combined research loss improvement: "+std::to_wstring(stats.searchedCompositeImprovementPercent)
                +L"%; final gate: "+(accepted?L"ACCEPTED":L"REJECTED")+L".");
     }
     return true;

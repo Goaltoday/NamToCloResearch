@@ -36,6 +36,14 @@ struct CloRefineStats {
     double refinedEnvelopeError = 0.0;
     double envelopeImprovementPercent = 0.0;
 
+    // v2.1 input-referenced spectral-profile error. Unlike MR-STFT, this
+    // compares a log-frequency transfer-magnitude curve derived from the
+    // known stimulus and output, so Block-A changes cannot improve the broad
+    // audio loss while moving the static spectral contour away from the NAM.
+    double originalResponseSpectralError = 0.0;
+    double refinedResponseSpectralError = 0.0;
+    double responseSpectralImprovementPercent = 0.0;
+
     // One calibration derived from the ORIGINAL CLO only and then frozen for
     // every candidate. It is intentionally not re-fitted during optimisation.
     double outputScale = 1.0;
@@ -57,6 +65,8 @@ struct CloRefineStats {
     double searchedSpectralImprovementPercent = 0.0;
     double searchedEnvelopeError = 0.0;
     double searchedEnvelopeImprovementPercent = 0.0;
+    double searchedResponseSpectralError = 0.0;
+    double searchedResponseSpectralImprovementPercent = 0.0;
 
     // P/K-specific level-conditioned temporal errors. Windows are classified
     // from the actual stimulus RMS into low/mid/high excitation groups. This
@@ -77,7 +87,7 @@ struct CloRefineStats {
 
 using RefineStatusCallback = std::function<void(const std::wstring&)>;
 
-// Experimental v2.0 full-length A + P/K refiner. PRE, POST and B stay fixed.
+// Experimental v2.1 full-length A + P/K refiner with spectral-response guard. PRE, POST and B stay fixed.
 // Block A is adjusted through a smooth 10-band log-frequency envelope while
 // Ppos/Pneg/Kpos/Kneg are optimized jointly. Every evaluation uses the complete
 // conversion render (normally 50 s stimulus + 20 s tail). Output level is
