@@ -40,6 +40,7 @@ constexpr int IDC_BROWSE_CUSTOM_STIMULUS = 117;
 constexpr int IDC_APPLY_CORRECTIVE_IR = 118;
 constexpr int IDC_CORRECTIVE_IR_PATH = 119;
 constexpr int IDC_BROWSE_CORRECTIVE_IR = 120;
+constexpr int IDC_REFINE_CLO = 121;
 
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
@@ -63,6 +64,7 @@ struct UiMetrics {
     RECT sectionTail{};
     RECT sectionRecorded{};
     RECT sectionCorrective{};
+    RECT sectionRefine{};
     RECT buttonArea{};
     RECT footer{};
     RECT infoBox{};
@@ -85,6 +87,7 @@ HWND gBrowseRecordedButton = nullptr;
 HWND gCorrectiveCheck = nullptr;
 HWND gCorrectiveEdit = nullptr;
 HWND gBrowseCorrectiveButton = nullptr;
+HWND gRefineCheck = nullptr;
 HWND gVersion = nullptr;
 HWND gInfo = nullptr;
 HWND gSubtitle = nullptr;
@@ -190,6 +193,7 @@ void enableControls(bool enable) {
     EnableWindow(gStimulusCombo, enable);
     EnableWindow(gTailCombo, enable);
     EnableWindow(gCorrectiveCheck, enable);
+    EnableWindow(gRefineCheck, enable);
     if (!enable) {
         EnableWindow(gCustomStimulusEdit, FALSE);
         EnableWindow(gBrowseCustomStimulusButton, FALSE);
@@ -406,19 +410,23 @@ void startConversion(HWND hwnd) {
         return;
     }
 
+    ntc::CloRefineConfig refine;
+    refine.enabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    refine.passes = 4;
+
     enableControls(false);
     if (gInputMode == InputMode::SingleNam) {
         setText(gStatus, L"Starting conversion...");
-        std::thread([hwnd, input, out, stimulus, correction] {
+        std::thread([hwnd, input, out, stimulus, correction, refine] {
             auto result = std::make_unique<ntc::ConversionResult>(
-                ntc::convertNamToBoth(input, out, stimulus, correction, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
+                ntc::convertNamToBoth(input, out, stimulus, correction, refine, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
             PostMessageW(hwnd, WM_APP_DONE_SINGLE, 0, reinterpret_cast<LPARAM>(result.release()));
         }).detach();
     } else {
         setText(gStatus, L"Starting batch conversion...");
-        std::thread([hwnd, input, out, stimulus, correction] {
+        std::thread([hwnd, input, out, stimulus, correction, refine] {
             auto result = std::make_unique<ntc::BatchConversionResult>(
-                ntc::convertNamFolder(input, out, stimulus, correction, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
+                ntc::convertNamFolder(input, out, stimulus, correction, refine, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
             PostMessageW(hwnd, WM_APP_DONE_BATCH, 0, reinterpret_cast<LPARAM>(result.release()));
         }).detach();
     }
@@ -448,6 +456,7 @@ void computeLayout(int clientW, int clientH) {
     gUi.sectionTail = RECT{ margin, y, clientW - margin, y + 66 }; y += 66 + gap;
     gUi.sectionRecorded = RECT{ margin, y, clientW - margin, y + 105 }; y += 105 + gap;
     gUi.sectionCorrective = RECT{ margin, y, clientW - margin, y + 86 }; y += 86 + gap;
+    gUi.sectionRefine = RECT{ margin, y, clientW - margin, y + 68 }; y += 68 + gap;
     gUi.buttonArea = RECT{ margin, y, clientW - margin, y + 38 };
     gUi.footer = RECT{ 0, clientH - footerH, clientW, clientH };
     gUi.infoBox = RECT{ gUi.sectionRecorded.left + 108, gUi.sectionRecorded.top + 62,
@@ -504,6 +513,9 @@ void layoutControls(HWND hwnd) {
     moveCtrl(gCorrectiveEdit, correctiveEditX, gUi.sectionCorrective.top + 29, correctiveEditW, 28);
     moveCtrl(gBrowseCorrectiveButton, gUi.sectionCorrective.right - sectionRightInset - 124, gUi.sectionCorrective.top + 27, 124, 32);
 
+    moveCtrl(GetDlgItem(hwnd, 1009), contentX, gUi.sectionRefine.top + 7, 280, 22);
+    moveCtrl(gRefineCheck, contentX, gUi.sectionRefine.top + 34, 560, 24);
+
     const int center = rc.right / 2;
     moveCtrl(gConvertButton, center - 222, gUi.buttonArea.top, 200, 36);
     moveCtrl(gOpenButton, center - 10, gUi.buttonArea.top, 200, 36);
@@ -537,6 +549,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
     createSectionLabel(hwnd, 1008, L"Corrective IR");
+    createSectionLabel(hwnd, 1009, L"CLO refinement (experimental)");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                  0, 0, 100, 30, hwnd, controlId(IDC_INPUT_PATH), nullptr, nullptr);
@@ -598,6 +611,11 @@ void createUi(HWND hwnd) {
                                              WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                              0, 0, 120, 34, hwnd, controlId(IDC_BROWSE_CORRECTIVE_IR), nullptr, nullptr);
 
+    gRefineCheck = CreateWindowW(L"BUTTON", L"Refine P/K against the NAM render (keeps original CLOs)",
+                                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                 0, 0, 520, 24, hwnd, controlId(IDC_REFINE_CLO), nullptr, nullptr);
+    applyFont(gRefineCheck);
+
     gInfo = CreateWindowW(L"STATIC",
                           L"CLO files will be created as Mono, PCM16, 44.1 kHz.\r\n"
                           L"Audio will be trimmed or padded to exactly 20.000 seconds.",
@@ -616,7 +634,7 @@ void createUi(HWND hwnd) {
                             0, 0, 100, 22, hwnd, controlId(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
-    gVersion = CreateWindowW(L"STATIC", L"Version 1.8.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+    gVersion = CreateWindowW(L"STATIC", L"Version 1.9.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
                              0, 0, 110, 22, hwnd, controlId(IDC_VERSION), nullptr, nullptr);
     applyFont(gVersion);
 
@@ -698,6 +716,7 @@ void paintBackground(HWND hwnd, HDC hdc) {
     drawSectionCard(hdc, gUi.sectionTail, 3);
     drawSectionCard(hdc, gUi.sectionRecorded, 4);
     drawSectionCard(hdc, gUi.sectionCorrective, 4);
+    drawSectionCard(hdc, gUi.sectionRefine, 2);
     drawInfoBox(hdc);
     fillRect(hdc, gUi.footer, kColorFooter);
 
@@ -792,7 +811,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (ctrl == gSubtitle || ctrl == GetDlgItem(hwnd, 1001)
             || ctrl == GetDlgItem(hwnd, 1002) || ctrl == GetDlgItem(hwnd, 1003) || ctrl == GetDlgItem(hwnd, 1004)
             || ctrl == GetDlgItem(hwnd, 1005) || ctrl == GetDlgItem(hwnd, 1006) || ctrl == GetDlgItem(hwnd, 1007)
-            || ctrl == GetDlgItem(hwnd, 1008)) {
+            || ctrl == GetDlgItem(hwnd, 1008) || ctrl == GetDlgItem(hwnd, 1009)) {
             SetTextColor(hdc, ctrl == gSubtitle ? kColorSubtleText : kColorText);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
@@ -856,6 +875,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (r && r->ok) {
             std::wstring resultMessage = L"Conversion complete.\r\n\r\nAmpero 2048:\r\n" + r->ampero2048.wstring()
                                       + L"\r\n\r\nGP-200 1024:\r\n" + r->gp2001024.wstring();
+            if (!r->refinedAmpero2048.empty()) {
+                resultMessage += L"\r\n\r\nRefined Ampero 2048:\r\n" + r->refinedAmpero2048.wstring()
+                              + L"\r\n\r\nRefined GP-200 1024:\r\n" + r->refinedGp2001024.wstring()
+                              + L"\r\n\r\nP/K NMSE improvement: "
+                              + std::to_wstring(r->refineStats.improvementPercent) + L"%";
+            }
             setText(gStatus, L"Done. Two CLO files were generated successfully.");
             MessageBoxW(hwnd, resultMessage.c_str(), L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
         } else {
@@ -928,9 +953,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = nullptr;
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.8",
+    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.9",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 790,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 870,
                                 nullptr, nullptr, instance, nullptr);
     if (!hwnd) { CoUninitialize(); return 1; }
     ShowWindow(hwnd, show);

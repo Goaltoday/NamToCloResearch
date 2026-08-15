@@ -1,6 +1,7 @@
 #include "conversion.hpp"
 #include "common.hpp"
 #include "corrective_ir.hpp"
+#include "clo_refiner.hpp"
 
 #include <algorithm>
 #include <cwctype>
@@ -333,7 +334,7 @@ bool validateRuntime(const RuntimePaths& r, std::string& error) {
 
 ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outputDirectory,
                                   const StimulusConfig stimulus, const CorrectiveIrConfig correction,
-                                  const StatusCallback& status) {
+                                  const CloRefineConfig refine, const StatusCallback& status) {
     ConversionResult result;
     result.inputNam = inputNam;
     std::error_code ec;
@@ -404,6 +405,28 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
         return result;
     }
 
+    // Preserve the existing conversion path. Refinement is an optional,
+    // additional research output generated from the raw official Ampero B2048
+    // model and HTUSBTools' own rendered NAM target.
+    fs::path refinedWorkClo;
+    if (refine.enabled) {
+        report(status, L"Refining CLO P/K against NAM render (experimental)...");
+        refinedWorkClo = work / L"ampero_2048_REFINE.clo";
+        if (!refineCloPk(worker.outputClo, worker.inputWav, worker.outputWav, refinedWorkClo,
+                         refine, result.refineStats, error, status)
+            || !valid2048(refinedWorkClo)) {
+            result.exitCode = kExitStageFailure;
+            result.error = error.empty() ? "Experimental CLO refinement failed." : error;
+            fs::remove_all(work, ec);
+            return result;
+        }
+        const std::wstring refineStatus =
+            L"Refine P/K complete: NMSE " + std::to_wstring(result.refineStats.originalNmse)
+            + L" -> " + std::to_wstring(result.refineStats.refinedNmse)
+            + L" (" + std::to_wstring(result.refineStats.improvementPercent) + L"% improvement).";
+        report(status, refineStatus.c_str());
+    }
+
     fs::path sourceForOutput = worker.outputClo;
     if (correction.enabled) {
         if (correction.wav.empty()) {
@@ -450,6 +473,21 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
         return result;
     }
 
+    if (refine.enabled) {
+        result.refinedAmpero2048 = uniquePath(outDir / (base + L"_Ampero_2048_REFINE.clo"));
+        if (!copyFileCreatingParents(refinedWorkClo, result.refinedAmpero2048, error)) {
+            result.exitCode = kExitCopyFailure; result.error = error; fs::remove_all(work, ec); return result;
+        }
+        report(status, L"Generating refined GP-200 1024 compact CLO...");
+        result.refinedGp2001024 = uniquePath(outDir / (base + L"_GP200_1024_REFINE.clo"));
+        if (!makeGp200CompactClo(refinedWorkClo, result.refinedGp2001024, error)
+            || !valid1024(result.refinedGp2001024)) {
+            result.exitCode = kExitCopyFailure;
+            result.error = error.empty() ? "The refined GP-200 compact CLO failed validation." : error;
+            fs::remove_all(work, ec); return result;
+        }
+    }
+
     fs::remove_all(work, ec);
     result.ok = true;
     result.exitCode = kExitOk;
@@ -460,7 +498,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
 
 BatchConversionResult convertNamFolder(const fs::path& inputDirectory, const fs::path& outputDirectory,
                                        const StimulusConfig stimulus, const CorrectiveIrConfig correction,
-                                       const StatusCallback& status) {
+                                       const CloRefineConfig refine, const StatusCallback& status) {
     BatchConversionResult batch;
     std::error_code ec;
     if (!fs::exists(inputDirectory, ec) || ec || !fs::is_directory(inputDirectory, ec)) {
@@ -492,7 +530,7 @@ BatchConversionResult convertNamFolder(const fs::path& inputDirectory, const fs:
             status(L"[" + std::to_wstring(i + 1) + L"/" + std::to_wstring(namFiles.size()) +
                    L"] " + nam.filename().wstring());
         }
-        auto item = convertNamToBoth(nam, outDir, stimulus, correction, [&, i, nam](const std::wstring& text) {
+        auto item = convertNamToBoth(nam, outDir, stimulus, correction, refine, [&, i, nam](const std::wstring& text) {
             if (status) {
                 status(L"[" + std::to_wstring(i + 1) + L"/" + std::to_wstring(namFiles.size()) +
                        L"] " + nam.filename().wstring() + L" - " + text);

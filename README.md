@@ -63,3 +63,44 @@ build\Release\NamToClo.exe
 ```
 
 Copy it to a clean folder together with `runtime\ampero\HTUSBTools.dll` and `runtime\ampero\nam_input_wav.wav`.
+
+## Experimental P/K refinement (v1.9)
+
+Version 1.9 adds an optional **CLO refinement (experimental)** stage. The normal
+HTUSBTools conversion is preserved and the original Ampero B2048 / GP-200 B1024
+files are still generated unchanged.
+
+When **Refine P/K against the NAM render** is enabled, the converter also uses:
+
+- the exact stimulus WAV staged for the conversion;
+- `outputFile.wav`, rendered by HTUSBTools from the source NAM;
+- a functional offline CLO player reconstructed from the GP-200 V1.8.0 DSP;
+
+and performs a bounded coordinate search over only the four static nonlinear
+parameters at CLO offsets `0x68..0x74`:
+
+- `Ppos`
+- `Pneg`
+- `Kpos`
+- `Kneg`
+
+PRE, POST, FIR A and FIR B are kept byte-for-byte unchanged in this first
+experiment. Output level is fitted independently in the objective so the search
+focuses on nonlinear shape rather than Patch Volume / output routing.
+
+Additional outputs:
+
+- `*_Ampero_2048_REFINE.clo`
+- `*_GP200_1024_REFINE.clo`
+
+The UI reports the baseline and refined normalized mean-square error (NMSE) and
+the percentage improvement. If the search does not improve the objective, the
+`_REFINE` CLO is written with the original P/K values rather than making the
+model worse.
+
+### Scope of the v1.9 experiment
+
+For speed, the first implementation evaluates a deterministic 12-second subset
+of the NAM render and six windows spanning different target-energy quantiles.
+This is intentional: v1.9 is designed to answer whether the official P/K fit
+leaves measurable improvement headroom before expanding the search to FIR A/B.

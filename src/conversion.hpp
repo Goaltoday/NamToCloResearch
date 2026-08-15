@@ -2,6 +2,7 @@
 
 #include "stimulus.hpp"
 #include "corrective_ir.hpp"
+#include "clo_refiner.hpp"
 
 #include <filesystem>
 #include <functional>
@@ -27,6 +28,9 @@ struct ConversionResult {
     fs::path inputNam;
     fs::path ampero2048;
     fs::path gp2001024;
+    fs::path refinedAmpero2048;
+    fs::path refinedGp2001024;
+    CloRefineStats refineStats{};
 };
 
 struct BatchConversionResult {
@@ -48,11 +52,13 @@ ConversionResult convertNamToBoth(const fs::path& inputNam,
                                   const fs::path& outputDirectory,
                                   StimulusConfig stimulus = {},
                                   CorrectiveIrConfig correction = {},
+                                  CloRefineConfig refine = {},
                                   const StatusCallback& status = {});
 BatchConversionResult convertNamFolder(const fs::path& inputDirectory,
                                        const fs::path& outputDirectory,
                                        StimulusConfig stimulus = {},
                                        CorrectiveIrConfig correction = {},
+                                       CloRefineConfig refine = {},
                                        const StatusCallback& status = {});
 
 // Internal worker entry used by the same GUI executable in a hidden child process.
