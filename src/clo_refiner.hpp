@@ -40,7 +40,7 @@ struct CloRefineStats {
     // every candidate. It is intentionally not re-fitted during optimisation.
     double outputScale = 1.0;
 
-    // v1.9.7 candidate audition: keep the best point found by the free search even
+    // v1.9.8 nonlinearity-specific loss: keep the best point found by the free search even
     // when the final safety gate rejects it. This avoids reporting a misleading
     // 0% across all metrics just because the accepted output falls back to the
     // official CLO.
@@ -57,6 +57,17 @@ struct CloRefineStats {
     double searchedSpectralImprovementPercent = 0.0;
     double searchedEnvelopeError = 0.0;
     double searchedEnvelopeImprovementPercent = 0.0;
+
+    // P/K-specific level-conditioned temporal errors. Windows are classified
+    // from the actual stimulus RMS into low/mid/high excitation groups. This
+    // prevents the optimiser from trading a closer average spectrum for an
+    // audibly wrong amount of saturation.
+    double originalLowLevelNmse = 0.0, originalMidLevelNmse = 0.0, originalHighLevelNmse = 0.0;
+    double searchedLowLevelNmse = 0.0, searchedMidLevelNmse = 0.0, searchedHighLevelNmse = 0.0;
+    double searchedLowLevelImprovementPercent = 0.0;
+    double searchedMidLevelImprovementPercent = 0.0;
+    double searchedHighLevelImprovementPercent = 0.0;
+    double searchedLevelBalancedImprovementPercent = 0.0;
     float searchedPPos = 0.0f, searchedPNeg = 0.0f, searchedKPos = 0.0f, searchedKNeg = 0.0f;
     std::string searchedDecisionReason;
 
@@ -69,10 +80,11 @@ using RefineStatusCallback = std::function<void(const std::wstring&)>;
 // Experimental full-length P/K refiner. PRE/A/POST/B stay fixed and only
 // Ppos/Pneg/Kpos/Kneg are optimised. The complete conversion render is used
 // (normally 50 s stimulus + 20 s tail). Output level is calibrated ONCE from
-// the original CLO and frozen. The optimiser minimises a combined full-render research loss (temporal NMSE,
-// multi-resolution STFT, and multi-scale RMS envelope) without hard guards on
-// intermediate steps. Strict safety guards are applied only to the FINAL
-// candidate, preventing tonal/dynamic regressions while avoiding local traps.
+// the original CLO and frozen. v1.9.8 uses a P/K-specific nonlinearity loss:
+// global temporal NMSE + level-conditioned temporal NMSE (low/mid/high input
+// excitation) receive 70% of the weight, with MR-STFT and RMS envelope used as
+// secondary guards. This is deliberately different from the loss we will use
+// later for linear A/B optimisation.
 bool refineCloPk(const fs::path& inputClo2048,
                  const fs::path& stimulusWav,
                  const fs::path& targetWav,

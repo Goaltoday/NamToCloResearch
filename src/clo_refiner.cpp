@@ -21,6 +21,7 @@ constexpr std::size_t kPreferredFftSize = 32768;
 constexpr std::array<std::size_t,3> kStftFftSizes = {512, 2048, 8192};
 constexpr std::array<std::size_t,3> kStftHopSizes = {256, 1024, 4096};
 constexpr std::array<std::size_t,3> kEnvelopeWindows = {256, 2048, 8192};
+constexpr std::size_t kLevelWindow = 2048;
 constexpr double kMetricEpsilon = 1.0e-12;
 
 std::uint16_t le16(const std::uint8_t* p) { return static_cast<std::uint16_t>(p[0] | (p[1] << 8)); }
@@ -317,14 +318,85 @@ double multiScaleEnvelopeError(const std::vector<float>& candidate,double scale,
     return e/static_cast<double>(target.scales.size());
 }
 
+struct LevelReference {
+    std::size_t windowSize = kLevelWindow;
+    std::vector<std::uint8_t> band; // 0=inactive, 1=low, 2=mid, 3=high
+    double lowThreshold = 0.0;
+    double highThreshold = 0.0;
+};
+
+LevelReference buildLevelReference(const std::vector<float>& stimulus){
+    LevelReference r;
+    const std::size_t windows=(stimulus.size()+r.windowSize-1)/r.windowSize;
+    r.band.assign(windows,0);
+    std::vector<double> rms(windows,0.0), active;
+    active.reserve(windows);
+    double maxRms=0.0;
+    for(std::size_t w=0;w<windows;++w){
+        const std::size_t begin=w*r.windowSize;
+        const std::size_t end=std::min(stimulus.size(),begin+r.windowSize);
+        long double ss=0.0L;
+        for(std::size_t i=begin;i<end;++i){ const long double x=stimulus[i]; ss+=x*x; }
+        const double v=end>begin?std::sqrt(static_cast<double>(ss/(end-begin))):0.0;
+        rms[w]=v; maxRms=std::max(maxRms,v);
+    }
+    const double activeFloor=maxRms*1.0e-3; // -60 dB relative to the loudest stimulus window
+    for(double v:rms) if(v>activeFloor) active.push_back(v);
+    if(active.size()<3){
+        for(std::size_t w=0;w<windows;++w) if(rms[w]>activeFloor) r.band[w]=2;
+        return r;
+    }
+    std::sort(active.begin(),active.end());
+    auto quantile=[&](double q){
+        const double pos=q*double(active.size()-1);
+        const std::size_t i0=static_cast<std::size_t>(pos);
+        const std::size_t i1=std::min(i0+1,active.size()-1);
+        const double f=pos-double(i0);
+        return active[i0]+(active[i1]-active[i0])*f;
+    };
+    r.lowThreshold=quantile(1.0/3.0);
+    r.highThreshold=quantile(2.0/3.0);
+    for(std::size_t w=0;w<windows;++w){
+        const double v=rms[w];
+        if(v<=activeFloor) r.band[w]=0;
+        else if(v<=r.lowThreshold) r.band[w]=1;
+        else if(v<=r.highThreshold) r.band[w]=2;
+        else r.band[w]=3;
+    }
+    return r;
+}
+
+std::array<double,3> levelNmse(const std::vector<float>& candidate,const std::vector<float>& target,double scale,const LevelReference& levels){
+    std::array<long double,3> er{0,0,0}, tt{0,0,0};
+    const std::size_t n=std::min(candidate.size(),target.size());
+    for(std::size_t w=0;w<levels.band.size();++w){
+        const auto b=levels.band[w]; if(b<1 || b>3) continue;
+        const std::size_t begin=w*levels.windowSize;
+        if(begin>=n) break;
+        const std::size_t end=std::min(n,begin+levels.windowSize);
+        const std::size_t bi=static_cast<std::size_t>(b-1);
+        for(std::size_t i=begin;i<end;++i){
+            const long double t=target[i];
+            const long double d=scale*static_cast<long double>(candidate[i])-t;
+            er[bi]+=d*d; tt[bi]+=t*t;
+        }
+    }
+    std::array<double,3> out{};
+    for(std::size_t i=0;i<3;++i) out[i]=tt[i]>1e-30L?static_cast<double>(er[i]/tt[i]):0.0;
+    return out;
+}
+
 struct MetricReference {
     MultiStftReference mrstft;
     MultiEnvelopeReference envelope;
+    LevelReference levels;
+    std::array<double,3> originalLevelNmse{};
 };
 
 struct Eval {
     double nmse=1e100, stimulusNmse=1e100, tailNmse=1e100;
-    double spectral=1e100, envelope=1e100, composite=1e100;
+    double spectral=1e100, envelope=1e100, levelBalanced=1e100, composite=1e100;
+    std::array<double,3> levelNmse{1e100,1e100,1e100};
 };
 
 Eval evaluate(const Model& base,const std::vector<float>& aout,const std::vector<float>& target,const FirFftPlan& bPlan,double fixedScale,
@@ -341,13 +413,24 @@ Eval evaluate(const Model& base,const std::vector<float>& aout,const std::vector
     e.tailNmse=nmseRange(candidate,target,fixedScale,split,n);
     e.spectral=multiResolutionStftLoss(candidate,fixedScale,metricRef.mrstft);
     e.envelope=multiScaleEnvelopeError(candidate,fixedScale,metricRef.envelope);
+    e.levelNmse=levelNmse(candidate,target,fixedScale,metricRef.levels);
+
     const double nNorm=e.nmse/std::max(originalNmse,kMetricEpsilon);
     const double sNorm=e.spectral/std::max(originalSpectral,kMetricEpsilon);
     const double dNorm=e.envelope/std::max(originalEnvelope,kMetricEpsilon);
-    // Time accuracy remains mandatory, but MR-STFT receives the largest
-    // share because the previous NMSE-only refinements could move tonal
-    // balance in the wrong direction. Envelope is a dynamics guard.
-    e.composite=0.35*nNorm+0.50*sNorm+0.15*dNorm;
+    double levelNorm=0.0; int levelCount=0;
+    for(std::size_t i=0;i<3;++i){
+        if(metricRef.originalLevelNmse[i]>kMetricEpsilon){
+            levelNorm += e.levelNmse[i]/metricRef.originalLevelNmse[i];
+            ++levelCount;
+        }
+    }
+    e.levelBalanced=levelCount?levelNorm/double(levelCount):nNorm;
+
+    // v1.9.8: P/K are nonlinearity parameters, so waveform accuracy at the
+    // actual excitation levels gets most of the weight. MR-STFT and envelope
+    // remain secondary safeguards, not the main optimisation target.
+    e.composite=0.35*nNorm + 0.35*e.levelBalanced + 0.15*sNorm + 0.15*dNorm;
     return e;
 }
 
@@ -363,32 +446,33 @@ struct FinalDecision {
 };
 
 FinalDecision finalCandidateDecision(const Eval& candidate,const Eval& original){
-    // v1.9.7 keeps the final gate unchanged; BEST is exported for audition. The change in this
-    // version is diagnostic: the best searched point is preserved and exposed
-    // even when this gate rejects it, so we can tune these tolerances from real
-    // data instead of guessing.
-    constexpr double maxNmseRegression = 0.0010;       // +0.10 %
-    constexpr double maxSpectralRegression = 0.00001;  // +0.001 %
-    constexpr double maxEnvelopeRegression = 0.0050;   // +0.50 %
+    // P/K-specific safety gate. A refined P/K set must not buy a nicer average
+    // spectrum by worsening the actual waveform or any excitation-level band.
+    constexpr double maxNmseRegression = 0.0000;       // no global temporal regression
+    constexpr double maxLevelRegression = 0.0050;      // max +0.50% in low/mid/high
+    constexpr double maxSpectralRegression = 0.05;     // MR-STFT is secondary for P/K
+    constexpr double maxEnvelopeRegression = 0.05;     // dynamics secondary guard
     constexpr double minCompositeImprovement = 0.00025;// 0.025 %
 
     std::vector<std::string> failures;
     if(!(candidate.composite <= original.composite * (1.0 - minCompositeImprovement)))
-        failures.emplace_back("combined loss did not improve by at least 0.025%");
+        failures.emplace_back("combined P/K loss did not improve by at least 0.025%");
     if(!(candidate.nmse <= original.nmse * (1.0 + maxNmseRegression)))
-        failures.emplace_back("NMSE regressed by more than 0.10%");
-    if(!(candidate.spectral <= original.spectral * (1.0 + maxSpectralRegression)))
-        failures.emplace_back("MR-STFT regressed by more than 0.001%");
-    if(!(candidate.envelope <= original.envelope * (1.0 + maxEnvelopeRegression)))
-        failures.emplace_back("envelope RMS regressed by more than 0.50%");
-
-    if(failures.empty()) return {true, "accepted by final safety gate"};
-    std::string reason;
-    for(std::size_t i=0;i<failures.size();++i){
-        if(i) reason += "; ";
-        reason += failures[i];
+        failures.emplace_back("global NMSE regressed");
+    static constexpr const char* names[3]={"low-level NMSE","mid-level NMSE","high-level NMSE"};
+    for(std::size_t i=0;i<3;++i){
+        if(original.levelNmse[i]>kMetricEpsilon && !(candidate.levelNmse[i] <= original.levelNmse[i]*(1.0+maxLevelRegression)))
+            failures.emplace_back(std::string(names[i])+" regressed by more than 0.50%");
     }
-    return {false, reason};
+    if(!(candidate.spectral <= original.spectral * (1.0 + maxSpectralRegression)))
+        failures.emplace_back("MR-STFT regressed by more than 5%");
+    if(!(candidate.envelope <= original.envelope * (1.0 + maxEnvelopeRegression)))
+        failures.emplace_back("envelope RMS regressed by more than 5%");
+
+    if(failures.empty()) return {true, "accepted by P/K nonlinearity safety gate"};
+    std::string reason;
+    for(std::size_t i=0;i<failures.size();++i){ if(i) reason += "; "; reason += failures[i]; }
+    return {false,reason};
 }
 
 // Deterministic Halton sequence for a reproducible coarse exploration in
@@ -435,13 +519,21 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
     stats.originalStimulusNmse=nmseRange(originalCandidate,target,fixedScale,0,split);
     stats.originalTailNmse=nmseRange(originalCandidate,target,fixedScale,split,n);
     if(status)status(L"Refine P/K: computing full-render MR-STFT + multi-scale envelope references...");
-    MetricReference metricRef{buildMultiStftReference(target), buildMultiEnvelopeReference(target)};
+    MetricReference metricRef;
+    metricRef.mrstft=buildMultiStftReference(target);
+    metricRef.envelope=buildMultiEnvelopeReference(target);
+    metricRef.levels=buildLevelReference(in);
+    metricRef.originalLevelNmse=levelNmse(originalCandidate,target,fixedScale,metricRef.levels);
     stats.originalSpectralError=multiResolutionStftLoss(originalCandidate,fixedScale,metricRef.mrstft);
     stats.originalEnvelopeError=multiScaleEnvelopeError(originalCandidate,fixedScale,metricRef.envelope);
+    stats.originalLowLevelNmse=metricRef.originalLevelNmse[0];
+    stats.originalMidLevelNmse=metricRef.originalLevelNmse[1];
+    stats.originalHighLevelNmse=metricRef.originalLevelNmse[2];
 
     Eval best;
     best.nmse=stats.originalNmse; best.stimulusNmse=stats.originalStimulusNmse; best.tailNmse=stats.originalTailNmse;
-    best.spectral=stats.originalSpectralError; best.envelope=stats.originalEnvelopeError; best.composite=1.0;
+    best.spectral=stats.originalSpectralError; best.envelope=stats.originalEnvelopeError;
+    best.levelNmse=metricRef.originalLevelNmse; best.levelBalanced=1.0; best.composite=1.0;
     const Eval originalEval=best;
     const std::array<float,4> originalP={m.pp,m.pn,m.kp,m.kn};
     std::array<float,4> p=originalP;
@@ -451,7 +543,7 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
     // log-domain around the official conversion. Every point is judged ONLY
     // by the research composite loss; individual metric guards are deferred
     // until the final candidate.
-    if(status)status(L"Refine P/K: coarse research-loss exploration (24 candidates)...");
+    if(status)status(L"Refine P/K: coarse P/K nonlinearity-loss exploration (24 candidates)...");
     constexpr std::array<unsigned,4> bases={2,3,5,7};
     constexpr double coarseRadius=0.35;
     for(unsigned sample=1;sample<=24;++sample){
@@ -473,7 +565,7 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
     std::array<double,4> step={0.12,0.12,0.12,0.12};
     const int passes=std::clamp(config.passes,1,8);
     for(int pass=0;pass<passes;++pass){
-        if(status)status(L"Refine P/K full 70 s: free composite pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes));
+        if(status)status(L"Refine P/K full 70 s: P/K level-aware pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes));
         bool any=false;
         for(int j=0;j<4;++j){
             auto localP=p; Eval local=best;
@@ -510,12 +602,20 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
     stats.searchedSpectralImprovementPercent = stats.originalSpectralError>0?100.0*(stats.originalSpectralError-searchedBest.spectral)/stats.originalSpectralError:0.0;
     stats.searchedEnvelopeError = searchedBest.envelope;
     stats.searchedEnvelopeImprovementPercent = stats.originalEnvelopeError>0?100.0*(stats.originalEnvelopeError-searchedBest.envelope)/stats.originalEnvelopeError:0.0;
+    stats.searchedLowLevelNmse=searchedBest.levelNmse[0];
+    stats.searchedMidLevelNmse=searchedBest.levelNmse[1];
+    stats.searchedHighLevelNmse=searchedBest.levelNmse[2];
+    stats.searchedLowLevelImprovementPercent=stats.originalLowLevelNmse>0?100.0*(stats.originalLowLevelNmse-searchedBest.levelNmse[0])/stats.originalLowLevelNmse:0.0;
+    stats.searchedMidLevelImprovementPercent=stats.originalMidLevelNmse>0?100.0*(stats.originalMidLevelNmse-searchedBest.levelNmse[1])/stats.originalMidLevelNmse:0.0;
+    stats.searchedHighLevelImprovementPercent=stats.originalHighLevelNmse>0?100.0*(stats.originalHighLevelNmse-searchedBest.levelNmse[2])/stats.originalHighLevelNmse:0.0;
+    stats.searchedLevelBalancedImprovementPercent=100.0*(1.0-searchedBest.levelBalanced);
     stats.searchedPPos=searchedP[0]; stats.searchedPNeg=searchedP[1]; stats.searchedKPos=searchedP[2]; stats.searchedKNeg=searchedP[3];
     stats.searchedDecisionReason = decision.reason;
 
     if(status){
         std::wstring msg = L"Refine diagnostics: best searched composite " + std::to_wstring(stats.searchedCompositeImprovementPercent)
             + L"%; NMSE " + std::to_wstring(stats.searchedNmseImprovementPercent)
+            + L"%; level-balanced " + std::to_wstring(stats.searchedLevelBalancedImprovementPercent)
             + L"%; MR-STFT " + std::to_wstring(stats.searchedSpectralImprovementPercent)
             + L"%; envelope " + std::to_wstring(stats.searchedEnvelopeImprovementPercent)
             + L"%. Final gate: " + (accepted?L"ACCEPTED":L"REJECTED") + L".";

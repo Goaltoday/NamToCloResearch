@@ -423,13 +423,16 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
             return result;
         }
         const std::wstring refineStatus =
-            L"Refine P/K full render complete: NMSE " + std::to_wstring(result.refineStats.originalNmse)
+            L"Refine P/K level-aware full render complete: NMSE " + std::to_wstring(result.refineStats.originalNmse)
             + L" -> " + std::to_wstring(result.refineStats.refinedNmse)
             + L" (" + std::to_wstring(result.refineStats.improvementPercent) + L"% improvement; stimulus "
             + std::to_wstring(result.refineStats.stimulusImprovementPercent) + L"%; tail "
             + std::to_wstring(result.refineStats.tailImprovementPercent) + L"%; MR-STFT "
             + std::to_wstring(result.refineStats.spectralImprovementPercent) + L"%; envelope "
-            + std::to_wstring(result.refineStats.envelopeImprovementPercent) + L"%).";
+            + std::to_wstring(result.refineStats.envelopeImprovementPercent) + L"%; searched low/mid/high "
+            + std::to_wstring(result.refineStats.searchedLowLevelImprovementPercent) + L"/"
+            + std::to_wstring(result.refineStats.searchedMidLevelImprovementPercent) + L"/"
+            + std::to_wstring(result.refineStats.searchedHighLevelImprovementPercent) + L"%).";
         report(status, refineStatus.c_str());
     }
 

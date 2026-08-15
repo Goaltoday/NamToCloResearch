@@ -892,10 +892,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + std::to_wstring(r->refineStats.spectralImprovementPercent) + L"%"
                               + L"\r\nEnvelope RMS (256/2048/8192): "
                               + std::to_wstring(r->refineStats.envelopeImprovementPercent) + L"%"
-                              + L"\r\n\r\n--- v1.9.7 candidate audition ---"
+                              + L"\r\n\r\n--- v1.9.8 P/K nonlinearity diagnostics ---"
                               + L"\r\nBest searched candidate: "
                               + std::wstring(r->refineStats.searchedCandidateAccepted ? L"ACCEPTED" : L"REJECTED")
-                              + L"\r\nCombined research loss improvement: "
+                              + L"\r\nCombined P/K loss improvement: "
                               + std::to_wstring(r->refineStats.searchedCompositeImprovementPercent) + L"%"
                               + L"\r\nBest searched NMSE improvement: "
                               + std::to_wstring(r->refineStats.searchedNmseImprovementPercent) + L"%"
@@ -907,6 +907,14 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + std::to_wstring(r->refineStats.searchedSpectralImprovementPercent) + L"%"
                               + L"\r\nBest searched envelope improvement: "
                               + std::to_wstring(r->refineStats.searchedEnvelopeImprovementPercent) + L"%"
+                              + L"\r\nLevel-balanced temporal improvement: "
+                              + std::to_wstring(r->refineStats.searchedLevelBalancedImprovementPercent) + L"%"
+                              + L"\r\n  Low excitation NMSE improvement: "
+                              + std::to_wstring(r->refineStats.searchedLowLevelImprovementPercent) + L"%"
+                              + L"\r\n  Mid excitation NMSE improvement: "
+                              + std::to_wstring(r->refineStats.searchedMidLevelImprovementPercent) + L"%"
+                              + L"\r\n  High excitation NMSE improvement: "
+                              + std::to_wstring(r->refineStats.searchedHighLevelImprovementPercent) + L"%"
                               + L"\r\nBest searched P/K: "
                               + std::to_wstring(r->refineStats.searchedPPos) + L" / "
                               + std::to_wstring(r->refineStats.searchedPNeg) + L" / "
@@ -916,8 +924,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + L"\r\nNMSE: " + std::to_wstring(r->refineStats.originalNmse) + L" -> " + std::to_wstring(r->refineStats.searchedNmse)
                               + L"\r\nMR-STFT: " + std::to_wstring(r->refineStats.originalSpectralError) + L" -> " + std::to_wstring(r->refineStats.searchedSpectralError)
                               + L"\r\nEnvelope RMS dB error: " + std::to_wstring(r->refineStats.originalEnvelopeError) + L" -> " + std::to_wstring(r->refineStats.searchedEnvelopeError)
+                              + L"\r\nLow-level NMSE: " + std::to_wstring(r->refineStats.originalLowLevelNmse) + L" -> " + std::to_wstring(r->refineStats.searchedLowLevelNmse)
+                              + L"\r\nMid-level NMSE: " + std::to_wstring(r->refineStats.originalMidLevelNmse) + L" -> " + std::to_wstring(r->refineStats.searchedMidLevelNmse)
+                              + L"\r\nHigh-level NMSE: " + std::to_wstring(r->refineStats.originalHighLevelNmse) + L" -> " + std::to_wstring(r->refineStats.searchedHighLevelNmse)
                               + L"\r\nDecision: " + ntc::fromUtf8(r->refineStats.searchedDecisionReason)
-                              + L"\r\n\r\nNote: _BEST is always the unconstrained best search result for listening tests; _REFINE remains protected by the final safety gate.";
+                              + L"\r\n\r\nNote: v1.9.8 optimises P/K primarily for waveform fidelity at low/mid/high excitation. _BEST remains the unconstrained audition candidate; _REFINE must also pass the P/K safety gate.";
             }
             setText(gStatus, L"Done. Two CLO files were generated successfully.");
             const std::wstring doneTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;
