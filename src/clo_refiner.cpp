@@ -896,7 +896,7 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
 
 
 namespace {
-// v2.5.1: SOURCE_latest_19 VST CAB Tone Match analysis with SolverV1 extended to a 2048-sample IR,
+// v2.5.2: SOURCE_latest_19 VST CAB Tone Match analysis with SolverV1 extended to a 2048-sample IR,
 // applied ONLY to the final 20 seconds of the NAM and CLO renders.
 // Source = CLO render, Target = NAM render.
 constexpr std::size_t kTailToneFft = 16384;      // VST ToneAnalysis fftOrder 14
@@ -910,7 +910,7 @@ constexpr double kTailToneMinCompareHz = 40.0;
 constexpr double kTailToneMaxCompareHz = 18000.0;
 constexpr std::size_t kTailToneComparePoints = 512;
 constexpr std::size_t kTailToneIrLength = 2048;
-constexpr double kTailToneSmoothingAmount = 0.50; // VST panel default = 50%, i.e. 1/12 octave
+constexpr double kTailToneSmoothingAmount = 0.05; // VST Smooth 5%; piecewise mapping => 1/120 octave
 constexpr double kMadToSigma = 1.4826;
 constexpr double kNegativeInfinityDb = -160.0;
 constexpr double kConfidenceReferenceDeviationDb = 3.0;
@@ -1086,16 +1086,16 @@ bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,con
     (void)config;
     std::vector<std::uint8_t> bytes; if(!readFileBytes(inputClo2048,bytes,error)) return false;
     Model m; if(!parseModel(bytes,m,error)) return false;
-    if(m.B.size()<512){ error="v2.5.1 tail tone match expects the Ampero 2048-tap Block B."; return false; }
+    if(m.B.size()<512){ error="v2.5.2 tail tone match expects the Ampero 2048-tap Block B."; return false; }
 
     std::vector<float> in,target; if(!readMono44100(stimulusWav,in,error)||!readMono44100(targetWav,target,error)) return false;
     const std::size_t n=std::min(in.size(),target.size());
     const std::size_t tailFrames=20u*kSampleRate;
-    if(n<tailFrames+kTailToneFft){ error="Not enough rendered audio for the final-20-second v2.5.1 tone match."; return false; }
+    if(n<tailFrames+kTailToneFft){ error="Not enough rendered audio for the final-20-second v2.5.2 tone match."; return false; }
     in.resize(n); target.resize(n);
     const std::size_t tailStart=n-tailFrames;
 
-    if(status) status(L"v2.5.1 VST tail tone match: rendering official CLO...");
+    if(status) status(L"v2.5.2 VST tail tone match: rendering official CLO...");
     const auto aout=precomputeA(m,in,n); std::vector<float> preB; renderPreB(m,aout,m.pp,m.pn,m.kp,m.kn,preB);
     std::vector<float> originalCandidate; renderWithB(preB,m.B,originalCandidate);
 
@@ -1114,12 +1114,12 @@ bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,con
     stats.originalEnvelopeError=multiScaleEnvelopeError(originalCandidate,fixedScale,envRef);
     const auto ol=levelNmse(originalCandidate,target,fixedScale,levels); stats.originalLowLevelNmse=ol[0];stats.originalMidLevelNmse=ol[1];stats.originalHighLevelNmse=ol[2];
 
-    if(status) status(L"v2.5.1 VST tail tone match: analysing final 20 s with SOURCE_latest_19 CAB Match algorithm...");
+    if(status) status(L"v2.5.2 VST tail tone match: analysing final 20 s with SOURCE_latest_19 CAB Match algorithm...");
     const auto sourceProfile=analyseLikeSourceLatest19(originalCandidate,fixedScale,tailStart,tailFrames);
     const auto targetProfile=analyseLikeSourceLatest19(target,1.0,tailStart,tailFrames);
-    if(!sourceProfile.valid()||!targetProfile.valid()){ error="v2.5.1 could not obtain valid VST-style tone profiles from the final 20 seconds."; return false; }
+    if(!sourceProfile.valid()||!targetProfile.valid()){ error="v2.5.2 could not obtain valid VST-style tone profiles from the final 20 seconds."; return false; }
     const auto beforeComparison=compareLikeSourceLatest19(sourceProfile,targetProfile);
-    if(!beforeComparison.valid()){ error="v2.5.1 VST-style tone comparison is invalid."; return false; }
+    if(!beforeComparison.valid()){ error="v2.5.2 VST-style tone comparison is invalid."; return false; }
     const double beforeToneError=vstToneErrorDb(beforeComparison); stats.originalResponseSpectralError=beforeToneError;
 
     const auto ir=solveMinimumPhaseIrLikeVst(beforeComparison,kTailToneSmoothingAmount);
@@ -1151,7 +1151,7 @@ bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,con
     if(stats.searchedNmse>stats.originalNmse*1.10) failures.emplace_back("full-render NMSE regressed by more than 10%");
     if(stats.searchedSpectralError>stats.originalSpectralError*1.10) failures.emplace_back("MR-STFT regressed by more than 10%");
     const bool accepted=failures.empty(); stats.searchedCandidateAccepted=accepted;
-    if(accepted) stats.searchedDecisionReason="accepted by v2.5.1 SOURCE_latest_19 VST CAB Tone Match 2048-IR gate (final 20 s, Smooth 50% / 1/12 octave)";
+    if(accepted) stats.searchedDecisionReason="accepted by v2.5.2 SOURCE_latest_19 VST CAB Tone Match 2048-IR gate (final 20 s, Smooth 5% / 1/120 octave)";
     else for(std::size_t i=0;i<failures.size();++i){if(i)stats.searchedDecisionReason+="; ";stats.searchedDecisionReason+=failures[i];}
 
     const auto sb=le32(bytes.data()+0x80);
@@ -1164,7 +1164,7 @@ bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,con
     stats.refinedSpectralError=accepted?stats.searchedSpectralError:stats.originalSpectralError; stats.refinedEnvelopeError=accepted?stats.searchedEnvelopeError:stats.originalEnvelopeError; stats.refinedResponseSpectralError=accepted?afterToneError:beforeToneError;
     stats.improved=accepted; stats.improvementPercent=imp(stats.originalNmse,stats.refinedNmse); stats.stimulusImprovementPercent=imp(stats.originalStimulusNmse,stats.refinedStimulusNmse); stats.tailImprovementPercent=imp(stats.originalTailNmse,stats.refinedTailNmse); stats.spectralImprovementPercent=imp(stats.originalSpectralError,stats.refinedSpectralError); stats.envelopeImprovementPercent=imp(stats.originalEnvelopeError,stats.refinedEnvelopeError); stats.responseSpectralImprovementPercent=imp(beforeToneError,stats.refinedResponseSpectralError);
 
-    if(status) status(L"v2.5.1 VST tail tone match 2048-IR complete. Final-20-s CAB Match error improvement: "+std::to_wstring(stats.searchedResponseSpectralImprovementPercent)+L"%; final gate: "+(accepted?L"ACCEPTED":L"REJECTED")+L".");
+    if(status) status(L"v2.5.2 VST tail tone match 2048-IR complete. Final-20-s CAB Match error improvement: "+std::to_wstring(stats.searchedResponseSpectralImprovementPercent)+L"%; final gate: "+(accepted?L"ACCEPTED":L"REJECTED")+L".");
     return true;
 }
 

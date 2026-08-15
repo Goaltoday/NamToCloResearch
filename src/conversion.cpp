@@ -411,7 +411,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     fs::path refinedWorkClo;
     fs::path bestWorkClo;
     if (refine.enabled) {
-        report(status, L"VST CAB Tone Match 2048-IR of Block B using final 20 seconds (v2.5.1)...");
+        report(status, L"VST CAB Tone Match 2048-IR of Block B using final 20 seconds (v2.5.2)...");
         refinedWorkClo = work / L"ampero_2048_B_TAIL_TONEMATCH_REFINE.clo";
         bestWorkClo = work / L"ampero_2048_B_TAIL_TONEMATCH_BEST.clo";
         if (!refineCloBOnly(worker.outputClo, worker.inputWav, worker.outputWav, refinedWorkClo, bestWorkClo,
