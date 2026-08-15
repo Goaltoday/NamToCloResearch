@@ -1,18 +1,8 @@
-# NAM to CLO 2.2.0
+# NAM to CLO 2.3.0
 
-## v2.2 Block-B spectral branch
+## v2.3 Automatic Wiener Block-B Match
 
-v2.2 freezes PRE, Block A, P/K and POST and iterates only the 2048-tap Block B. Its primary objective is a direct NAM-vs-CLO output-spectrum shape error over the first 50-second stimulus (4096 Hann FFT, 2048 hop, 48 log-frequency bands from 30 Hz to 20 kHz). A broad level offset is removed because output volume is not the target.
-
-Each iteration measures the residual spectral curve, smooths it, limits the requested correction to +/-1.5 dB per pass and +/-6 dB total, and uses a short line search before accepting a B update. `_B_BEST` is the best spectral candidate found; `_B_REFINE` is accepted only if spectral-shape error improves by at least 0.25% and full-render NMSE does not regress by more than 5%.
-
-The older v2.1 A+P/K experiment is retained only as historical context below.
-
-
-Windows GUI utility that converts one Neural Amp Model (`.nam`) or batch-converts all `.nam` files in a selected folder into two CLO files per model:
-
-- `<name>_Ampero_2048.clo` — the 2048-coefficient VTSI generated through Hotone `HTUSBTools.dll`.
-- `<name>_GP200_1024.clo` — an experimental GP-200 compact serialization using the 1024-coefficient structure observed in the official Valeton editor.
+v2.3 keeps PRE, Block A, P/K and POST fixed and fits only the 2048-tap Block B. The program already owns the exact conversion stimulus, HTUSBTools NAM render and official CLO, so it estimates a regularized Wiener correction directly from the official CLO render to the NAM render. The correction is absorbed into Block B, tested at several regularization/blend strengths, and accepted only when it improves full-render NMSE without degrading the direct output spectral-shape metric. The selected Ampero B2048 is compacted to GP-200 B1024 only after matching.
 
 ## Historical v2.1 A+P/K spectral-response guard
 

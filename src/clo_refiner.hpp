@@ -87,11 +87,12 @@ struct CloRefineStats {
 
 using RefineStatusCallback = std::function<void(const std::wstring&)>;
 
-// Experimental v2.2 Block-B-only spectral refiner. PRE, A, P/K and POST stay fixed.
-// B is iteratively reshaped in frequency while preserving its phase as far as
-// possible. The optimisation target is the direct NAM-vs-CLO output spectrum
-// over the first 50 s stimulus; the 20 s tail and temporal metrics are reported
-// only as diagnostics. Output level is calibrated once from the original CLO.
+// Experimental v2.3 automatic Wiener Block-B matcher. PRE, A, P/K and POST stay fixed.
+// The exact stimulus, HTUSBTools NAM render and official CLO render are used to
+// estimate a regularized complex correction filter. The correction is absorbed
+// into the Ampero 2048-tap Block B, then the normal GP-200 compaction runs later.
+// Candidate selection requires direct full-render error improvement and guards
+// the output spectral contour against regression.
 bool refineCloBOnly(const fs::path& inputClo2048,
                  const fs::path& stimulusWav,
                  const fs::path& targetWav,
