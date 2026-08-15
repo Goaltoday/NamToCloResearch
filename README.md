@@ -1,4 +1,8 @@
-# NAM to CLO 2.3.0
+# NAM to CLO 2.4.0
+
+## v2.4 Automatic Corrective-IR Tone Match
+
+v2.4 replaces the experimental global Wiener fit with a simpler automatic tone-matching stage that mirrors the existing manual Corrective IR workflow. It compares the final HTUSBTools NAM render with the final official CLO render, derives a smooth broad-band dB correction, absorbs that correction only into the 2048-tap Block B, and iterates conservatively before the normal GP-200 B1024 compaction. PRE, A, P/K and POST remain unchanged.
 
 ## v2.3 Automatic Wiener Block-B Match
 

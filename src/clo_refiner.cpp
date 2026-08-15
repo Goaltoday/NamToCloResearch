@@ -1102,30 +1102,30 @@ bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,con
     std::vector<std::uint8_t> bytes;
     if(!readFileBytes(inputClo2048,bytes,error)) return false;
     Model m; if(!parseModel(bytes,m,error)) return false;
-    if(m.B.size()<512){ error="v2.3 Wiener B matcher expects the Ampero 2048-tap Block B."; return false; }
+    if(m.B.size()<512){ error="v2.4 automatic tone match expects the Ampero 2048-tap Block B."; return false; }
 
     std::vector<float> in,target;
     if(!readMono44100(stimulusWav,in,error)||!readMono44100(targetWav,target,error)) return false;
     const std::size_t n=std::min(in.size(),target.size());
-    if(n<static_cast<std::size_t>(kSampleRate)){ error="Not enough rendered audio for v2.3 Wiener B matching."; return false; }
+    if(n<static_cast<std::size_t>(kSampleRate)){ error="Not enough rendered audio for v2.4 automatic tone matching."; return false; }
     in.resize(n); target.resize(n);
 
-    if(status) status(L"v2.3 Wiener B: rendering fixed PRE + A + P/K + POST once...");
+    if(status) status(L"v2.4 tone match: rendering fixed PRE + A + P/K + POST once...");
     const auto aout=precomputeA(m,in,n);
     std::vector<float> preB;
     renderPreB(m,aout,m.pp,m.pn,m.kp,m.kn,preB);
-
     std::vector<float> originalCandidate;
     renderWithB(preB,m.B,originalCandidate);
+
     const double fixedScale=fitScale(originalCandidate,target);
     stats.outputScale=fixedScale;
-    stats.pPosBefore=m.pp; stats.pNegBefore=m.pn; stats.kPosBefore=m.kp; stats.kNegBefore=m.kn;
-    stats.pPosAfter=m.pp; stats.pNegAfter=m.pn; stats.kPosAfter=m.kp; stats.kNegAfter=m.kn;
-
-    const std::size_t split=std::min<std::size_t>(kStimulusFrames,n);
+    const std::size_t split=std::min<std::size_t>(n,static_cast<std::size_t>(50*kSampleRate));
     stats.originalNmse=nmseRange(originalCandidate,target,fixedScale,0,n);
     stats.originalStimulusNmse=nmseRange(originalCandidate,target,fixedScale,0,split);
     stats.originalTailNmse=nmseRange(originalCandidate,target,fixedScale,split,n);
+    stats.pPosBefore=m.pp; stats.pNegBefore=m.pn; stats.kPosBefore=m.kp; stats.kNegBefore=m.kn;
+    stats.pPosAfter=m.pp; stats.pNegAfter=m.pn; stats.kPosAfter=m.kp; stats.kNegAfter=m.kn;
+
     const auto mrRef=buildMultiStftReference(target);
     const auto envRef=buildMultiEnvelopeReference(target);
     const auto levels=buildLevelReference(in);
@@ -1133,49 +1133,72 @@ bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,con
     stats.originalEnvelopeError=multiScaleEnvelopeError(originalCandidate,fixedScale,envRef);
     const auto origLevels=levelNmse(originalCandidate,target,fixedScale,levels);
     stats.originalLowLevelNmse=origLevels[0]; stats.originalMidLevelNmse=origLevels[1]; stats.originalHighLevelNmse=origLevels[2];
+
+    // Automatic tone matching is deliberately based on the final NAM and CLO
+    // outputs, not on an inferred transfer function. This mirrors the manual
+    // corrective-IR workflow: average output spectra -> dB residual -> smooth
+    // correction -> absorb the correction into Block B.
     const auto targetShape=outputSpectrumShape(target,1.0,split);
     const auto originalShape=outputSpectrumShape(originalCandidate,fixedScale,split);
     const double originalShapeError=spectralShapeMae(originalShape,targetShape);
     stats.originalResponseSpectralError=originalShapeError;
 
-    // Estimate a complex Wiener correction from the ACTUAL official CLO render
-    // (already scaled by the one frozen calibration) to the HTUSBTools NAM render.
-    std::vector<float> scaledOriginal(originalCandidate.size());
-    for(std::size_t i=0;i<scaledOriginal.size();++i) scaledOriginal[i]=static_cast<float>(fixedScale*originalCandidate[i]);
+    struct Candidate {
+        std::vector<float> B,audio;
+        double nmse=0.0,shape=0.0,stft=0.0,env=0.0;
+        int iteration=0;
+        double appliedMaxDb=0.0;
+    };
+    Candidate best;
+    best.B=m.B; best.audio=originalCandidate; best.nmse=stats.originalNmse;
+    best.shape=originalShapeError; best.stft=stats.originalSpectralError; best.env=stats.originalEnvelopeError;
 
-    struct Candidate { std::vector<float> B,audio; double nmse=0,shape=0,stft=0,env=0; double alpha=0,reg=0; };
-    Candidate best; best.B=m.B; best.audio=originalCandidate; best.nmse=stats.originalNmse; best.shape=originalShapeError;
-    best.stft=stats.originalSpectralError; best.env=stats.originalEnvelopeError;
+    std::vector<float> currentB=m.B;
+    std::vector<float> currentAudio=originalCandidate;
+    double currentShape=originalShapeError;
+    const std::array<double,3> maxStepDb={4.0,2.0,1.0};
+    const int iterations=std::clamp(config.passes,1,3);
 
-    // Multiple regularisation strengths prevent low-energy frequency bins from
-    // exploding. Alpha is a trust factor between original B and Wiener solution.
-    const std::array<double,4> regs={1.0e-5,1.0e-4,1.0e-3,1.0e-2};
-    const std::array<double,5> alphas={0.20,0.35,0.50,0.70,1.00};
-    int testNo=0; const int totalTests=static_cast<int>(regs.size()*alphas.size());
-    for(double reg:regs){
-        const auto w=estimateWienerCorrection(scaledOriginal,target,n,reg);
-        for(double alpha:alphas){
-            ++testNo;
-            if(status) status(L"v2.3 Wiener B: candidate "+std::to_wstring(testNo)+L"/"+std::to_wstring(totalTests)+L"...");
-            Candidate c; c.reg=reg; c.alpha=alpha; c.B=absorbCorrectionIntoB(m.B,w,alpha);
+    for(int iter=0;iter<iterations;++iter){
+        if(status) status(L"v2.4 tone match: iteration "+std::to_wstring(iter+1)+L"/"+std::to_wstring(iterations)+L"...");
+        const auto candShape=outputSpectrumShape(currentAudio,fixedScale,split);
+        auto corrDb=spectralResidualDb(candShape,targetShape);
+        double maxAbs=0.0;
+        for(auto& v:corrDb){ v=std::clamp(v,-maxStepDb[iter],maxStepDb[iter]); maxAbs=std::max(maxAbs,std::abs(v)); }
+
+        // Try conservative fractions of the conventional tone-match curve.
+        // This keeps the IR-like correction stable and lets the renderer decide
+        // how much of the measured spectral residual is useful for this CLO.
+        const std::array<double,4> strengths={0.35,0.55,0.75,1.00};
+        Candidate iterBest;
+        bool found=false;
+        for(double strength:strengths){
+            std::array<double,kBShapeBands> scaled{};
+            for(std::size_t b=0;b<kBShapeBands;++b) scaled[b]=corrDb[b]*strength;
+            Candidate c; c.iteration=iter+1; c.appliedMaxDb=maxAbs*strength;
+            c.B=synthesizeB(currentB,scaled);
             renderWithB(preB,c.B,c.audio);
-            c.nmse=nmseRange(c.audio,target,fixedScale,0,n);
             c.shape=spectralShapeMae(outputSpectrumShape(c.audio,fixedScale,split),targetShape);
-            // Choose by direct full-render least-squares error, but never allow
-            // the external-style broad output contour to become materially worse.
-            const bool spectralSafe=c.shape<=originalShapeError*1.001;
-            if(spectralSafe && c.nmse<best.nmse*(1.0-1.0e-7)){
+            c.nmse=nmseRange(c.audio,target,fixedScale,0,n);
+            // The search target is spectral closeness. NMSE is only a broad
+            // safety guard because B cannot repair nonlinear waveform error.
+            const bool nmseSafe=c.nmse<=stats.originalNmse*1.10;
+            if(nmseSafe && c.shape<currentShape*(1.0-1.0e-5) && (!found || c.shape<iterBest.shape)){
                 c.stft=multiResolutionStftLoss(c.audio,fixedScale,mrRef);
                 c.env=multiScaleEnvelopeError(c.audio,fixedScale,envRef);
-                best=std::move(c);
+                iterBest=std::move(c); found=true;
             }
         }
+        if(!found) break;
+        currentB=iterBest.B;
+        currentAudio=iterBest.audio;
+        currentShape=iterBest.shape;
+        if(iterBest.shape<best.shape){ best=std::move(iterBest); }
     }
 
-    // If no Wiener candidate improved NMSE while preserving spectral shape,
-    // _BEST is intentionally the untouched official B rather than a misleading candidate.
+    auto imp=[](double a,double b){return a>0?100.0*(a-b)/a:0.0;};
     stats.searchedResponseSpectralError=best.shape;
-    stats.searchedResponseSpectralImprovementPercent=originalShapeError>0?100.0*(originalShapeError-best.shape)/originalShapeError:0.0;
+    stats.searchedResponseSpectralImprovementPercent=imp(originalShapeError,best.shape);
     stats.searchedNmse=best.nmse;
     stats.searchedStimulusNmse=nmseRange(best.audio,target,fixedScale,0,split);
     stats.searchedTailNmse=nmseRange(best.audio,target,fixedScale,split,n);
@@ -1183,7 +1206,6 @@ bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,con
     stats.searchedEnvelopeError=(best.env>0?best.env:multiScaleEnvelopeError(best.audio,fixedScale,envRef));
     const auto bestLevels=levelNmse(best.audio,target,fixedScale,levels);
     stats.searchedLowLevelNmse=bestLevels[0]; stats.searchedMidLevelNmse=bestLevels[1]; stats.searchedHighLevelNmse=bestLevels[2];
-    auto imp=[](double a,double b){return a>0?100.0*(a-b)/a:0.0;};
     stats.searchedNmseImprovementPercent=imp(stats.originalNmse,stats.searchedNmse);
     stats.searchedStimulusImprovementPercent=imp(stats.originalStimulusNmse,stats.searchedStimulusNmse);
     stats.searchedTailImprovementPercent=imp(stats.originalTailNmse,stats.searchedTailNmse);
@@ -1192,18 +1214,18 @@ bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,con
     stats.searchedLowLevelImprovementPercent=imp(stats.originalLowLevelNmse,bestLevels[0]);
     stats.searchedMidLevelImprovementPercent=imp(stats.originalMidLevelNmse,bestLevels[1]);
     stats.searchedHighLevelImprovementPercent=imp(stats.originalHighLevelNmse,bestLevels[2]);
-    stats.searchedComposite=stats.originalNmse>kMetricEpsilon?best.nmse/stats.originalNmse:1.0;
+    stats.searchedComposite=originalShapeError>kMetricEpsilon?best.shape/originalShapeError:1.0;
     stats.searchedCompositeImprovementPercent=100.0*(1.0-stats.searchedComposite);
     stats.searchedPPos=m.pp; stats.searchedPNeg=m.pn; stats.searchedKPos=m.kp; stats.searchedKNeg=m.kn;
 
     std::vector<std::string> failures;
-    if(!(best.nmse<stats.originalNmse*0.999)) failures.emplace_back("full-render NMSE did not improve by at least 0.10%");
-    if(best.shape>originalShapeError*1.001) failures.emplace_back("direct output spectral shape regressed by more than 0.10%");
-    if(stats.searchedSpectralError>stats.originalSpectralError*1.01) failures.emplace_back("MR-STFT regressed by more than 1%");
+    if(!(best.shape<originalShapeError*0.999)) failures.emplace_back("direct output spectral shape did not improve by at least 0.10%");
+    if(best.nmse>stats.originalNmse*1.10) failures.emplace_back("full-render NMSE regressed by more than 10%");
+    if(stats.searchedSpectralError>stats.originalSpectralError*1.10) failures.emplace_back("MR-STFT regressed by more than 10%");
     const bool accepted=failures.empty();
     stats.searchedCandidateAccepted=accepted;
     if(accepted){
-        stats.searchedDecisionReason="accepted by v2.3 automatic Wiener Block-B gate (alpha="+std::to_string(best.alpha)+", regularization="+std::to_string(best.reg)+")";
+        stats.searchedDecisionReason="accepted by v2.4 automatic corrective-IR tone-match gate (iteration="+std::to_string(best.iteration)+", max correction="+std::to_string(best.appliedMaxDb)+" dB)";
     } else {
         for(std::size_t i=0;i<failures.size();++i){ if(i)stats.searchedDecisionReason+="; "; stats.searchedDecisionReason+=failures[i]; }
     }
@@ -1216,13 +1238,12 @@ bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,con
     if(accepted) writeB(bytes,best.B);
     if(!writeFileBytes(outputClo2048,bytes.data(),bytes.size(),error)) return false;
 
-    const bool finalIsBest=accepted;
-    stats.refinedNmse=finalIsBest?stats.searchedNmse:stats.originalNmse;
-    stats.refinedStimulusNmse=finalIsBest?stats.searchedStimulusNmse:stats.originalStimulusNmse;
-    stats.refinedTailNmse=finalIsBest?stats.searchedTailNmse:stats.originalTailNmse;
-    stats.refinedSpectralError=finalIsBest?stats.searchedSpectralError:stats.originalSpectralError;
-    stats.refinedEnvelopeError=finalIsBest?stats.searchedEnvelopeError:stats.originalEnvelopeError;
-    stats.refinedResponseSpectralError=finalIsBest?best.shape:originalShapeError;
+    stats.refinedNmse=accepted?stats.searchedNmse:stats.originalNmse;
+    stats.refinedStimulusNmse=accepted?stats.searchedStimulusNmse:stats.originalStimulusNmse;
+    stats.refinedTailNmse=accepted?stats.searchedTailNmse:stats.originalTailNmse;
+    stats.refinedSpectralError=accepted?stats.searchedSpectralError:stats.originalSpectralError;
+    stats.refinedEnvelopeError=accepted?stats.searchedEnvelopeError:stats.originalEnvelopeError;
+    stats.refinedResponseSpectralError=accepted?best.shape:originalShapeError;
     stats.improved=accepted;
     stats.improvementPercent=imp(stats.originalNmse,stats.refinedNmse);
     stats.stimulusImprovementPercent=imp(stats.originalStimulusNmse,stats.refinedStimulusNmse);
@@ -1231,8 +1252,8 @@ bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,con
     stats.envelopeImprovementPercent=imp(stats.originalEnvelopeError,stats.refinedEnvelopeError);
     stats.responseSpectralImprovementPercent=imp(originalShapeError,stats.refinedResponseSpectralError);
 
-    if(status) status(L"v2.3 Wiener B complete. NMSE improvement: "+std::to_wstring(stats.searchedNmseImprovementPercent)
-                      +L"%; spectral-shape improvement: "+std::to_wstring(stats.searchedResponseSpectralImprovementPercent)
+    if(status) status(L"v2.4 tone match complete. Direct spectrum improvement: "+std::to_wstring(stats.searchedResponseSpectralImprovementPercent)
+                      +L"%; NMSE change: "+std::to_wstring(stats.searchedNmseImprovementPercent)
                       +L"%; final gate: "+(accepted?L"ACCEPTED":L"REJECTED")+L".");
     return true;
 }

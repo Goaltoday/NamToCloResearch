@@ -550,7 +550,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
     createSectionLabel(hwnd, 1008, L"Corrective IR");
-    createSectionLabel(hwnd, 1009, L"CLO refinement v2.3 (Automatic Wiener Block-B match)");
+    createSectionLabel(hwnd, 1009, L"CLO refinement v2.4 (Automatic Corrective-IR Tone Match)");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                  0, 0, 100, 30, hwnd, controlId(IDC_INPUT_PATH), nullptr, nullptr);
@@ -892,7 +892,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + std::to_wstring(r->refineStats.spectralImprovementPercent) + L"%"
                               + L"\r\nEnvelope RMS (256/2048/8192): "
                               + std::to_wstring(r->refineStats.envelopeImprovementPercent) + L"%"
-                              + L"\r\n\r\n--- v2.3 Automatic Wiener Block-B diagnostics ---"
+                              + L"\r\n\r\n--- v2.4 Automatic Corrective-IR Tone Match diagnostics ---"
                               + L"\r\nBest searched candidate: "
                               + std::wstring(r->refineStats.searchedCandidateAccepted ? L"ACCEPTED" : L"REJECTED")
                               + L"\r\nDirect output spectral-shape improvement: "
@@ -912,7 +912,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + L"\r\nNMSE: " + std::to_wstring(r->refineStats.originalNmse) + L" -> " + std::to_wstring(r->refineStats.searchedNmse)
                               + L"\r\nMR-STFT: " + std::to_wstring(r->refineStats.originalSpectralError) + L" -> " + std::to_wstring(r->refineStats.searchedSpectralError)
                               + L"\r\nDecision: " + ntc::fromUtf8(r->refineStats.searchedDecisionReason)
-                              + L"\r\n\r\nNote: v2.3 freezes PRE, Block A, P/K and POST. It uses the exact stimulus, HTUSBTools NAM render and official CLO render to estimate a regularized complex Wiener correction, absorbs it into the 2048-tap Block B, then validates the result before GP-200 compaction.";
+                              + L"\r\n\r\nNote: v2.4 freezes PRE, Block A, P/K and POST. It compares the final NAM and CLO output spectra directly, builds a smooth automatic corrective-IR style curve, absorbs it into the 2048-tap Block B, and validates each iteration before GP-200 compaction.";
             }
             setText(gStatus, L"Done. Two CLO files were generated successfully.");
             const std::wstring doneTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;

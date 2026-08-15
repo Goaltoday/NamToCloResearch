@@ -87,12 +87,11 @@ struct CloRefineStats {
 
 using RefineStatusCallback = std::function<void(const std::wstring&)>;
 
-// Experimental v2.3 automatic Wiener Block-B matcher. PRE, A, P/K and POST stay fixed.
+// Experimental v2.4 automatic corrective-IR tone matcher. PRE, A, P/K and POST stay fixed.
 // The exact stimulus, HTUSBTools NAM render and official CLO render are used to
-// estimate a regularized complex correction filter. The correction is absorbed
+// measure a smooth final-output spectral residual. The correction is absorbed
 // into the Ampero 2048-tap Block B, then the normal GP-200 compaction runs later.
-// Candidate selection requires direct full-render error improvement and guards
-// the output spectral contour against regression.
+// Candidate selection is driven by direct output spectral-shape improvement with broad NMSE/MR-STFT safety guards.
 bool refineCloBOnly(const fs::path& inputClo2048,
                  const fs::path& stimulusWav,
                  const fs::path& targetWav,
