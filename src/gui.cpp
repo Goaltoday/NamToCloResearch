@@ -634,7 +634,7 @@ void createUi(HWND hwnd) {
                             0, 0, 100, 22, hwnd, controlId(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
-    gVersion = CreateWindowW(L"STATIC", L"Version 1.9.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+    gVersion = CreateWindowW(L"STATIC", L"Version 1.9.1", WS_CHILD | WS_VISIBLE | SS_RIGHT,
                              0, 0, 110, 22, hwnd, controlId(IDC_VERSION), nullptr, nullptr);
     applyFont(gVersion);
 
@@ -953,7 +953,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = nullptr;
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.9",
+    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.9.1",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                 CW_USEDEFAULT, CW_USEDEFAULT, 1040, 870,
                                 nullptr, nullptr, instance, nullptr);

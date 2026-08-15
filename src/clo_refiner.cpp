@@ -35,16 +35,46 @@ bool readMono44100(const fs::path& path, std::vector<float>& out, std::string& e
         if(std::memcmp(c.data(),"fmt ",4)==0 && n>=16){ fmt=le16(b.data()); ch=le16(b.data()+2); sr=le32(b.data()+4); align=le16(b.data()+12); bits=le16(b.data()+14); if(fmt==0xfffe && n>=40) fmt=le16(b.data()+24); }
         else if(std::memcmp(c.data(),"data",4)==0) data=std::move(b);
     }
-    if(sr!=kSampleRate || ch==0 || align==0 || data.empty()){ error="Refinement requires 44.1 kHz WAVs."; return false; }
-    const std::size_t frames=data.size()/align; out.resize(frames); const int bps=(bits+7)/8;
+    if(sr==0 || ch==0 || align==0 || data.empty()){
+        error="Invalid/empty WAV for refinement: "+pathToUtf8(path);
+        return false;
+    }
+    const std::size_t frames=data.size()/align; const int bps=(bits+7)/8;
+    if(bps<=0 || static_cast<std::size_t>(bps)*ch>align){
+        error="Unsupported WAV block alignment for refinement: "+pathToUtf8(path);
+        return false;
+    }
+    std::vector<float> decoded(frames);
     for(std::size_t i=0;i<frames;++i){ const auto* p=data.data()+i*align; double sum=0; for(std::uint16_t cc=0;cc<ch;++cc){ const auto* q=p+cc*bps; double v=0;
-            if(fmt==1 && bits==16) v=static_cast<std::int16_t>(le16(q))/32768.0;
+            if(fmt==1 && bits==8) v=(static_cast<int>(q[0])-128)/128.0;
+            else if(fmt==1 && bits==16) v=static_cast<std::int16_t>(le16(q))/32768.0;
             else if(fmt==1 && bits==24){ std::int32_t x=q[0]|(q[1]<<8)|(q[2]<<16); if(x&0x800000)x|=0xff000000; v=x/8388608.0; }
             else if(fmt==1 && bits==32){ auto x=static_cast<std::int32_t>(le32(q)); v=x/2147483648.0; }
             else if(fmt==3 && bits==32){ auto u=le32(q); float x{}; std::memcpy(&x,&u,4); v=std::isfinite(x)?x:0; }
-            else { error="Unsupported WAV format for refinement."; return false; }
+            else {
+                error="Unsupported WAV format for refinement ("+std::to_string(sr)+" Hz, "+std::to_string(ch)+" ch, "+std::to_string(bits)+" bit, fmt "+std::to_string(fmt)+"): "+pathToUtf8(path);
+                return false;
+            }
             sum+=v; }
-        out[i]=static_cast<float>(sum/ch); }
+        decoded[i]=static_cast<float>(sum/ch); }
+
+    if(sr==kSampleRate){ out=std::move(decoded); return true; }
+
+    // HTUSBTools may render its NAM reference WAV at a rate different from the
+    // 44.1 kHz stimulus. For refinement we adapt both sides to the CLO engine
+    // rate instead of rejecting an otherwise valid render. Linear interpolation
+    // is sufficient here because the refinement metric is evaluated at 44.1 kHz
+    // and the same deterministic adaptation is used for every candidate.
+    const double ratio=static_cast<double>(sr)/static_cast<double>(kSampleRate);
+    const std::size_t outFrames=static_cast<std::size_t>(std::llround(static_cast<double>(decoded.size())/ratio));
+    out.resize(outFrames);
+    for(std::size_t i=0;i<outFrames;++i){
+        const double pos=static_cast<double>(i)*ratio;
+        const std::size_t i0=std::min(static_cast<std::size_t>(pos),decoded.size()-1);
+        const std::size_t i1=std::min(i0+1,decoded.size()-1);
+        const double f=pos-static_cast<double>(i0);
+        out[i]=static_cast<float>(decoded[i0]+(decoded[i1]-decoded[i0])*f);
+    }
     return true;
 }
 
