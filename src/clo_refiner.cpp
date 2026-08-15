@@ -1,5 +1,6 @@
 #include "clo_refiner.hpp"
 #include "common.hpp"
+#include "corrective_ir.hpp"
 
 #include <algorithm>
 #include <array>
@@ -896,415 +897,60 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
 
 
 namespace {
-// v2.5.5: SOURCE_latest_19 VST CAB Tone Match analysis with a 2048-sample SolverV1 IR.
-// Single-pass final-20-second tone match. The correction is treated as an EQ-shape only:
-// global dB offset is removed, correction is limited to +/-3 dB, low-confidence bins are
-// ignored, and the correction is faded from 6-8 kHz to zero above 8 kHz.
-// Source = CLO render, Target = NAM render.
-constexpr std::size_t kTailToneFft = 16384;      // VST ToneAnalysis fftOrder 14
-constexpr std::size_t kTailToneHop = 4096;       // 75% overlap
-constexpr int kTailToneGroups = 11;              // median-of-means groups
-constexpr double kTailToneSilenceDb = -55.0;
-constexpr double kTailToneClip = 0.999;
-constexpr double kTailToneMinAnalysisHz = 30.0;
-constexpr double kTailToneMaxAnalysisHz = 20000.0;
-constexpr double kTailToneMinCompareHz = 40.0;
-constexpr double kTailToneMaxCompareHz = 18000.0;
-constexpr std::size_t kTailToneComparePoints = 512;
-constexpr std::size_t kTailToneIrLength = 2048;
-constexpr double kTailToneSmoothingAmount = 0.05; // VST Smooth 5%; piecewise mapping => 1/120 octave
-constexpr double kTailToneMaxCorrectionDb = 3.0;
-constexpr double kTailToneFullCorrectionMaxHz = 6000.0;
-constexpr double kTailToneZeroCorrectionHz = 8000.0;
-constexpr double kTailToneMinTrustedConfidence = 0.20;
-constexpr double kMadToSigma = 1.4826;
-constexpr double kNegativeInfinityDb = -160.0;
-constexpr double kConfidenceReferenceDeviationDb = 3.0;
+// v2.6.0: direct SOURCE_latest_19 CAB Tone Match replication on final 20 s.
+// No band guards, no confidence masking, no artificial HF freeze and no global-level removal.
+// The generated 2048-sample minimum-phase IR is exported as a WAV and then applied through
+// the existing applyCorrectiveIrToClo() path, exactly like a manually selected Corrective IR.
+constexpr std::size_t kV26Fft=16384;
+constexpr std::size_t kV26Hop=4096;
+constexpr int kV26Groups=11;
+constexpr double kV26SilenceDb=-55.0;
+constexpr double kV26Clip=0.999;
+constexpr double kV26MinHz=30.0;
+constexpr double kV26MaxHz=20000.0;
+constexpr double kV26CmpMinHz=40.0;
+constexpr double kV26CmpMaxHz=18000.0;
+constexpr std::size_t kV26Points=512;
+constexpr std::size_t kV26IrLength=2048;
+constexpr double kV26Smooth=0.05; // same slider setting requested by the user
+constexpr double kV26MadToSigma=1.4826;
+constexpr double kV26NegInf=-160.0;
+constexpr double kV26ConfRefDb=3.0;
 
-struct VstToneProfile {
-    std::vector<double> frequencyHz;
-    std::vector<double> spectrumDb;
-    std::vector<double> confidence;
-    double spectralCoverage=0.0;
-    std::size_t acceptedFrames=0;
-    bool valid() const { return frequencyHz.size()>1 && spectrumDb.size()==frequencyHz.size() && confidence.size()==frequencyHz.size(); }
-};
+struct V26Profile{std::vector<double> f,db,conf; double coverage=0; std::size_t frames=0; bool valid()const{return f.size()>1&&db.size()==f.size()&&conf.size()==f.size();}};
+struct V26Comp{std::vector<double> f,raw,conf; bool valid()const{return f.size()>1&&raw.size()==f.size()&&conf.size()==f.size();}};
+static double v26clamp(double x){return std::clamp(x,0.0,1.0);} 
+static double v26median(std::vector<double> v){if(v.empty())return 0; auto m=v.begin()+static_cast<std::ptrdiff_t>(v.size()/2);std::nth_element(v.begin(),m,v.end());return *m;}
+static double v26mad(const std::vector<double>& v,double med){std::vector<double>d;d.reserve(v.size());for(double x:v)d.push_back(std::abs(x-med));return v26median(std::move(d));}
+static double v26interp(const std::vector<double>&f,const std::vector<double>&v,double hz){if(f.empty()||f.size()!=v.size())return 0;if(hz<=f.front())return v.front();if(hz>=f.back())return v.back();auto u=std::lower_bound(f.begin(),f.end(),hz);auto i1=static_cast<std::size_t>(std::distance(f.begin(),u));auto i0=i1-1;double a=(hz-f[i0])/(f[i1]-f[i0]);return v[i0]+std::clamp(a,0.0,1.0)*(v[i1]-v[i0]);}
 
-struct VstToneComparison {
-    std::vector<double> frequencyHz;
-    std::vector<double> rawCorrectionDb;
-    std::vector<double> confidence;
-    bool valid() const { return frequencyHz.size()>1 && rawCorrectionDb.size()==frequencyHz.size() && confidence.size()==frequencyHz.size(); }
-};
-
-double clamp01v(double v){ return std::clamp(v,0.0,1.0); }
-
-double medianInPlace(std::vector<double> v){
-    if(v.empty()) return 0.0;
-    const auto mid=v.begin()+static_cast<std::ptrdiff_t>(v.size()/2);
-    std::nth_element(v.begin(),mid,v.end());
-    return *mid;
+static V26Profile v26analyse(const std::vector<float>& s,double scale,std::size_t start,std::size_t count){
+    V26Profile p;if(start>=s.size())return p;std::size_t end=std::min(s.size(),start+count);if(end-start<kV26Fft)return p;
+    auto win=hannWindow(kV26Fft);std::array<std::vector<long double>,kV26Groups> sums;for(auto&g:sums)g.assign(kV26Fft/2+1,0);std::array<std::size_t,kV26Groups> counts{};std::vector<std::complex<float>> b(kV26Fft);double silence=std::pow(10.0,kV26SilenceDb/20.0);std::size_t accepted=0;
+    for(std::size_t pos=start;pos+kV26Fft<=end;pos+=kV26Hop){long double ss=0;bool clip=false;double mean=0;for(std::size_t i=0;i<kV26Fft;++i){double x=scale*s[pos+i];ss+=x*x;mean+=x;if(std::abs(x)>=kV26Clip)clip=true;}double rms=std::sqrt(static_cast<double>(ss/kV26Fft));if(rms<silence||clip)continue;mean/=kV26Fft;for(std::size_t i=0;i<kV26Fft;++i)b[i]={static_cast<float>((scale*s[pos+i]-mean)*win[i]),0};fft(b,false);auto gi=accepted%kV26Groups;for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;double mag=std::abs(b[k]);sums[gi][k]+=mag*mag;}++counts[gi];++accepted;}
+    p.frames=accepted;if(!accepted)return p;std::size_t active=0;for(auto c:counts)if(c)++active;std::vector<double> spec(kV26Fft/2+1,kV26NegInf),dev(kV26Fft/2+1,0);double strongest=kV26NegInf;
+    for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;std::vector<double> means;for(int g=0;g<kV26Groups;++g)if(counts[g]){double mp=static_cast<double>(sums[g][k]/counts[g]);means.push_back(10*std::log10(std::max(mp,1e-20)));}double med=v26median(means);spec[k]=med;dev[k]=kV26MadToSigma*v26mad(means,med);strongest=std::max(strongest,med);}
+    std::size_t incl=0,confident=0;for(std::size_t k=0;k<=kV26Fft/2;++k){double hz=double(k)*kSampleRate/kV26Fft;if(hz<kV26MinHz||hz>kV26MaxHz)continue;double frameC=v26clamp(double(accepted)/32.0),groupC=v26clamp(double(active)/kV26Groups),energyC=v26clamp((spec[k]-strongest+60.0)/60.0),stable=1.0/(1.0+dev[k]/kV26ConfRefDb),c=v26clamp(frameC*groupC*energyC*stable);p.f.push_back(hz);p.db.push_back(spec[k]);p.conf.push_back(c);++incl;if(c>=.25)++confident;}if(incl)p.coverage=double(confident)/incl;return p;
+}
+static V26Comp v26compare(const V26Profile&s,const V26Profile&t){V26Comp c;if(!s.valid()||!t.valid())return c;double a=std::log(kV26CmpMinHz),b=std::log(kV26CmpMaxHz);for(std::size_t i=0;i<kV26Points;++i){double q=double(i)/(kV26Points-1),hz=std::exp(a+q*(b-a));c.f.push_back(hz);c.raw.push_back(v26interp(t.f,t.db,hz)-v26interp(s.f,s.db,hz));c.conf.push_back(v26clamp(std::min(v26interp(s.f,s.conf,hz),v26interp(t.f,t.conf,hz))));}return c;}
+static double v26SmoothWidth(double amount){struct P{double a,w;};static constexpr P p[]={{0,0},{.25,1.0/24},{.5,1.0/12},{.75,1.0/6},{1,1.0/3}};if(amount<=0)return 0;for(int i=1;i<5;++i)if(amount<=p[i].a){double q=(amount-p[i-1].a)/(p[i].a-p[i-1].a);return p[i-1].w+q*(p[i].w-p[i-1].w);}return p[4].w;}
+static std::vector<double> v26smooth(const V26Comp&c,double amount){std::vector<double> out(c.raw.size());if(amount<=0)return c.raw;double width=v26SmoothWidth(amount),sigma=std::max(width/2.354820045,1e-6),maxd=3*sigma;for(std::size_t i=0;i<c.raw.size();++i){double sw=0,sx=0;for(std::size_t j=0;j<c.raw.size();++j){double d=std::log2(c.f[j]/c.f[i]);if(std::abs(d)>maxd)continue;double w=std::exp(-.5*d*d/(sigma*sigma));sx+=w*c.raw[j];sw+=w;}out[i]=sw>1e-12?sx/sw:c.raw[i];}return out;}
+static std::vector<float> v26minPhaseIr(const V26Comp&c,double smooth){auto curve=v26smooth(c,smooth);const std::size_t N=4096;std::vector<std::complex<float>> logsp(N),cep(N),mc(N),cls(N),mps(N),imp(N);for(std::size_t k=0;k<=N/2;++k){double hz=double(k)*kSampleRate/N,db=v26interp(c.f,curve,hz),lm=db*0.11512925464970229;logsp[k]={float(lm),0};if(k>0&&k<N/2)logsp[N-k]={float(lm),0};}fft(logsp,true);cep=logsp;mc[0]=cep[0];for(std::size_t i=1;i<N/2;++i)mc[i]=cep[i]*2.0f;mc[N/2]=cep[N/2];fft(mc,false);cls=mc;for(std::size_t i=0;i<N;++i)mps[i]=std::exp(cls[i]);fft(mps,true);imp=mps;std::vector<float> ir(kV26IrLength);for(std::size_t i=0;i<ir.size();++i)ir[i]=imp[i].real();return ir;}
+static bool v26writeFloatWav(const fs::path&path,const std::vector<float>&x,std::string&error){std::ofstream f(path,std::ios::binary);if(!f){error="Cannot write automatic tone-match IR WAV: "+pathToUtf8(path);return false;}auto w16=[&](std::uint16_t v){char b[2]={char(v&255),char((v>>8)&255)};f.write(b,2);};auto w32=[&](std::uint32_t v){char b[4]={char(v&255),char((v>>8)&255),char((v>>16)&255),char((v>>24)&255)};f.write(b,4);};std::uint32_t data=std::uint32_t(x.size()*4),riff=36+data;f.write("RIFF",4);w32(riff);f.write("WAVEfmt ",8);w32(16);w16(3);w16(1);w32(kSampleRate);w32(kSampleRate*4);w16(4);w16(32);f.write("data",4);w32(data);f.write(reinterpret_cast<const char*>(x.data()),data);if(!f){error="Failed writing automatic tone-match IR WAV";return false;}return true;}
+static void renderWithB(const std::vector<float>& preB,const std::vector<float>& B,std::vector<float>& out){ FirFftPlan plan(B); plan.process(preB,out);}
+static double v26toneError(const V26Comp&c){long double ss=0,w=0;for(std::size_t i=0;i<c.raw.size();++i){double q=std::max(c.conf[i],0.05);ss+=q*c.raw[i]*c.raw[i];w+=q;}return w>0?std::sqrt(double(ss/w)):0;}
 }
 
-double medianAbsDeviation(const std::vector<double>& values,double median){
-    std::vector<double> d; d.reserve(values.size());
-    for(double v:values) d.push_back(std::abs(v-median));
-    return medianInPlace(std::move(d));
-}
-
-double interpProfile(const std::vector<double>& f,const std::vector<double>& v,double hz){
-    if(f.empty()||v.empty()||f.size()!=v.size()) return 0.0;
-    if(hz<=f.front()) return v.front(); if(hz>=f.back()) return v.back();
-    auto up=std::lower_bound(f.begin(),f.end(),hz); if(up==f.end()) return v.back();
-    const std::size_t i1=static_cast<std::size_t>(std::distance(f.begin(),up)); if(i1==0) return v.front();
-    const std::size_t i0=i1-1; const double den=f[i1]-f[i0]; if(den<=0.0) return v[i0];
-    const double a=std::clamp((hz-f[i0])/den,0.0,1.0); return v[i0]+a*(v[i1]-v[i0]);
-}
-
-VstToneProfile analyseLikeSourceLatest19(const std::vector<float>& signal,double scale,std::size_t start,std::size_t count){
-    VstToneProfile p;
-    if(start>=signal.size()) return p;
-    const std::size_t end=std::min(signal.size(),start+count);
-    if(end-start<kTailToneFft) return p;
-    const auto window=hannWindow(kTailToneFft);
-    std::array<std::vector<long double>,kTailToneGroups> groupSums;
-    for(auto& g:groupSums) g.assign(kTailToneFft/2+1,0.0L);
-    std::array<std::size_t,kTailToneGroups> groupCounts{};
-    std::vector<std::complex<float>> buf(kTailToneFft);
-    const double silence=std::pow(10.0,kTailToneSilenceDb/20.0);
-    std::size_t accepted=0;
-    for(std::size_t pos=start; pos+kTailToneFft<=end; pos+=kTailToneHop){
-        long double ss=0.0L; bool clipped=false; double mean=0.0;
-        for(std::size_t i=0;i<kTailToneFft;++i){ const double x=scale*signal[pos+i]; ss+=x*x; mean+=x; if(std::abs(x)>=kTailToneClip) clipped=true; }
-        const double rms=std::sqrt(static_cast<double>(ss/static_cast<long double>(kTailToneFft)));
-        if(rms<silence || clipped) continue;
-        mean/=static_cast<double>(kTailToneFft);
-        for(std::size_t i=0;i<kTailToneFft;++i) buf[i]=std::complex<float>(static_cast<float>((scale*signal[pos+i]-mean)*window[i]),0.0f);
-        fft(buf,false);
-        const std::size_t gi=accepted%kTailToneGroups;
-        for(std::size_t k=1;k<=kTailToneFft/2;++k){
-            const double hz=double(k)*double(kSampleRate)/double(kTailToneFft);
-            if(hz<kTailToneMinAnalysisHz||hz>kTailToneMaxAnalysisHz) continue;
-            groupSums[gi][k]+=static_cast<long double>(std::norm(buf[k]));
-        }
-        ++groupCounts[gi]; ++accepted;
-    }
-    p.acceptedFrames=accepted; if(!accepted) return p;
-    std::size_t active=0; for(auto c:groupCounts) if(c) ++active; if(!active) return p;
-    std::vector<double> spec(kTailToneFft/2+1,kNegativeInfinityDb),dev(kTailToneFft/2+1,0.0);
-    double strongest=kNegativeInfinityDb;
-    for(std::size_t k=1;k<=kTailToneFft/2;++k){
-        const double hz=double(k)*double(kSampleRate)/double(kTailToneFft); if(hz<kTailToneMinAnalysisHz||hz>kTailToneMaxAnalysisHz) continue;
-        std::vector<double> means; means.reserve(active);
-        for(int g=0;g<kTailToneGroups;++g) if(groupCounts[g]){
-            const double mp=static_cast<double>(groupSums[g][k]/static_cast<long double>(groupCounts[g]));
-            means.push_back(10.0*std::log10(std::max(mp,1.0e-20)));
-        }
-        const double med=medianInPlace(means); const double mad=medianAbsDeviation(means,med);
-        spec[k]=med; dev[k]=kMadToSigma*mad; strongest=std::max(strongest,med);
-    }
-    std::size_t included=0,confident=0;
-    for(std::size_t k=1;k<=kTailToneFft/2;++k){
-        const double hz=double(k)*double(kSampleRate)/double(kTailToneFft); if(hz<kTailToneMinAnalysisHz||hz>kTailToneMaxAnalysisHz) continue;
-        const double frameConf=clamp01v(double(accepted)/32.0);
-        const double groupConf=clamp01v(double(active)/double(kTailToneGroups));
-        const double energyConf=clamp01v((spec[k]-strongest+60.0)/60.0);
-        const double stabilityConf=1.0/(1.0+dev[k]/kConfidenceReferenceDeviationDb);
-        const double conf=clamp01v(frameConf*groupConf*energyConf*stabilityConf);
-        p.frequencyHz.push_back(hz); p.spectrumDb.push_back(spec[k]); p.confidence.push_back(conf);
-        ++included; if(conf>=0.25) ++confident;
-    }
-    if(included) p.spectralCoverage=double(confident)/double(included);
-    return p;
-}
-
-VstToneComparison compareLikeSourceLatest19(const VstToneProfile& source,const VstToneProfile& target){
-    VstToneComparison c; if(!source.valid()||!target.valid()) return c;
-    const double lmin=std::log(kTailToneMinCompareHz), lmax=std::log(kTailToneMaxCompareHz);
-    c.frequencyHz.reserve(kTailToneComparePoints); c.rawCorrectionDb.reserve(kTailToneComparePoints); c.confidence.reserve(kTailToneComparePoints);
-    for(std::size_t i=0;i<kTailToneComparePoints;++i){
-        const double t=double(i)/double(kTailToneComparePoints-1); const double hz=std::exp(lmin+t*(lmax-lmin));
-        const double sdb=interpProfile(source.frequencyHz,source.spectrumDb,hz), tdb=interpProfile(target.frequencyHz,target.spectrumDb,hz);
-        const double conf=clamp01v(std::min(interpProfile(source.frequencyHz,source.confidence,hz),interpProfile(target.frequencyHz,target.confidence,hz)));
-        c.frequencyHz.push_back(hz); c.rawCorrectionDb.push_back(tdb-sdb); c.confidence.push_back(conf);
-    }
-    return c;
-}
-
-double vstToneErrorDb(const VstToneComparison& c){
-    if(!c.valid()) return 1.0e100; long double e=0.0L,w=0.0L;
-    for(std::size_t i=0;i<c.frequencyHz.size();++i){ const double ww=c.confidence[i]; e+=c.rawCorrectionDb[i]*c.rawCorrectionDb[i]*ww; w+=ww; }
-    return w>1.0e-12L?std::sqrt(static_cast<double>(e/w)):1.0e100;
-}
-
-double vstSmoothingWidthOctaves(double amount){
-    amount=std::clamp(amount,0.0,1.0); if(amount<=0.0) return 0.0;
-    struct P{double a,w;}; static constexpr P pts[]={{0.0,0.0},{0.25,1.0/24.0},{0.50,1.0/12.0},{0.75,1.0/6.0},{1.0,1.0/3.0}};
-    for(std::size_t i=1;i<std::size(pts);++i) if(amount<=pts[i].a){ const double t=(amount-pts[i-1].a)/(pts[i].a-pts[i-1].a); return pts[i-1].w+t*(pts[i].w-pts[i-1].w); }
-    return pts[std::size(pts)-1].w;
-}
-
-std::vector<double> smoothLikeVst(const VstToneComparison& c,double amount){
-    if(amount<=0.0) return c.rawCorrectionDb;
-    const double width=vstSmoothingWidthOctaves(amount), sigma=std::max(width/2.354820045,1.0e-6), maxD=3.0*sigma;
-    std::vector<double> out(c.rawCorrectionDb.size());
-    // SOURCE_latest_19 SolverV1 deliberately uses unit confidence for CAB smoothing.
-    for(std::size_t i=0;i<c.frequencyHz.size();++i){
-        const double fc=c.frequencyHz[i]; double sum=0.0,w=0.0;
-        for(std::size_t j=0;j<c.frequencyHz.size();++j){ const double d=std::log2(c.frequencyHz[j]/fc); if(std::abs(d)>maxD) continue; const double k=std::exp(-0.5*d*d/(sigma*sigma)); sum+=c.rawCorrectionDb[j]*k; w+=k; }
-        out[i]=w>1.0e-12?sum/w:c.rawCorrectionDb[i];
-    }
-    return out;
-}
-
-
-VstToneComparison removeGlobalCorrectionOffset(const VstToneComparison& in){
-    VstToneComparison out=in;
-    if(!out.valid()) return out;
-    long double sum=0.0L,w=0.0L;
-    for(std::size_t i=0;i<out.rawCorrectionDb.size();++i){
-        const double ww=std::max(0.0,out.confidence[i]);
-        sum+=static_cast<long double>(out.rawCorrectionDb[i])*ww; w+=ww;
-    }
-    const double mean=w>1.0e-12L?static_cast<double>(sum/w):0.0;
-    for(double& v:out.rawCorrectionDb) v-=mean;
-    return out;
-}
-
-double tailToneCorrectionTaper(double hz){
-    // Keep the useful guitar band untouched, then use a raised-cosine fade from
-    // 6 kHz to 8 kHz. Above 8 kHz the correction is exactly 0 dB.
-    if(hz<=kTailToneFullCorrectionMaxHz) return 1.0;
-    if(hz>=kTailToneZeroCorrectionHz) return 0.0;
-    const double t=(hz-kTailToneFullCorrectionMaxHz)/(kTailToneZeroCorrectionHz-kTailToneFullCorrectionMaxHz);
-    return 0.5+0.5*std::cos(3.14159265358979323846*t);
-}
-
-VstToneComparison makeTrustedTailToneComparison(const VstToneComparison& in){
-    VstToneComparison out=removeGlobalCorrectionOffset(in);
-    if(!out.valid()) return out;
-    for(std::size_t i=0;i<out.rawCorrectionDb.size();++i){
-        const double taper=tailToneCorrectionTaper(out.frequencyHz[i]);
-        const double conf=out.confidence[i];
-        // The VST analysis confidence already contains an energy term and a
-        // stability term. Reject weak/unstable bins instead of allowing them
-        // to create large high-frequency EQ moves.
-        if(conf<kTailToneMinTrustedConfidence || taper<=0.0){
-            out.rawCorrectionDb[i]=0.0;
-            out.confidence[i]=0.0;
-            continue;
-        }
-        out.rawCorrectionDb[i]=std::clamp(out.rawCorrectionDb[i],-kTailToneMaxCorrectionDb,kTailToneMaxCorrectionDb)*taper;
-        out.confidence[i]*=taper;
-    }
-    return out;
-}
-
-constexpr std::array<double,10> kTailToneBandEdgesHz = {40.0,80.0,150.0,300.0,600.0,1000.0,2000.0,4000.0,6000.0,8000.0};
-constexpr std::size_t kTailToneBandCount = kTailToneBandEdgesHz.size()-1;
-
-double vstToneBandErrorDb(const VstToneComparison& c,double loHz,double hiHz){
-    if(!c.valid()) return 1.0e100;
-    long double e=0.0L,w=0.0L;
-    for(std::size_t i=0;i<c.frequencyHz.size();++i){
-        const double hz=c.frequencyHz[i];
-        if(hz<loHz || hz>=hiHz) continue;
-        const double ww=std::max(0.0,c.confidence[i]);
-        e+=static_cast<long double>(c.rawCorrectionDb[i])*c.rawCorrectionDb[i]*ww;
-        w+=ww;
-    }
-    return w>1.0e-12L?std::sqrt(static_cast<double>(e/w)):1.0e100;
-}
-
-std::size_t tailToneBandForHz(double hz){
-    for(std::size_t b=0;b<kTailToneBandCount;++b)
-        if(hz>=kTailToneBandEdgesHz[b] && hz<kTailToneBandEdgesHz[b+1]) return b;
-    return kTailToneBandCount;
-}
-
-VstToneComparison applyTailToneBandScales(const VstToneComparison& base,const std::array<double,kTailToneBandCount>& scales){
-    VstToneComparison out=base;
-    if(!out.valid()) return out;
-    for(std::size_t i=0;i<out.frequencyHz.size();++i){
-        const auto b=tailToneBandForHz(out.frequencyHz[i]);
-        if(b>=kTailToneBandCount){ out.rawCorrectionDb[i]=0.0; out.confidence[i]=0.0; continue; }
-        const double scale=std::clamp(scales[b],0.0,1.0);
-        out.rawCorrectionDb[i]*=scale;
-        out.confidence[i]*=scale;
-    }
-    return out;
-}
-
-std::vector<float> solveMinimumPhaseIrLikeVst(const VstToneComparison& c,double smoothingAmount){
-    const auto curve=smoothLikeVst(c,smoothingAmount);
-    const std::size_t fftSize=4096; // next power of two >= 2 * 2048; same SolverV1 method at higher IR length
-    std::vector<std::complex<float>> logSpectrum(fftSize),cep(fftSize),minCep(fftSize),complexLog(fftSize),minSpec(fftSize),imp(fftSize);
-    constexpr double ln10Over20=0.11512925464970229;
-    for(std::size_t k=0;k<=fftSize/2;++k){
-        const double hz=double(k)*double(kSampleRate)/double(fftSize);
-        const double db=interpProfile(c.frequencyHz,curve,hz);
-        logSpectrum[k]=std::complex<float>(static_cast<float>(db*ln10Over20),0.0f);
-        if(k>0&&k<fftSize/2) logSpectrum[fftSize-k]=logSpectrum[k];
-    }
-    cep=logSpectrum; fft(cep,true);
-    minCep[0]=cep[0]; for(std::size_t i=1;i<fftSize/2;++i) minCep[i]=cep[i]*2.0f; minCep[fftSize/2]=cep[fftSize/2];
-    complexLog=minCep; fft(complexLog,false);
-    for(std::size_t i=0;i<fftSize;++i) minSpec[i]=std::exp(complexLog[i]);
-    imp=minSpec; fft(imp,true);
-    std::vector<float> ir(kTailToneIrLength); for(std::size_t i=0;i<ir.size();++i) ir[i]=imp[i].real();
-    return ir;
-}
-
-std::vector<float> convolveBWithToneIr(const std::vector<float>& B,const std::vector<float>& ir){
-    std::vector<float> out(B.size(),0.0f);
-    for(std::size_t n=0;n<B.size();++n){ long double s=0.0L; const std::size_t mk=std::min(n,ir.size()-1); for(std::size_t k=0;k<=mk;++k) s+=static_cast<long double>(B[n-k])*ir[k]; out[n]=static_cast<float>(s); }
-    return out;
-}
-
-void renderWithB(const std::vector<float>& preB,const std::vector<float>& B,std::vector<float>& out){ FirFftPlan plan(B); plan.process(preB,out); }
-}
-
-bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,const fs::path& targetWav,
-                    const fs::path& outputClo2048,const fs::path& bestClo2048,const CloRefineConfig& config,
-                    CloRefineStats& stats,std::string& error,const RefineStatusCallback& status){
-    (void)config;
-    std::vector<std::uint8_t> bytes; if(!readFileBytes(inputClo2048,bytes,error)) return false;
-    Model m; if(!parseModel(bytes,m,error)) return false;
-    if(m.B.size()<512){ error="v2.5.5 tail tone match expects the Ampero 2048-tap Block B."; return false; }
-
-    std::vector<float> in,target; if(!readMono44100(stimulusWav,in,error)||!readMono44100(targetWav,target,error)) return false;
-    const std::size_t n=std::min(in.size(),target.size());
-    const std::size_t tailFrames=20u*kSampleRate;
-    if(n<tailFrames+kTailToneFft){ error="Not enough rendered audio for the final-20-second v2.5.5 tone match."; return false; }
-    in.resize(n); target.resize(n);
-    const std::size_t tailStart=n-tailFrames;
-
-    if(status) status(L"v2.5.5 VST tail tone match: rendering official CLO...");
-    const auto aout=precomputeA(m,in,n); std::vector<float> preB; renderPreB(m,aout,m.pp,m.pn,m.kp,m.kn,preB);
-    std::vector<float> originalCandidate; renderWithB(preB,m.B,originalCandidate);
-
-    // Preserve the converter's already-validated one-time output calibration.
-    // The VST tone-match algorithm itself still uses RAW TARGET-SOURCE; the
-    // scale only removes the arbitrary wrapper/output-level mismatch before capture.
-    const double fixedScale=fitScale(originalCandidate,target); stats.outputScale=fixedScale;
-    const std::size_t split=std::min<std::size_t>(n,static_cast<std::size_t>(50*kSampleRate));
-    stats.originalNmse=nmseRange(originalCandidate,target,fixedScale,0,n);
-    stats.originalStimulusNmse=nmseRange(originalCandidate,target,fixedScale,0,split);
-    stats.originalTailNmse=nmseRange(originalCandidate,target,fixedScale,split,n);
-    stats.pPosBefore=m.pp; stats.pNegBefore=m.pn; stats.kPosBefore=m.kp; stats.kNegBefore=m.kn;
-    stats.pPosAfter=m.pp; stats.pNegAfter=m.pn; stats.kPosAfter=m.kp; stats.kNegAfter=m.kn;
-    const auto mrRef=buildMultiStftReference(target); const auto envRef=buildMultiEnvelopeReference(target); const auto levels=buildLevelReference(in);
-    stats.originalSpectralError=multiResolutionStftLoss(originalCandidate,fixedScale,mrRef);
-    stats.originalEnvelopeError=multiScaleEnvelopeError(originalCandidate,fixedScale,envRef);
-    const auto ol=levelNmse(originalCandidate,target,fixedScale,levels); stats.originalLowLevelNmse=ol[0];stats.originalMidLevelNmse=ol[1];stats.originalHighLevelNmse=ol[2];
-
-    if(status) status(L"v2.5.5 VST tail tone match: analysing final 20 s with SOURCE_latest_19 CAB Match algorithm...");
-    const auto sourceProfile=analyseLikeSourceLatest19(originalCandidate,fixedScale,tailStart,tailFrames);
-    const auto targetProfile=analyseLikeSourceLatest19(target,1.0,tailStart,tailFrames);
-    if(!sourceProfile.valid()||!targetProfile.valid()){ error="v2.5.5 could not obtain valid VST-style tone profiles from the final 20 seconds."; return false; }
-    const auto beforeComparison=compareLikeSourceLatest19(sourceProfile,targetProfile);
-    if(!beforeComparison.valid()){ error="v2.5.5 VST-style tone comparison is invalid."; return false; }
-    const double beforeToneError=vstToneErrorDb(beforeComparison); stats.originalResponseSpectralError=beforeToneError;
-
-    // v2.5.5 band-wise residual guard. Start from the original B (all scales 0)
-    // and enable each logarithmic region only when a real re-render proves that
-    // TARGET-SOURCE residual error is reduced in that same region.
-    const auto trustedComparison=makeTrustedTailToneComparison(beforeComparison);
-    std::array<double,kTailToneBandCount> bandScales{};
-
-    struct BandEval {
-        std::vector<float> B,audio;
-        VstToneComparison comparison;
-        double globalError=1.0e100;
-        std::array<double,kTailToneBandCount> bandError{};
-    };
-    auto evaluateBandScales=[&](const std::array<double,kTailToneBandCount>& scales){
-        BandEval e;
-        const auto shaped=applyTailToneBandScales(trustedComparison,scales);
-        const auto ir=solveMinimumPhaseIrLikeVst(shaped,kTailToneSmoothingAmount);
-        e.B=convolveBWithToneIr(m.B,ir);
-        renderWithB(preB,e.B,e.audio);
-        const auto prof=analyseLikeSourceLatest19(e.audio,fixedScale,tailStart,tailFrames);
-        e.comparison=compareLikeSourceLatest19(prof,targetProfile);
-        e.globalError=vstToneErrorDb(e.comparison);
-        for(std::size_t b=0;b<kTailToneBandCount;++b)
-            e.bandError[b]=vstToneBandErrorDb(e.comparison,kTailToneBandEdgesHz[b],kTailToneBandEdgesHz[b+1]);
-        return e;
-    };
-
-    std::array<double,kTailToneBandCount> originalBandError{};
-    for(std::size_t b=0;b<kTailToneBandCount;++b)
-        originalBandError[b]=vstToneBandErrorDb(beforeComparison,kTailToneBandEdgesHz[b],kTailToneBandEdgesHz[b+1]);
-
-    BandEval bestEval=evaluateBandScales(bandScales);
-    constexpr std::array<double,4> trialScales={0.25,0.50,0.75,1.00};
-    for(int pass=0;pass<2;++pass){
-        bool changed=false;
-        for(std::size_t b=0;b<kTailToneBandCount;++b){
-            auto localBest=bestEval;
-            double localScale=bandScales[b];
-            for(double scale:trialScales){
-                auto testScales=bandScales;
-                testScales[b]=scale;
-                auto e=evaluateBandScales(testScales);
-                if(e.bandError[b] < originalBandError[b]*0.9995 &&
-                   e.bandError[b] < localBest.bandError[b]*0.9995 &&
-                   e.globalError <= bestEval.globalError*1.001){
-                    localBest=std::move(e);
-                    localScale=scale;
-                }
-            }
-            if(localScale!=bandScales[b]){
-                bandScales[b]=localScale;
-                bestEval=std::move(localBest);
-                changed=true;
-            }
-        }
-        if(!changed) break;
-    }
-
-    const auto candidateB=bestEval.B;
-    const auto candidateAudio=bestEval.audio;
-    const auto afterComparison=bestEval.comparison;
-    const double afterToneError=bestEval.globalError;
-
-    auto imp=[](double a,double b){return a>0?100.0*(a-b)/a:0.0;};
-    stats.searchedResponseSpectralError=afterToneError; stats.searchedResponseSpectralImprovementPercent=imp(beforeToneError,afterToneError);
-    stats.searchedNmse=nmseRange(candidateAudio,target,fixedScale,0,n);
-    stats.searchedStimulusNmse=nmseRange(candidateAudio,target,fixedScale,0,split);
-    stats.searchedTailNmse=nmseRange(candidateAudio,target,fixedScale,split,n);
-    stats.searchedSpectralError=multiResolutionStftLoss(candidateAudio,fixedScale,mrRef);
-    stats.searchedEnvelopeError=multiScaleEnvelopeError(candidateAudio,fixedScale,envRef);
-    const auto bl=levelNmse(candidateAudio,target,fixedScale,levels); stats.searchedLowLevelNmse=bl[0];stats.searchedMidLevelNmse=bl[1];stats.searchedHighLevelNmse=bl[2];
-    stats.searchedNmseImprovementPercent=imp(stats.originalNmse,stats.searchedNmse);
-    stats.searchedStimulusImprovementPercent=imp(stats.originalStimulusNmse,stats.searchedStimulusNmse);
-    stats.searchedTailImprovementPercent=imp(stats.originalTailNmse,stats.searchedTailNmse);
-    stats.searchedSpectralImprovementPercent=imp(stats.originalSpectralError,stats.searchedSpectralError);
-    stats.searchedEnvelopeImprovementPercent=imp(stats.originalEnvelopeError,stats.searchedEnvelopeError);
-    stats.searchedLowLevelImprovementPercent=imp(stats.originalLowLevelNmse,bl[0]); stats.searchedMidLevelImprovementPercent=imp(stats.originalMidLevelNmse,bl[1]); stats.searchedHighLevelImprovementPercent=imp(stats.originalHighLevelNmse,bl[2]);
-    stats.searchedComposite=beforeToneError>kMetricEpsilon?afterToneError/beforeToneError:1.0; stats.searchedCompositeImprovementPercent=100.0*(1.0-stats.searchedComposite);
-    stats.searchedPPos=m.pp;stats.searchedPNeg=m.pn;stats.searchedKPos=m.kp;stats.searchedKNeg=m.kn;
-
-    std::vector<std::string> failures;
-    if(!(afterToneError<beforeToneError*0.999)) failures.emplace_back("VST-style final-20-second tone-match error did not improve by at least 0.10%");
-    if(stats.searchedNmse>stats.originalNmse*1.10) failures.emplace_back("full-render NMSE regressed by more than 10%");
-    if(stats.searchedSpectralError>stats.originalSpectralError*1.10) failures.emplace_back("MR-STFT regressed by more than 10%");
-    const bool accepted=failures.empty(); stats.searchedCandidateAccepted=accepted;
-    if(accepted) stats.searchedDecisionReason="accepted by v2.5.5 band-wise residual-guard VST CAB Tone Match gate (final 20 s; per-band re-render validation; global level removed; +/-3 dB; confidence mask; 6-8 kHz fade; >8 kHz unchanged)";
-    else for(std::size_t i=0;i<failures.size();++i){if(i)stats.searchedDecisionReason+="; ";stats.searchedDecisionReason+=failures[i];}
-
-    const auto sb=le32(bytes.data()+0x80);
-    auto writeB=[&](std::vector<std::uint8_t>& d,const std::vector<float>& B){for(std::size_t i=0;i<B.size();++i)putf(d.data()+kCoeffBase+4ull*(sb+i),B[i]);};
-    if(!bestClo2048.empty()){auto b=bytes;writeB(b,candidateB);if(!writeFileBytes(bestClo2048,b.data(),b.size(),error))return false;}
-    if(accepted) writeB(bytes,candidateB);
-    if(!writeFileBytes(outputClo2048,bytes.data(),bytes.size(),error)) return false;
-
-    stats.refinedNmse=accepted?stats.searchedNmse:stats.originalNmse; stats.refinedStimulusNmse=accepted?stats.searchedStimulusNmse:stats.originalStimulusNmse; stats.refinedTailNmse=accepted?stats.searchedTailNmse:stats.originalTailNmse;
-    stats.refinedSpectralError=accepted?stats.searchedSpectralError:stats.originalSpectralError; stats.refinedEnvelopeError=accepted?stats.searchedEnvelopeError:stats.originalEnvelopeError; stats.refinedResponseSpectralError=accepted?afterToneError:beforeToneError;
-    stats.improved=accepted; stats.improvementPercent=imp(stats.originalNmse,stats.refinedNmse); stats.stimulusImprovementPercent=imp(stats.originalStimulusNmse,stats.refinedStimulusNmse); stats.tailImprovementPercent=imp(stats.originalTailNmse,stats.refinedTailNmse); stats.spectralImprovementPercent=imp(stats.originalSpectralError,stats.refinedSpectralError); stats.envelopeImprovementPercent=imp(stats.originalEnvelopeError,stats.refinedEnvelopeError); stats.responseSpectralImprovementPercent=imp(beforeToneError,stats.refinedResponseSpectralError);
-
-    if(status) status(L"v2.5.5 band-wise residual-guard VST tail tone match complete. Final-20-s CAB Match error improvement: "+std::to_wstring(stats.searchedResponseSpectralImprovementPercent)+L"%; final gate: "+(accepted?L"ACCEPTED":L"REJECTED")+L".");
-    return true;
+bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,const fs::path& targetWav,const fs::path& outputClo2048,const fs::path& bestClo2048,const CloRefineConfig& config,CloRefineStats& stats,std::string& error,const RefineStatusCallback& status){
+    (void)config;std::vector<std::uint8_t> bytes;if(!readFileBytes(inputClo2048,bytes,error))return false;Model m;if(!parseModel(bytes,m,error))return false;std::vector<float> in,target;if(!readMono44100(stimulusWav,in,error)||!readMono44100(targetWav,target,error))return false;std::size_t n=std::min(in.size(),target.size()),tailFrames=20u*kSampleRate;if(n<tailFrames+kV26Fft){error="Not enough audio for v2.6 final-20-s Tone Match";return false;}in.resize(n);target.resize(n);std::size_t tailStart=n-tailFrames;
+    if(status)status(L"v2.6: rendering official CLO for exact VST-style final-20-s Tone Match...");auto aout=precomputeA(m,in,n);std::vector<float>preB,orig;renderPreB(m,aout,m.pp,m.pn,m.kp,m.kn,preB);renderWithB(preB,m.B,orig);double fixedScale=fitScale(orig,target);stats.outputScale=fixedScale;std::size_t split=std::min<std::size_t>(n,50u*kSampleRate);stats.originalNmse=nmseRange(orig,target,fixedScale,0,n);stats.originalStimulusNmse=nmseRange(orig,target,fixedScale,0,split);stats.originalTailNmse=nmseRange(orig,target,fixedScale,split,n);auto mr=buildMultiStftReference(target);auto env=buildMultiEnvelopeReference(target);auto levels=buildLevelReference(in);stats.originalSpectralError=multiResolutionStftLoss(orig,fixedScale,mr);stats.originalEnvelopeError=multiScaleEnvelopeError(orig,fixedScale,env);auto ol=levelNmse(orig,target,fixedScale,levels);stats.originalLowLevelNmse=ol[0];stats.originalMidLevelNmse=ol[1];stats.originalHighLevelNmse=ol[2];
+    auto sp=v26analyse(orig,fixedScale,tailStart,tailFrames),tp=v26analyse(target,1.0,tailStart,tailFrames);auto cmp=v26compare(sp,tp);if(!cmp.valid()){error="v2.6 Tone Match comparison invalid";return false;}double before=v26toneError(cmp);stats.originalResponseSpectralError=before;
+    auto ir=v26minPhaseIr(cmp,kV26Smooth);fs::path irPath=bestClo2048.parent_path()/L"auto_tonematch_ir.wav";if(!v26writeFloatWav(irPath,ir,error))return false;
+    if(status)status(L"v2.6: applying generated auto_tonematch_ir.wav through the existing Corrective IR path...");CorrectiveIrStats cir;fs::path applied=bestClo2048.parent_path()/L"v26_applied.clo";if(!applyCorrectiveIrToClo(inputClo2048,irPath,applied,cir,error))return false;std::vector<std::uint8_t>ab;if(!readFileBytes(applied,ab,error))return false;Model am;if(!parseModel(ab,am,error))return false;std::vector<float>cand;renderWithB(preB,am.B,cand);
+    auto ap=v26analyse(cand,fixedScale,tailStart,tailFrames);auto ac=v26compare(ap,tp);double after=v26toneError(ac);auto imp=[](double a,double b){return a>0?100*(a-b)/a:0.0;};stats.searchedResponseSpectralError=after;stats.searchedResponseSpectralImprovementPercent=imp(before,after);stats.searchedNmse=nmseRange(cand,target,fixedScale,0,n);stats.searchedStimulusNmse=nmseRange(cand,target,fixedScale,0,split);stats.searchedTailNmse=nmseRange(cand,target,fixedScale,split,n);stats.searchedSpectralError=multiResolutionStftLoss(cand,fixedScale,mr);stats.searchedEnvelopeError=multiScaleEnvelopeError(cand,fixedScale,env);auto bl=levelNmse(cand,target,fixedScale,levels);stats.searchedLowLevelNmse=bl[0];stats.searchedMidLevelNmse=bl[1];stats.searchedHighLevelNmse=bl[2];stats.searchedNmseImprovementPercent=imp(stats.originalNmse,stats.searchedNmse);stats.searchedStimulusImprovementPercent=imp(stats.originalStimulusNmse,stats.searchedStimulusNmse);stats.searchedTailImprovementPercent=imp(stats.originalTailNmse,stats.searchedTailNmse);stats.searchedSpectralImprovementPercent=imp(stats.originalSpectralError,stats.searchedSpectralError);stats.searchedEnvelopeImprovementPercent=imp(stats.originalEnvelopeError,stats.searchedEnvelopeError);stats.searchedLowLevelImprovementPercent=imp(stats.originalLowLevelNmse,bl[0]);stats.searchedMidLevelImprovementPercent=imp(stats.originalMidLevelNmse,bl[1]);stats.searchedHighLevelImprovementPercent=imp(stats.originalHighLevelNmse,bl[2]);stats.searchedCompositeImprovementPercent=stats.searchedResponseSpectralImprovementPercent;stats.searchedCandidateAccepted=true;stats.searchedDecisionReason="v2.6 diagnostic: exact VST-style raw final-20-s Tone Match IR exported and applied through existing Corrective IR path";
+    if(!copyFileCreatingParents(applied,bestClo2048,error))return false;bool accepted=after<before;stats.searchedCandidateAccepted=accepted;if(accepted){if(!copyFileCreatingParents(applied,outputClo2048,error))return false;}else{if(!copyFileCreatingParents(inputClo2048,outputClo2048,error))return false;stats.searchedDecisionReason="v2.6 rejected: final-20-s VST Tone Match error did not improve after application through Corrective IR path";}
+    stats.refinedNmse=accepted?stats.searchedNmse:stats.originalNmse;stats.refinedStimulusNmse=accepted?stats.searchedStimulusNmse:stats.originalStimulusNmse;stats.refinedTailNmse=accepted?stats.searchedTailNmse:stats.originalTailNmse;stats.refinedSpectralError=accepted?stats.searchedSpectralError:stats.originalSpectralError;stats.refinedEnvelopeError=accepted?stats.searchedEnvelopeError:stats.originalEnvelopeError;stats.refinedResponseSpectralError=accepted?after:before;stats.improved=accepted;stats.improvementPercent=imp(stats.originalNmse,stats.refinedNmse);stats.stimulusImprovementPercent=imp(stats.originalStimulusNmse,stats.refinedStimulusNmse);stats.tailImprovementPercent=imp(stats.originalTailNmse,stats.refinedTailNmse);stats.spectralImprovementPercent=imp(stats.originalSpectralError,stats.refinedSpectralError);stats.envelopeImprovementPercent=imp(stats.originalEnvelopeError,stats.refinedEnvelopeError);stats.responseSpectralImprovementPercent=imp(before,stats.refinedResponseSpectralError);
+    if(status)status(L"v2.6 exact VST-style Tone Match replication complete; auto_tonematch_ir.wav generated and passed through the existing Corrective IR pipeline.");return true;
 }
 
 } // namespace ntc

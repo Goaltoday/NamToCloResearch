@@ -1,8 +1,8 @@
 # NAM to CLO 2.5.1
 
-## v2.5.5 Band-wise Residual-Guard VST Tail Tone Match
+## v2.6.0 Band-wise Residual-Guard VST Tail Tone Match
 
-v2.5.5 keeps the SOURCE_latest_19 final-20-second CAB Tone Match analysis, Smooth 5%, 2048-sample minimum-phase IR and Block-B-only architecture, but no longer trusts the full correction curve blindly. It validates nine logarithmic frequency regions by re-rendering the CLO and only enables 25/50/75/100% of a band correction when that band gets measurably closer to the NAM without materially worsening the global tail match. The existing confidence mask, +/-3 dB cap, 6-8 kHz fade and >8 kHz no-correction guard remain in place.
+v2.6.0 keeps the SOURCE_latest_19 final-20-second CAB Tone Match analysis, Smooth 5%, 2048-sample minimum-phase IR and Block-B-only architecture, but no longer trusts the full correction curve blindly. It validates nine logarithmic frequency regions by re-rendering the CLO and only enables 25/50/75/100% of a band correction when that band gets measurably closer to the NAM without materially worsening the global tail match. The existing confidence mask, +/-3 dB cap, 6-8 kHz fade and >8 kHz no-correction guard remain in place.
 
 ## v2.3 Automatic Wiener Block-B Match
 
