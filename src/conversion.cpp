@@ -409,12 +409,14 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     // additional research output generated from the raw official Ampero B2048
     // model and HTUSBTools' own rendered NAM target.
     fs::path refinedWorkClo;
+    fs::path bestWorkClo;
     if (refine.enabled) {
         report(status, L"Refining CLO P/K against NAM render (experimental)...");
         refinedWorkClo = work / L"ampero_2048_REFINE.clo";
-        if (!refineCloPk(worker.outputClo, worker.inputWav, worker.outputWav, refinedWorkClo,
+        bestWorkClo = work / L"ampero_2048_BEST.clo";
+        if (!refineCloPk(worker.outputClo, worker.inputWav, worker.outputWav, refinedWorkClo, bestWorkClo,
                          refine, result.refineStats, error, status)
-            || !valid2048(refinedWorkClo)) {
+            || !valid2048(refinedWorkClo) || !valid2048(bestWorkClo)) {
             result.exitCode = kExitStageFailure;
             result.error = error.empty() ? "Experimental CLO refinement failed." : error;
             fs::remove_all(work, ec);
@@ -478,6 +480,19 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     }
 
     if (refine.enabled) {
+        result.bestAmpero2048 = uniquePath(outDir / (base + L"_Ampero_2048_BEST.clo"));
+        if (!copyFileCreatingParents(bestWorkClo, result.bestAmpero2048, error)) {
+            result.exitCode = kExitCopyFailure; result.error = error; fs::remove_all(work, ec); return result;
+        }
+        report(status, L"Generating BEST GP-200 1024 compact CLO for audition...");
+        result.bestGp2001024 = uniquePath(outDir / (base + L"_GP200_1024_BEST.clo"));
+        if (!makeGp200CompactClo(bestWorkClo, result.bestGp2001024, error)
+            || !valid1024(result.bestGp2001024)) {
+            result.exitCode = kExitCopyFailure;
+            result.error = error.empty() ? "The BEST GP-200 compact CLO failed validation." : error;
+            fs::remove_all(work, ec); return result;
+        }
+
         result.refinedAmpero2048 = uniquePath(outDir / (base + L"_Ampero_2048_REFINE.clo"));
         if (!copyFileCreatingParents(refinedWorkClo, result.refinedAmpero2048, error)) {
             result.exitCode = kExitCopyFailure; result.error = error; fs::remove_all(work, ec); return result;

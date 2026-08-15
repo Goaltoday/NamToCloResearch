@@ -878,7 +878,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             std::wstring resultMessage = L"Conversion complete.\r\n\r\nAmpero 2048:\r\n" + r->ampero2048.wstring()
                                       + L"\r\n\r\nGP-200 1024:\r\n" + r->gp2001024.wstring();
             if (!r->refinedAmpero2048.empty()) {
-                resultMessage += L"\r\n\r\nRefined Ampero 2048:\r\n" + r->refinedAmpero2048.wstring()
+                resultMessage += L"\r\n\r\nBEST Ampero 2048 (audition candidate):\r\n" + r->bestAmpero2048.wstring()
+                              + L"\r\n\r\nBEST GP-200 1024 (audition candidate):\r\n" + r->bestGp2001024.wstring()
+                              + L"\r\n\r\nRefined Ampero 2048:\r\n" + r->refinedAmpero2048.wstring()
                               + L"\r\n\r\nRefined GP-200 1024:\r\n" + r->refinedGp2001024.wstring()
                               + L"\r\n\r\nP/K full-render NMSE improvement: "
                               + std::to_wstring(r->refineStats.improvementPercent) + L"%"
@@ -890,7 +892,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + std::to_wstring(r->refineStats.spectralImprovementPercent) + L"%"
                               + L"\r\nEnvelope RMS (256/2048/8192): "
                               + std::to_wstring(r->refineStats.envelopeImprovementPercent) + L"%"
-                              + L"\r\n\r\n--- v1.9.6 search diagnostics ---"
+                              + L"\r\n\r\n--- v1.9.7 candidate audition ---"
                               + L"\r\nBest searched candidate: "
                               + std::wstring(r->refineStats.searchedCandidateAccepted ? L"ACCEPTED" : L"REJECTED")
                               + L"\r\nCombined research loss improvement: "
@@ -910,7 +912,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + std::to_wstring(r->refineStats.searchedPNeg) + L" / "
                               + std::to_wstring(r->refineStats.searchedKPos) + L" / "
                               + std::to_wstring(r->refineStats.searchedKNeg)
-                              + L"\r\nDecision: " + ntc::fromUtf8(r->refineStats.searchedDecisionReason);
+                              + L"\r\n\r\nAbsolute metrics (original -> BEST):"
+                              + L"\r\nNMSE: " + std::to_wstring(r->refineStats.originalNmse) + L" -> " + std::to_wstring(r->refineStats.searchedNmse)
+                              + L"\r\nMR-STFT: " + std::to_wstring(r->refineStats.originalSpectralError) + L" -> " + std::to_wstring(r->refineStats.searchedSpectralError)
+                              + L"\r\nEnvelope RMS dB error: " + std::to_wstring(r->refineStats.originalEnvelopeError) + L" -> " + std::to_wstring(r->refineStats.searchedEnvelopeError)
+                              + L"\r\nDecision: " + ntc::fromUtf8(r->refineStats.searchedDecisionReason)
+                              + L"\r\n\r\nNote: _BEST is always the unconstrained best search result for listening tests; _REFINE remains protected by the final safety gate.";
             }
             setText(gStatus, L"Done. Two CLO files were generated successfully.");
             const std::wstring doneTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;

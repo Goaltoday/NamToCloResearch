@@ -40,7 +40,7 @@ struct CloRefineStats {
     // every candidate. It is intentionally not re-fitted during optimisation.
     double outputScale = 1.0;
 
-    // v1.9.6 diagnostics: keep the best point found by the free search even
+    // v1.9.7 candidate audition: keep the best point found by the free search even
     // when the final safety gate rejects it. This avoids reporting a misleading
     // 0% across all metrics just because the accepted output falls back to the
     // official CLO.
@@ -77,6 +77,7 @@ bool refineCloPk(const fs::path& inputClo2048,
                  const fs::path& stimulusWav,
                  const fs::path& targetWav,
                  const fs::path& outputClo2048,
+                 const fs::path& bestClo2048,
                  const CloRefineConfig& config,
                  CloRefineStats& stats,
                  std::string& error,

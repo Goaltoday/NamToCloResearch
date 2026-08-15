@@ -363,7 +363,7 @@ struct FinalDecision {
 };
 
 FinalDecision finalCandidateDecision(const Eval& candidate,const Eval& original){
-    // v1.9.6 keeps the v1.9.5 gate unchanged on purpose. The change in this
+    // v1.9.7 keeps the final gate unchanged; BEST is exported for audition. The change in this
     // version is diagnostic: the best searched point is preserved and exposed
     // even when this gate rejects it, so we can tune these tolerances from real
     // data instead of guessing.
@@ -408,7 +408,7 @@ bool renderOriginal(const Model& base,const std::vector<float>& aout,const FirFf
 }
 }
 
-bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const fs::path& targetWav,const fs::path& outputClo2048,const CloRefineConfig& config,CloRefineStats& stats,std::string& error,const RefineStatusCallback& status){
+bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const fs::path& targetWav,const fs::path& outputClo2048,const fs::path& bestClo2048,const CloRefineConfig& config,CloRefineStats& stats,std::string& error,const RefineStatusCallback& status){
     std::vector<std::uint8_t> bytes;if(!readFileBytes(inputClo2048,bytes,error))return false;Model m;if(!parseModel(bytes,m,error))return false;
     std::vector<float> in,target;if(!readMono44100(stimulusWav,in,error)||!readMono44100(targetWav,target,error))return false;
     const std::size_t n=std::min(in.size(),target.size());
@@ -520,6 +520,18 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
             + L"%; envelope " + std::to_wstring(stats.searchedEnvelopeImprovementPercent)
             + L"%. Final gate: " + (accepted?L"ACCEPTED":L"REJECTED") + L".";
         status(msg);
+    }
+
+    // Always export the unconstrained best searched candidate for A/B audition,
+    // even when the conservative final gate rejects it. This file is clearly
+    // labelled _BEST and never replaces the official/refined output.
+    if (!bestClo2048.empty()) {
+        auto bestBytes = bytes;
+        putf(bestBytes.data()+0x68,searchedP[0]);
+        putf(bestBytes.data()+0x6c,searchedP[1]);
+        putf(bestBytes.data()+0x70,searchedP[2]);
+        putf(bestBytes.data()+0x74,searchedP[3]);
+        if(!writeFileBytes(bestClo2048,bestBytes.data(),bestBytes.size(),error)) return false;
     }
 
     if(!accepted){best=originalEval;p=originalP;}
