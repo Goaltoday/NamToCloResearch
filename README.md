@@ -1,4 +1,4 @@
-# NAM to CLO 1.9.8
+# NAM to CLO 1.9.9
 
 Windows GUI utility that converts one Neural Amp Model (`.nam`) or batch-converts all `.nam` files in a selected folder into two CLO files per model:
 
@@ -137,9 +137,9 @@ The optimizer only writes a refined P/K set when the candidate does not regress 
 A-weighted ESR was reviewed but intentionally deferred in this revision so low-frequency/low-mid mismatches are not de-emphasized while validating the new objective.
 
 
-### v1.9.8 free-search + final safety gate
+### v1.9.9 free-search + final safety gate
 
-Version 1.9.8 keeps the v1.9.4 research metrics and full 70-second comparison,
+Version 1.9.9 keeps the v1.9.4 research metrics and full 70-second comparison,
 but changes the optimiser. Intermediate P/K candidates are ranked by the
 combined research loss and are allowed to trade metrics temporarily. A
 deterministic 24-point Halton coarse search in log-parameter space is followed
@@ -149,6 +149,15 @@ written unchanged. This is intended to avoid the 0% local-trap behaviour seen
 with v1.9.4 while retaining conservative output validation.
 
 
-## v1.9.8 P/K nonlinearity-specific refinement
+## v1.9.9 P/K nonlinearity-specific refinement
 
 The experimental P/K refinement now prioritises temporal waveform fidelity at the actual input excitation levels. The full 70 s render is split into non-silent 2048-sample windows and classified into low/mid/high RMS thirds. The loss weights are 35% global NMSE, 35% level-balanced NMSE, 15% MR-STFT and 15% multi-scale RMS envelope. This is intentionally a P/K-specific loss; later A/B refinement will use a different balance.
+
+## v1.9.9 constrained P/K search
+
+P/K optimisation now enforces waveform fidelity during the search itself rather
+than optimising an unconstrained scalar loss and rejecting the result only at
+the end. Global NMSE cannot worsen, low/mid/high excitation NMSE may regress by
+at most 0.50%, and MR-STFT/envelope remain secondary guards. The deterministic
+coarse search uses 64 Halton points, followed by constrained local refinement.
+`_BEST` is now the best feasible candidate, not the unconstrained candidate.

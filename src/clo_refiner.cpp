@@ -427,7 +427,7 @@ Eval evaluate(const Model& base,const std::vector<float>& aout,const std::vector
     }
     e.levelBalanced=levelCount?levelNorm/double(levelCount):nNorm;
 
-    // v1.9.8: P/K are nonlinearity parameters, so waveform accuracy at the
+    // v1.9.9: P/K are nonlinearity parameters, so waveform accuracy at the
     // actual excitation levels gets most of the weight. MR-STFT and envelope
     // remain secondary safeguards, not the main optimisation target.
     e.composite=0.35*nNorm + 0.35*e.levelBalanced + 0.15*sNorm + 0.15*dNorm;
@@ -438,6 +438,33 @@ bool compositeBetter(const Eval& candidate,const Eval& best){
     constexpr double tol=1.0e-9;
     return std::isfinite(candidate.composite)
         && candidate.composite < best.composite * (1.0 - tol);
+}
+
+// v1.9.9: constrain the P/K search itself, instead of first optimizing an
+// unconstrained scalar loss and rejecting the result afterwards. P/K directly
+// control the static nonlinearity, so low/mid/high excitation fidelity is a
+// structural requirement. MR-STFT and envelope remain useful secondary
+// objectives, but they cannot be purchased by noticeably worsening temporal
+// behaviour at any excitation level.
+bool feasiblePkCandidate(const Eval& candidate,const Eval& original){
+    constexpr double maxGlobalNmseRegression = 0.0000;  // global NMSE must not worsen
+    constexpr double maxLevelRegression = 0.0050;       // <= +0.50% in low/mid/high
+    constexpr double maxSpectralRegression = 0.05;      // secondary guard
+    constexpr double maxEnvelopeRegression = 0.05;      // secondary guard
+
+    if(!std::isfinite(candidate.composite)) return false;
+    if(candidate.nmse > original.nmse * (1.0 + maxGlobalNmseRegression)) return false;
+    for(std::size_t i=0;i<3;++i){
+        if(original.levelNmse[i] > kMetricEpsilon
+           && candidate.levelNmse[i] > original.levelNmse[i] * (1.0 + maxLevelRegression)) return false;
+    }
+    if(candidate.spectral > original.spectral * (1.0 + maxSpectralRegression)) return false;
+    if(candidate.envelope > original.envelope * (1.0 + maxEnvelopeRegression)) return false;
+    return true;
+}
+
+bool constrainedBetter(const Eval& candidate,const Eval& best,const Eval& original){
+    return feasiblePkCandidate(candidate,original) && compositeBetter(candidate,best);
 }
 
 struct FinalDecision {
@@ -538,15 +565,18 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
     const std::array<float,4> originalP={m.pp,m.pn,m.kp,m.kn};
     std::array<float,4> p=originalP;
 
-    // Phase 1: global/coarse deterministic exploration. Search in log space so
-    // positive P/K parameters move proportionally. We allow up to +/-35 % in
-    // log-domain around the official conversion. Every point is judged ONLY
-    // by the research composite loss; individual metric guards are deferred
-    // until the final candidate.
-    if(status)status(L"Refine P/K: coarse P/K nonlinearity-loss exploration (24 candidates)...");
+    // v1.9.9 constrained search. The previous free-search versions were able
+    // to find candidates with much better aggregate spectrum/envelope but
+    // audibly excessive distortion because low-level temporal error regressed.
+    // We therefore search only inside the physically relevant feasible region:
+    // global NMSE may not worsen, and low/mid/high excitation NMSE may regress
+    // by at most 0.50%. Within that region the composite metric chooses the
+    // best trade-off.
+    if(status)status(L"Refine P/K: constrained coarse exploration (64 candidates)...");
     constexpr std::array<unsigned,4> bases={2,3,5,7};
     constexpr double coarseRadius=0.35;
-    for(unsigned sample=1;sample<=24;++sample){
+    unsigned feasibleCoarse=0;
+    for(unsigned sample=1;sample<=64;++sample){
         std::array<float,4> test{};
         for(int j=0;j<4;++j){
             const double u=halton(sample,bases[j]);
@@ -555,17 +585,19 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
         }
         const auto e=evaluate(m,aout,target,bPlan,fixedScale,metricRef,stats.originalNmse,stats.originalSpectralError,stats.originalEnvelopeError,
                               test[0],test[1],test[2],test[3]);
-        if(compositeBetter(e,best)){best=e;p=test;}
+        if(feasiblePkCandidate(e,originalEval)){
+            ++feasibleCoarse;
+            if(compositeBetter(e,best)){best=e;p=test;}
+        }
     }
 
-    // Phase 2: local pattern refinement around the best coarse point. Unlike
-    // v1.9.4, intermediate points do NOT have to beat each original metric.
-    // This is intentional: only the final solution is subjected to the strict
-    // safety guards below.
-    std::array<double,4> step={0.12,0.12,0.12,0.12};
+    // Local coordinate refinement is also constrained. This prevents the
+    // optimizer from walking through the high-distortion basin discovered in
+    // v1.9.7/v1.9.8 merely because MR-STFT and envelope improve there.
+    std::array<double,4> step={0.10,0.10,0.10,0.10};
     const int passes=std::clamp(config.passes,1,8);
     for(int pass=0;pass<passes;++pass){
-        if(status)status(L"Refine P/K full 70 s: P/K level-aware pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes));
+        if(status)status(L"Refine P/K full 70 s: constrained pass "+std::to_wstring(pass+1)+L"/"+std::to_wstring(passes));
         bool any=false;
         for(int j=0;j<4;++j){
             auto localP=p; Eval local=best;
@@ -574,11 +606,15 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
                 test[j]=std::max(1e-7f,float(double(p[j])*std::exp(dir*step[j])));
                 const auto e=evaluate(m,aout,target,bPlan,fixedScale,metricRef,stats.originalNmse,stats.originalSpectralError,stats.originalEnvelopeError,
                                       test[0],test[1],test[2],test[3]);
-                if(compositeBetter(e,local)){local=e;localP=test;}
+                if(constrainedBetter(e,local,originalEval)){local=e;localP=test;}
             }
-            if(compositeBetter(local,best)){best=local;p=localP;any=true;}
+            if(constrainedBetter(local,best,originalEval)){best=local;p=localP;any=true;}
         }
         for(auto& st:step) st*=any?0.62:0.45;
+    }
+
+    if(status){
+        status(L"Refine P/K: constrained search retained "+std::to_wstring(feasibleCoarse)+L"/64 feasible coarse candidates.");
     }
 
     // Preserve the actual best point found BEFORE applying the final safety
@@ -622,9 +658,10 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
         status(msg);
     }
 
-    // Always export the unconstrained best searched candidate for A/B audition,
-    // even when the conservative final gate rejects it. This file is clearly
-    // labelled _BEST and never replaces the official/refined output.
+    // Export the best FEASIBLE searched candidate for audition. In v1.9.9 _BEST
+    // is no longer an unconstrained high-distortion point; it is the best point
+    // found inside the same low/mid/high temporal constraints used by the P/K
+    // search.
     if (!bestClo2048.empty()) {
         auto bestBytes = bytes;
         putf(bestBytes.data()+0x68,searchedP[0]);

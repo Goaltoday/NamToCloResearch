@@ -892,7 +892,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + std::to_wstring(r->refineStats.spectralImprovementPercent) + L"%"
                               + L"\r\nEnvelope RMS (256/2048/8192): "
                               + std::to_wstring(r->refineStats.envelopeImprovementPercent) + L"%"
-                              + L"\r\n\r\n--- v1.9.8 P/K nonlinearity diagnostics ---"
+                              + L"\r\n\r\n--- v1.9.9 constrained P/K diagnostics ---"
                               + L"\r\nBest searched candidate: "
                               + std::wstring(r->refineStats.searchedCandidateAccepted ? L"ACCEPTED" : L"REJECTED")
                               + L"\r\nCombined P/K loss improvement: "
@@ -928,7 +928,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + L"\r\nMid-level NMSE: " + std::to_wstring(r->refineStats.originalMidLevelNmse) + L" -> " + std::to_wstring(r->refineStats.searchedMidLevelNmse)
                               + L"\r\nHigh-level NMSE: " + std::to_wstring(r->refineStats.originalHighLevelNmse) + L" -> " + std::to_wstring(r->refineStats.searchedHighLevelNmse)
                               + L"\r\nDecision: " + ntc::fromUtf8(r->refineStats.searchedDecisionReason)
-                              + L"\r\n\r\nNote: v1.9.8 optimises P/K primarily for waveform fidelity at low/mid/high excitation. _BEST remains the unconstrained audition candidate; _REFINE must also pass the P/K safety gate.";
+                              + L"\r\n\r\nNote: v1.9.9 searches only inside the P/K feasible region: global NMSE cannot worsen and low/mid/high NMSE may regress by at most 0.50%. _BEST is the best feasible audition candidate; _REFINE additionally requires a meaningful composite improvement.";
             }
             setText(gStatus, L"Done. Two CLO files were generated successfully.");
             const std::wstring doneTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;
