@@ -425,7 +425,9 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
             + L" -> " + std::to_wstring(result.refineStats.refinedNmse)
             + L" (" + std::to_wstring(result.refineStats.improvementPercent) + L"% improvement; stimulus "
             + std::to_wstring(result.refineStats.stimulusImprovementPercent) + L"%; tail "
-            + std::to_wstring(result.refineStats.tailImprovementPercent) + L"%).";
+            + std::to_wstring(result.refineStats.tailImprovementPercent) + L"%; spectral "
+            + std::to_wstring(result.refineStats.spectralImprovementPercent) + L"%; envelope "
+            + std::to_wstring(result.refineStats.envelopeImprovementPercent) + L"%).";
         report(status, refineStatus.c_str());
     }
 

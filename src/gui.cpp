@@ -883,7 +883,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + L"\r\nStimulus (first 50 s): "
                               + std::to_wstring(r->refineStats.stimulusImprovementPercent) + L"%"
                               + L"\r\nTail (remaining audio): "
-                              + std::to_wstring(r->refineStats.tailImprovementPercent) + L"%";
+                              + std::to_wstring(r->refineStats.tailImprovementPercent) + L"%"
+                              + L"\r\nSpectral (48 log bands): "
+                              + std::to_wstring(r->refineStats.spectralImprovementPercent) + L"%"
+                              + L"\r\nEnvelope/RMS: "
+                              + std::to_wstring(r->refineStats.envelopeImprovementPercent) + L"%";
             }
             setText(gStatus, L"Done. Two CLO files were generated successfully.");
             MessageBoxW(hwnd, resultMessage.c_str(), L"NAM to CLO", MB_ICONINFORMATION | MB_OK);

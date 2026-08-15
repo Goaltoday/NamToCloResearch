@@ -18,6 +18,10 @@ constexpr std::uint32_t kSampleRate = 44100;
 constexpr std::size_t kCoeffBase = 0x88;
 constexpr std::size_t kStimulusFrames = 50u * kSampleRate;
 constexpr std::size_t kPreferredFftSize = 32768;
+constexpr std::size_t kMetricFftSize = 4096;
+constexpr std::size_t kEnvelopeWindow = 2048;
+constexpr int kLogBands = 48;
+constexpr double kMetricEpsilon = 1.0e-12;
 
 std::uint16_t le16(const std::uint8_t* p) { return static_cast<std::uint16_t>(p[0] | (p[1] << 8)); }
 std::uint32_t le32(const std::uint8_t* p) { return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) | (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24); }
@@ -189,18 +193,106 @@ double nmseRange(const std::vector<float>& candidate,const std::vector<float>& t
     return tt>1e-30L?static_cast<double>(er/tt):0.0;
 }
 
-struct Eval { double nmse=1e100, stimulusNmse=1e100, tailNmse=1e100; };
-Eval evaluate(const Model& base,const std::vector<float>& aout,const std::vector<float>& target,const FirFftPlan& bPlan,double fixedScale,float pp,float pn,float kp,float kn){
+std::vector<double> logBandSpectrum(const std::vector<float>& signal,double scale){
+    std::vector<long double> power(kMetricFftSize/2+1,0.0L);
+    std::vector<std::complex<float>> buf(kMetricFftSize);
+    std::vector<float> window(kMetricFftSize);
+    constexpr double pi=3.14159265358979323846;
+    for(std::size_t i=0;i<kMetricFftSize;++i) window[i]=static_cast<float>(0.5-0.5*std::cos(2.0*pi*double(i)/double(kMetricFftSize-1)));
+    std::size_t blocks=0;
+    for(std::size_t pos=0;pos<signal.size();pos+=kMetricFftSize){
+        std::fill(buf.begin(),buf.end(),std::complex<float>{});
+        const std::size_t count=std::min(kMetricFftSize,signal.size()-pos);
+        for(std::size_t i=0;i<count;++i) buf[i]=std::complex<float>(static_cast<float>(scale*signal[pos+i])*window[i],0.0f);
+        fft(buf,false);
+        for(std::size_t k=0;k<power.size();++k) power[k]+=static_cast<long double>(std::norm(buf[k]));
+        ++blocks;
+    }
+    if(blocks==0) blocks=1;
+    const double minHz=30.0,maxHz=18000.0;
+    std::vector<double> bands(kLogBands,-120.0);
+    for(int b=0;b<kLogBands;++b){
+        const double f0=minHz*std::pow(maxHz/minHz,double(b)/kLogBands);
+        const double f1=minHz*std::pow(maxHz/minHz,double(b+1)/kLogBands);
+        const std::size_t k0=std::max<std::size_t>(1,static_cast<std::size_t>(std::floor(f0*kMetricFftSize/kSampleRate)));
+        const std::size_t k1=std::min<std::size_t>(power.size()-1,static_cast<std::size_t>(std::ceil(f1*kMetricFftSize/kSampleRate)));
+        long double p=0.0L; std::size_t bins=0;
+        for(std::size_t k=k0;k<=k1 && k<power.size();++k){p+=power[k];++bins;}
+        const double mean=bins?static_cast<double>(p/(static_cast<long double>(blocks)*bins)):0.0;
+        bands[b]=10.0*std::log10(std::max(mean,kMetricEpsilon));
+    }
+    return bands;
+}
+
+double spectralError(const std::vector<double>& candidate,const std::vector<double>& target){
+    const std::size_t n=std::min(candidate.size(),target.size()); if(n==0)return 0.0;
+    long double e=0.0L;
+    for(std::size_t i=0;i<n;++i){const long double d=candidate[i]-target[i];e+=d*d;}
+    return static_cast<double>(e/n);
+}
+
+std::vector<double> envelopeDb(const std::vector<float>& signal,double scale){
+    std::vector<double> out;
+    out.reserve((signal.size()+kEnvelopeWindow-1)/kEnvelopeWindow);
+    for(std::size_t pos=0;pos<signal.size();pos+=kEnvelopeWindow){
+        const std::size_t end=std::min(signal.size(),pos+kEnvelopeWindow);
+        long double ss=0.0L;
+        for(std::size_t i=pos;i<end;++i){const long double x=scale*static_cast<long double>(signal[i]);ss+=x*x;}
+        const double rms=end>pos?std::sqrt(static_cast<double>(ss/(end-pos))):0.0;
+        out.push_back(20.0*std::log10(std::max(rms,1.0e-8)));
+    }
+    return out;
+}
+
+double envelopeError(const std::vector<double>& candidate,const std::vector<double>& target){
+    const std::size_t n=std::min(candidate.size(),target.size()); if(n==0)return 0.0;
+    long double e=0.0L; std::size_t used=0;
+    for(std::size_t i=0;i<n;++i){
+        // Ignore windows where both signals are effectively silence; otherwise
+        // a tiny numerical floor can dominate the metric during long gaps.
+        if(candidate[i]<-95.0 && target[i]<-95.0) continue;
+        const long double d=candidate[i]-target[i]; e+=d*d; ++used;
+    }
+    return used?static_cast<double>(e/used):0.0;
+}
+
+struct MetricReference {
+    std::vector<double> spectrum;
+    std::vector<double> envelope;
+};
+
+struct Eval {
+    double nmse=1e100, stimulusNmse=1e100, tailNmse=1e100;
+    double spectral=1e100, envelope=1e100, composite=1e100;
+};
+
+Eval evaluate(const Model& base,const std::vector<float>& aout,const std::vector<float>& target,const FirFftPlan& bPlan,double fixedScale,
+              const MetricReference& metricRef,double originalNmse,double originalSpectral,double originalEnvelope,
+              float pp,float pn,float kp,float kn){
     std::vector<float> preB,candidate;
     renderPreB(base,aout,pp,pn,kp,kn,preB);
     bPlan.process(preB,candidate);
     const std::size_t n=std::min(candidate.size(),target.size());
     const std::size_t split=std::min(kStimulusFrames,n);
-    return {
-        nmseRange(candidate,target,fixedScale,0,n),
-        nmseRange(candidate,target,fixedScale,0,split),
-        nmseRange(candidate,target,fixedScale,split,n)
-    };
+    Eval e;
+    e.nmse=nmseRange(candidate,target,fixedScale,0,n);
+    e.stimulusNmse=nmseRange(candidate,target,fixedScale,0,split);
+    e.tailNmse=nmseRange(candidate,target,fixedScale,split,n);
+    e.spectral=spectralError(logBandSpectrum(candidate,fixedScale),metricRef.spectrum);
+    e.envelope=envelopeError(envelopeDb(candidate,fixedScale),metricRef.envelope);
+    const double nNorm=e.nmse/std::max(originalNmse,kMetricEpsilon);
+    const double sNorm=e.spectral/std::max(originalSpectral,kMetricEpsilon);
+    const double dNorm=e.envelope/std::max(originalEnvelope,kMetricEpsilon);
+    e.composite=nNorm+sNorm+0.5*dNorm;
+    return e;
+}
+
+bool noWorseAndBetter(const Eval& candidate,const Eval& current){
+    constexpr double tol=1.0e-9;
+    const bool guards=candidate.nmse<=current.nmse*(1.0+tol)
+                   && candidate.spectral<=current.spectral*(1.0+tol)
+                   && candidate.envelope<=current.envelope*(1.0+tol);
+    return guards && candidate.composite<current.composite*(1.0-tol);
 }
 
 bool renderOriginal(const Model& base,const std::vector<float>& aout,const FirFftPlan& bPlan,std::vector<float>& candidate){
@@ -237,8 +329,14 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
     stats.originalNmse=nmseRange(originalCandidate,target,fixedScale,0,n);
     stats.originalStimulusNmse=nmseRange(originalCandidate,target,fixedScale,0,split);
     stats.originalTailNmse=nmseRange(originalCandidate,target,fixedScale,split,n);
+    if(status)status(L"Refine P/K: computing full-render spectral + envelope references...");
+    MetricReference metricRef{logBandSpectrum(target,1.0), envelopeDb(target,1.0)};
+    stats.originalSpectralError=spectralError(logBandSpectrum(originalCandidate,fixedScale),metricRef.spectrum);
+    stats.originalEnvelopeError=envelopeError(envelopeDb(originalCandidate,fixedScale),metricRef.envelope);
 
-    Eval best{stats.originalNmse,stats.originalStimulusNmse,stats.originalTailNmse};
+    Eval best;
+    best.nmse=stats.originalNmse; best.stimulusNmse=stats.originalStimulusNmse; best.tailNmse=stats.originalTailNmse;
+    best.spectral=stats.originalSpectralError; best.envelope=stats.originalEnvelopeError; best.composite=2.5;
     std::array<float,4> p={m.pp,m.pn,m.kp,m.kn};
     std::array<double,4> step={0.10,0.10,0.10,0.10};
     const int passes=std::clamp(config.passes,1,8);
@@ -250,10 +348,10 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
             for(int dir:{-1,1}){
                 auto test=p;
                 test[j]=std::max(1e-7f,float(double(p[j])*std::exp(dir*step[j])));
-                auto e=evaluate(m,aout,target,bPlan,fixedScale,test[0],test[1],test[2],test[3]);
-                if(e.nmse<local.nmse){local=e;localP=test;}
+                auto e=evaluate(m,aout,target,bPlan,fixedScale,metricRef,stats.originalNmse,stats.originalSpectralError,stats.originalEnvelopeError,test[0],test[1],test[2],test[3]);
+                if(noWorseAndBetter(e,local)){local=e;localP=test;}
             }
-            if(local.nmse<best.nmse){best=local;p=localP;any=true;}
+            if(noWorseAndBetter(local,best)){best=local;p=localP;any=true;}
         }
         for(auto& s:step)s*=any?0.65:0.45;
     }
@@ -261,7 +359,12 @@ bool refineCloPk(const fs::path& inputClo2048,const fs::path& stimulusWav,const 
     stats.refinedNmse=best.nmse;
     stats.refinedStimulusNmse=best.stimulusNmse;
     stats.refinedTailNmse=best.tailNmse;
-    stats.improved=best.nmse<stats.originalNmse;
+    stats.refinedSpectralError=best.spectral;
+    stats.refinedEnvelopeError=best.envelope;
+    stats.spectralImprovementPercent=stats.originalSpectralError>0?100.0*(stats.originalSpectralError-best.spectral)/stats.originalSpectralError:0;
+    stats.envelopeImprovementPercent=stats.originalEnvelopeError>0?100.0*(stats.originalEnvelopeError-best.envelope)/stats.originalEnvelopeError:0;
+    stats.improved=best.nmse<=stats.originalNmse && best.spectral<=stats.originalSpectralError && best.envelope<=stats.originalEnvelopeError
+                && (best.nmse<stats.originalNmse || best.spectral<stats.originalSpectralError || best.envelope<stats.originalEnvelopeError);
     stats.improvementPercent=stats.originalNmse>0?100.0*(stats.originalNmse-best.nmse)/stats.originalNmse:0;
     stats.stimulusImprovementPercent=stats.originalStimulusNmse>0?100.0*(stats.originalStimulusNmse-best.stimulusNmse)/stats.originalStimulusNmse:0;
     stats.tailImprovementPercent=stats.originalTailNmse>0?100.0*(stats.originalTailNmse-best.tailNmse)/stats.originalTailNmse:0;

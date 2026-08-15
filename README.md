@@ -1,4 +1,4 @@
-# NAM to CLO 1.9.2
+# NAM to CLO 1.9.3
 
 Windows GUI utility that converts one Neural Amp Model (`.nam`) or batch-converts all `.nam` files in a selected folder into two CLO files per model:
 
@@ -64,9 +64,9 @@ build\Release\NamToClo.exe
 
 Copy it to a clean folder together with `runtime\ampero\HTUSBTools.dll` and `runtime\ampero\nam_input_wav.wav`.
 
-## Experimental P/K refinement (v1.9.2)
+## Experimental P/K refinement (v1.9.3)
 
-Version 1.9.2 includes an optional **CLO refinement (experimental)** stage. The normal
+Version 1.9.3 includes an optional **CLO refinement (experimental)** stage. The normal
 HTUSBTools conversion is preserved and the original Ampero B2048 / GP-200 B1024
 files are still generated unchanged.
 
@@ -111,3 +111,14 @@ or effective gain are penalised instead of being normalised away.
 FIR B remains fixed during P/K refinement but is evaluated efficiently over the
 full signal with FFT overlap-save convolution. Quality is prioritised over speed.
 PRE, POST, FIR A and FIR B remain unchanged in the generated refined CLO.
+
+
+### v1.9.3 multi-metric acceptance
+
+The experimental P/K refiner still evaluates the complete render (normally 50 s stimulus + 20 s tail) and keeps the original output calibration fixed. Candidate P/K values are now accepted only if three full-render metrics do not worsen simultaneously:
+
+- temporal NMSE,
+- 48-band logarithmic spectral error from 30 Hz to 18 kHz,
+- RMS-envelope error in 2048-sample windows.
+
+The optimizer uses a normalized composite score only after those hard guards pass. This is intentionally conservative: a lower sample-domain NMSE can no longer be accepted if it makes the spectrum or dynamics worse. PRE, POST, FIR A and FIR B remain unchanged.
