@@ -414,18 +414,20 @@ bool buildStimulus(const RuntimePaths& runtime,
                    const StimulusConfig& config,
                    const fs::path& destination,
                    std::string& error) {
+    Pcm16MonoWav base;
+    Pcm16MonoWav tail;
+
     if (config.mode == StimulusMode::Legacy) {
+        // v1.8: Legacy is now a base-stimulus profile like Clean and Dist.
+        // Only the first 50.000 seconds of nam_input_wav.wav are used here;
+        // the selected Tail / Reamp source is appended below through the same
+        // common path used by every other stimulus mode.
         if (!existsFile(runtime.legacyStimulus)) {
             error = "Missing runtime\\ampero\\nam_input_wav.wav";
             return false;
         }
-        return copyFileCreatingParents(runtime.legacyStimulus, destination, error);
-    }
-
-    Pcm16MonoWav base;
-    Pcm16MonoWav tail;
-
-    if (config.mode == StimulusMode::Custom) {
+        if (!readAdaptedAudio(runtime.legacyStimulus, kBaseFrames, "Legacy stimulus", base, error)) return false;
+    } else if (config.mode == StimulusMode::Custom) {
         if (!existsFile(config.customStimulus)) {
             error = "Select a valid Custom Stimulus WAV file.";
             return false;

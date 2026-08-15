@@ -40,8 +40,9 @@ struct BatchConversionResult {
 using StatusCallback = std::function<void(const std::wstring&)>;
 
 RuntimePaths resolveDefaultRuntime();
-// Base runtime validation deliberately checks only the files required by
-// Legacy mode so v1.1 installations remain usable unchanged.
+// Base runtime validation checks the common DLL plus the historical Legacy
+// stimulus file. Mode/tail-specific WAV requirements are validated later by
+// StimulusBuilder so the user receives a precise error for the selected path.
 bool validateRuntime(const RuntimePaths& runtime, std::string& error);
 ConversionResult convertNamToBoth(const fs::path& inputNam,
                                   const fs::path& outputDirectory,

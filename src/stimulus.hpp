@@ -32,10 +32,10 @@ const wchar_t* stimulusModeDisplayName(StimulusMode mode);
 const wchar_t* tailModeDisplayName(TailMode mode);
 
 // Builds the exact WAV that will be handed to namConvertCloData.
-// Legacy mode is intentionally a byte-for-byte copy of nam_input_wav.wav.
-// Sound Clone modes concatenate a 50 s base stimulus (Clean, Dist or a user
-// Custom WAV) with either the original 20 s PresetAudio or a user recording,
-// then append the 600 zero samples observed in the official Sound Clone
+// All stimulus modes now share the same construction path: a 50 s base
+// stimulus (Legacy = first 50 s of nam_input_wav.wav, Clean, Dist or a user
+// Custom WAV) plus either the original 20 s PresetAudio or a user recording,
+// followed by the 600 zero samples observed in the official Sound Clone
 // inputSignal.wav.
 //
 // Custom stimulus audio is adapted automatically to mono PCM16 44.1 kHz and

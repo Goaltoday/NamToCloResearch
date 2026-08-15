@@ -16,15 +16,15 @@ runtime\
 
 ## Mode requirements
 
-- **Original / Legacy** requires only `HTUSBTools.dll` + `nam_input_wav.wav` and preserves the validated v1.1 path byte-for-byte.
+- **Original / Legacy** uses the first 50.000 s of `nam_input_wav.wav` as its base stimulus, then appends the selected 20.000 s Tail / Reamp source through the same builder used by Clean, Dist and Custom.
 - **Clean** requires `inputSignalCleanSW.wav` plus either `PresetAudio.wav` or a user-selected Recorded Audio WAV.
 - **Dist** requires `inputSignalDistSW.wav` plus either `PresetAudio.wav` or a user-selected Recorded Audio WAV.
 
-For Clean and Dist, v1.4 builds the stimulus as observed in the official Sound Clone application:
+From v1.8 onward, every stimulus profile uses the same assembly path:
 
 ```text
-50 s Clean/Dist source
-+ 20 s tail
+50 s Legacy/Clean/Dist/Custom source
++ 20 s selected tail
 + 600 zero samples
 ```
 

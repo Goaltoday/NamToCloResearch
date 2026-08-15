@@ -354,9 +354,9 @@ void updateTailControls() {
     EnableWindow(gCustomStimulusEdit, customStimulus ? TRUE : FALSE);
     EnableWindow(gBrowseCustomStimulusButton, customStimulus ? TRUE : FALSE);
 
-    const bool soundCloneMode = mode != ntc::StimulusMode::Legacy;
-    EnableWindow(gTailCombo, soundCloneMode ? TRUE : FALSE);
-    const bool recorded = soundCloneMode && selectedTailMode() == ntc::TailMode::RecordedAudio;
+    // v1.8: Tail selection applies to every stimulus profile, including Legacy.
+    EnableWindow(gTailCombo, TRUE);
+    const bool recorded = selectedTailMode() == ntc::TailMode::RecordedAudio;
     EnableWindow(gRecordedEdit, recorded ? TRUE : FALSE);
     EnableWindow(gBrowseRecordedButton, recorded ? TRUE : FALSE);
 
@@ -392,8 +392,7 @@ void startConversion(HWND hwnd) {
         MessageBoxW(hwnd, L"Select a Custom Stimulus WAV file.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
         return;
     }
-    if (stimulus.mode != ntc::StimulusMode::Legacy
-        && stimulus.tailMode == ntc::TailMode::RecordedAudio
+    if (stimulus.tailMode == ntc::TailMode::RecordedAudio
         && stimulus.recordedAudio.empty()) {
         MessageBoxW(hwnd, L"Select a Recorded Audio WAV file.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
         return;
@@ -617,7 +616,7 @@ void createUi(HWND hwnd) {
                             0, 0, 100, 22, hwnd, controlId(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
-    gVersion = CreateWindowW(L"STATIC", L"Version 1.7.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
+    gVersion = CreateWindowW(L"STATIC", L"Version 1.8.0", WS_CHILD | WS_VISIBLE | SS_RIGHT,
                              0, 0, 110, 22, hwnd, controlId(IDC_VERSION), nullptr, nullptr);
     applyFont(gVersion);
 
@@ -929,7 +928,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = nullptr;
     RegisterClassExW(&wc);
 
-    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.7",
+    HWND hwnd = CreateWindowExW(0, kClassName, L"NAM to CLO 1.8",
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                 CW_USEDEFAULT, CW_USEDEFAULT, 1040, 790,
                                 nullptr, nullptr, instance, nullptr);
