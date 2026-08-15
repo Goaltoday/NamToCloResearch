@@ -550,7 +550,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
     createSectionLabel(hwnd, 1008, L"Corrective IR");
-    createSectionLabel(hwnd, 1009, L"CLO refinement v2.1 (A + P/K + spectral guard)");
+    createSectionLabel(hwnd, 1009, L"CLO refinement v2.2 (Block B spectral iteration)");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                  0, 0, 100, 30, hwnd, controlId(IDC_INPUT_PATH), nullptr, nullptr);
@@ -612,7 +612,7 @@ void createUi(HWND hwnd) {
                                              WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                              0, 0, 120, 34, hwnd, controlId(IDC_BROWSE_CORRECTIVE_IR), nullptr, nullptr);
 
-    gRefineCheck = CreateWindowW(L"BUTTON", L"Refine Block A + P/K against NAM render (slow, experimental)",
+    gRefineCheck = CreateWindowW(L"BUTTON", L"Refine Block B spectrum against NAM render (slow, experimental)",
                                  WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                                  0, 0, 520, 24, hwnd, controlId(IDC_REFINE_CLO), nullptr, nullptr);
     applyFont(gRefineCheck);
@@ -878,11 +878,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             std::wstring resultMessage = L"Conversion complete.\r\n\r\nAmpero 2048:\r\n" + r->ampero2048.wstring()
                                       + L"\r\n\r\nGP-200 1024:\r\n" + r->gp2001024.wstring();
             if (!r->refinedAmpero2048.empty()) {
-                resultMessage += L"\r\n\r\nBEST A+P/K Ampero 2048 (audition candidate):\r\n" + r->bestAmpero2048.wstring()
-                              + L"\r\n\r\nBEST A+P/K GP-200 1024 (audition candidate):\r\n" + r->bestGp2001024.wstring()
+                resultMessage += L"\r\n\r\nBEST Block-B Ampero 2048 (spectral audition candidate):\r\n" + r->bestAmpero2048.wstring()
+                              + L"\r\n\r\nBEST Block-B GP-200 1024 (spectral audition candidate):\r\n" + r->bestGp2001024.wstring()
                               + L"\r\n\r\nRefined Ampero 2048:\r\n" + r->refinedAmpero2048.wstring()
                               + L"\r\n\r\nRefined GP-200 1024:\r\n" + r->refinedGp2001024.wstring()
-                              + L"\r\n\r\nA+P/K full-render NMSE improvement: "
+                              + L"\r\n\r\nBlock-B full-render NMSE improvement: "
                               + std::to_wstring(r->refineStats.improvementPercent) + L"%"
                               + L"\r\nStimulus (first 50 s): "
                               + std::to_wstring(r->refineStats.stimulusImprovementPercent) + L"%"
@@ -892,46 +892,27 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                               + std::to_wstring(r->refineStats.spectralImprovementPercent) + L"%"
                               + L"\r\nEnvelope RMS (256/2048/8192): "
                               + std::to_wstring(r->refineStats.envelopeImprovementPercent) + L"%"
-                              + L"\r\n\r\n--- v2.1 A + P/K + spectral-profile diagnostics ---"
+                              + L"\r\n\r\n--- v2.2 Block-B spectral diagnostics ---"
                               + L"\r\nBest searched candidate: "
                               + std::wstring(r->refineStats.searchedCandidateAccepted ? L"ACCEPTED" : L"REJECTED")
-                              + L"\r\nCombined A+P/K loss improvement: "
-                              + std::to_wstring(r->refineStats.searchedCompositeImprovementPercent) + L"%"
+                              + L"\r\nDirect output spectral-shape improvement: "
+                              + std::to_wstring(r->refineStats.searchedResponseSpectralImprovementPercent) + L"%"
                               + L"\r\nBest searched NMSE improvement: "
                               + std::to_wstring(r->refineStats.searchedNmseImprovementPercent) + L"%"
-                              + L"\r\nBest searched stimulus improvement: "
-                              + std::to_wstring(r->refineStats.searchedStimulusImprovementPercent) + L"%"
-                              + L"\r\nBest searched tail improvement: "
-                              + std::to_wstring(r->refineStats.searchedTailImprovementPercent) + L"%"
                               + L"\r\nBest searched MR-STFT improvement: "
                               + std::to_wstring(r->refineStats.searchedSpectralImprovementPercent) + L"%"
-                              + L"\r\nBest searched transfer-profile improvement: "
-                              + std::to_wstring(r->refineStats.searchedResponseSpectralImprovementPercent) + L"%"
                               + L"\r\nBest searched envelope improvement: "
                               + std::to_wstring(r->refineStats.searchedEnvelopeImprovementPercent) + L"%"
-                              + L"\r\nLevel-balanced temporal improvement: "
-                              + std::to_wstring(r->refineStats.searchedLevelBalancedImprovementPercent) + L"%"
-                              + L"\r\n  Low excitation NMSE improvement: "
-                              + std::to_wstring(r->refineStats.searchedLowLevelImprovementPercent) + L"%"
-                              + L"\r\n  Mid excitation NMSE improvement: "
-                              + std::to_wstring(r->refineStats.searchedMidLevelImprovementPercent) + L"%"
-                              + L"\r\n  High excitation NMSE improvement: "
+                              + L"\r\nLow / Mid / High NMSE improvement: "
+                              + std::to_wstring(r->refineStats.searchedLowLevelImprovementPercent) + L"% / "
+                              + std::to_wstring(r->refineStats.searchedMidLevelImprovementPercent) + L"% / "
                               + std::to_wstring(r->refineStats.searchedHighLevelImprovementPercent) + L"%"
-                              + L"\r\nBest searched P/K (A also optimized): "
-                              + std::to_wstring(r->refineStats.searchedPPos) + L" / "
-                              + std::to_wstring(r->refineStats.searchedPNeg) + L" / "
-                              + std::to_wstring(r->refineStats.searchedKPos) + L" / "
-                              + std::to_wstring(r->refineStats.searchedKNeg)
                               + L"\r\n\r\nAbsolute metrics (original -> BEST):"
+                              + L"\r\nDirect output spectrum dB-shape MAE: " + std::to_wstring(r->refineStats.originalResponseSpectralError) + L" -> " + std::to_wstring(r->refineStats.searchedResponseSpectralError)
                               + L"\r\nNMSE: " + std::to_wstring(r->refineStats.originalNmse) + L" -> " + std::to_wstring(r->refineStats.searchedNmse)
                               + L"\r\nMR-STFT: " + std::to_wstring(r->refineStats.originalSpectralError) + L" -> " + std::to_wstring(r->refineStats.searchedSpectralError)
-                              + L"\r\nTransfer-profile dB-shape MAE: " + std::to_wstring(r->refineStats.originalResponseSpectralError) + L" -> " + std::to_wstring(r->refineStats.searchedResponseSpectralError)
-                              + L"\r\nEnvelope RMS dB error: " + std::to_wstring(r->refineStats.originalEnvelopeError) + L" -> " + std::to_wstring(r->refineStats.searchedEnvelopeError)
-                              + L"\r\nLow-level NMSE: " + std::to_wstring(r->refineStats.originalLowLevelNmse) + L" -> " + std::to_wstring(r->refineStats.searchedLowLevelNmse)
-                              + L"\r\nMid-level NMSE: " + std::to_wstring(r->refineStats.originalMidLevelNmse) + L" -> " + std::to_wstring(r->refineStats.searchedMidLevelNmse)
-                              + L"\r\nHigh-level NMSE: " + std::to_wstring(r->refineStats.originalHighLevelNmse) + L" -> " + std::to_wstring(r->refineStats.searchedHighLevelNmse)
                               + L"\r\nDecision: " + ntc::fromUtf8(r->refineStats.searchedDecisionReason)
-                              + L"\r\n\r\nNote: v2.1 jointly optimizes Block A and P/K, but _BEST/_REFINE are taken only from candidates that preserve the input-referenced 30 Hz-20 kHz transfer-magnitude contour (96 log-frequency bands, max +0.10% profile-error regression). PRE, POST and B remain fixed.";
+                              + L"\r\n\r\nNote: v2.2 freezes PRE, Block A, P/K and POST. Only the 2048-tap Block B is iteratively reshaped to reduce direct NAM-vs-CLO output-spectrum error over the first 50 s. Broad output level is removed from the spectral-shape metric.";
             }
             setText(gStatus, L"Done. Two CLO files were generated successfully.");
             const std::wstring doneTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;

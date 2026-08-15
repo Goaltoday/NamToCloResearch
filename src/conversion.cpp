@@ -411,10 +411,10 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     fs::path refinedWorkClo;
     fs::path bestWorkClo;
     if (refine.enabled) {
-        report(status, L"Refining CLO A + P/K against NAM render (v2.1 spectral guard)...");
-        refinedWorkClo = work / L"ampero_2048_A_PK_REFINE.clo";
-        bestWorkClo = work / L"ampero_2048_A_PK_BEST.clo";
-        if (!refineCloAPlusPk(worker.outputClo, worker.inputWav, worker.outputWav, refinedWorkClo, bestWorkClo,
+        report(status, L"Refining Block B spectrally against NAM render (v2.2)...");
+        refinedWorkClo = work / L"ampero_2048_B_REFINE.clo";
+        bestWorkClo = work / L"ampero_2048_B_BEST.clo";
+        if (!refineCloBOnly(worker.outputClo, worker.inputWav, worker.outputWav, refinedWorkClo, bestWorkClo,
                          refine, result.refineStats, error, status)
             || !valid2048(refinedWorkClo) || !valid2048(bestWorkClo)) {
             result.exitCode = kExitStageFailure;
@@ -423,12 +423,12 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
             return result;
         }
         const std::wstring refineStatus =
-            L"Refine A+P/K full render complete: NMSE " + std::to_wstring(result.refineStats.originalNmse)
+            L"Refine B spectral iteration complete: NMSE " + std::to_wstring(result.refineStats.originalNmse)
             + L" -> " + std::to_wstring(result.refineStats.refinedNmse)
             + L" (" + std::to_wstring(result.refineStats.improvementPercent) + L"% improvement; stimulus "
             + std::to_wstring(result.refineStats.stimulusImprovementPercent) + L"%; tail "
             + std::to_wstring(result.refineStats.tailImprovementPercent) + L"%; MR-STFT "
-            + std::to_wstring(result.refineStats.spectralImprovementPercent) + L"%; transfer-profile "
+            + std::to_wstring(result.refineStats.spectralImprovementPercent) + L"%; direct output spectrum "
             + std::to_wstring(result.refineStats.responseSpectralImprovementPercent) + L"%; envelope "
             + std::to_wstring(result.refineStats.envelopeImprovementPercent) + L"%; searched low/mid/high "
             + std::to_wstring(result.refineStats.searchedLowLevelImprovementPercent) + L"/"
@@ -484,12 +484,12 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     }
 
     if (refine.enabled) {
-        result.bestAmpero2048 = uniquePath(outDir / (base + L"_Ampero_2048_BEST.clo"));
+        result.bestAmpero2048 = uniquePath(outDir / (base + L"_Ampero_2048_B_BEST.clo"));
         if (!copyFileCreatingParents(bestWorkClo, result.bestAmpero2048, error)) {
             result.exitCode = kExitCopyFailure; result.error = error; fs::remove_all(work, ec); return result;
         }
         report(status, L"Generating BEST GP-200 1024 compact CLO for audition...");
-        result.bestGp2001024 = uniquePath(outDir / (base + L"_GP200_1024_BEST.clo"));
+        result.bestGp2001024 = uniquePath(outDir / (base + L"_GP200_1024_B_BEST.clo"));
         if (!makeGp200CompactClo(bestWorkClo, result.bestGp2001024, error)
             || !valid1024(result.bestGp2001024)) {
             result.exitCode = kExitCopyFailure;
@@ -497,12 +497,12 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
             fs::remove_all(work, ec); return result;
         }
 
-        result.refinedAmpero2048 = uniquePath(outDir / (base + L"_Ampero_2048_REFINE.clo"));
+        result.refinedAmpero2048 = uniquePath(outDir / (base + L"_Ampero_2048_B_REFINE.clo"));
         if (!copyFileCreatingParents(refinedWorkClo, result.refinedAmpero2048, error)) {
             result.exitCode = kExitCopyFailure; result.error = error; fs::remove_all(work, ec); return result;
         }
         report(status, L"Generating refined GP-200 1024 compact CLO...");
-        result.refinedGp2001024 = uniquePath(outDir / (base + L"_GP200_1024_REFINE.clo"));
+        result.refinedGp2001024 = uniquePath(outDir / (base + L"_GP200_1024_B_REFINE.clo"));
         if (!makeGp200CompactClo(refinedWorkClo, result.refinedGp2001024, error)
             || !valid1024(result.refinedGp2001024)) {
             result.exitCode = kExitCopyFailure;

@@ -87,12 +87,12 @@ struct CloRefineStats {
 
 using RefineStatusCallback = std::function<void(const std::wstring&)>;
 
-// Experimental v2.1 full-length A + P/K refiner with spectral-response guard. PRE, POST and B stay fixed.
-// Block A is adjusted through a smooth 10-band log-frequency envelope while
-// Ppos/Pneg/Kpos/Kneg are optimized jointly. Every evaluation uses the complete
-// conversion render (normally 50 s stimulus + 20 s tail). Output level is
-// calibrated once from the original CLO and frozen for all candidates.
-bool refineCloAPlusPk(const fs::path& inputClo2048,
+// Experimental v2.2 Block-B-only spectral refiner. PRE, A, P/K and POST stay fixed.
+// B is iteratively reshaped in frequency while preserving its phase as far as
+// possible. The optimisation target is the direct NAM-vs-CLO output spectrum
+// over the first 50 s stimulus; the 20 s tail and temporal metrics are reported
+// only as diagnostics. Output level is calibrated once from the original CLO.
+bool refineCloBOnly(const fs::path& inputClo2048,
                  const fs::path& stimulusWav,
                  const fs::path& targetWav,
                  const fs::path& outputClo2048,

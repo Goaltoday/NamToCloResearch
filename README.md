@@ -1,11 +1,20 @@
-# NAM to CLO 2.1.0
+# NAM to CLO 2.2.0
+
+## v2.2 Block-B spectral branch
+
+v2.2 freezes PRE, Block A, P/K and POST and iterates only the 2048-tap Block B. Its primary objective is a direct NAM-vs-CLO output-spectrum shape error over the first 50-second stimulus (4096 Hann FFT, 2048 hop, 48 log-frequency bands from 30 Hz to 20 kHz). A broad level offset is removed because output volume is not the target.
+
+Each iteration measures the residual spectral curve, smooths it, limits the requested correction to +/-1.5 dB per pass and +/-6 dB total, and uses a short line search before accepting a B update. `_B_BEST` is the best spectral candidate found; `_B_REFINE` is accepted only if spectral-shape error improves by at least 0.25% and full-render NMSE does not regress by more than 5%.
+
+The older v2.1 A+P/K experiment is retained only as historical context below.
+
 
 Windows GUI utility that converts one Neural Amp Model (`.nam`) or batch-converts all `.nam` files in a selected folder into two CLO files per model:
 
 - `<name>_Ampero_2048.clo` — the 2048-coefficient VTSI generated through Hotone `HTUSBTools.dll`.
 - `<name>_GP200_1024.clo` — an experimental GP-200 compact serialization using the 1024-coefficient structure observed in the official Valeton editor.
 
-## v2.1.0 A+P/K spectral-response guard
+## Historical v2.1 A+P/K spectral-response guard
 
 v2.1 keeps the v2.0 joint Block-A + P/K search, but adds a second spectral metric designed to follow the broad transfer-function curve seen in external analysers. The metric uses the known 50-second stimulus as a reference, estimates Welch input/output power spectra at 4096 samples / 2048 hop, removes the stimulus spectral tilt, and collapses 30 Hz-20 kHz into 96 equal-log-frequency bands. Error is the mean absolute dB difference in response shape after removing one global level offset.
 

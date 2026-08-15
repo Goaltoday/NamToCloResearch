@@ -894,4 +894,257 @@ bool refineCloAPlusPk(const fs::path& inputClo2048,const fs::path& stimulusWav,c
     return true;
 }
 
+
+namespace {
+constexpr std::size_t kBShapeBands = 48;
+constexpr std::size_t kBShapeFft = 4096;
+constexpr std::size_t kBShapeHop = 2048;
+constexpr double kBShapeMinHz = 30.0;
+constexpr double kBShapeMaxHz = 20000.0;
+
+struct OutputSpectrumShape {
+    std::array<double,kBShapeBands> db{};
+    std::array<bool,kBShapeBands> valid{};
+};
+
+double bShapeBandHz(std::size_t i){
+    const double t=(static_cast<double>(i)+0.5)/static_cast<double>(kBShapeBands);
+    return kBShapeMinHz*std::pow(kBShapeMaxHz/kBShapeMinHz,t);
+}
+
+std::size_t bShapeBandForHz(double hz){
+    if(hz<=kBShapeMinHz) return 0;
+    if(hz>=kBShapeMaxHz) return kBShapeBands-1;
+    const double t=std::log(hz/kBShapeMinHz)/std::log(kBShapeMaxHz/kBShapeMinHz);
+    return std::min<std::size_t>(kBShapeBands-1,static_cast<std::size_t>(t*kBShapeBands));
+}
+
+OutputSpectrumShape outputSpectrumShape(const std::vector<float>& signal,double scale,std::size_t limitFrames){
+    OutputSpectrumShape r;
+    std::array<long double,kBShapeBands> power{};
+    std::array<std::size_t,kBShapeBands> count{};
+    const auto win=hannWindow(kBShapeFft);
+    std::vector<std::complex<float>> buf(kBShapeFft);
+    const std::size_t n=std::min(signal.size(),limitFrames);
+    if(n==0) return r;
+    for(std::size_t pos=0;pos<n;pos+=kBShapeHop){
+        std::fill(buf.begin(),buf.end(),std::complex<float>{});
+        const std::size_t used=std::min<std::size_t>(kBShapeFft,n-pos);
+        for(std::size_t i=0;i<used;++i) buf[i]=std::complex<float>(static_cast<float>(scale*signal[pos+i])*win[i],0.0f);
+        fft(buf,false);
+        for(std::size_t k=1;k<=kBShapeFft/2;++k){
+            const double hz=double(k)*double(kSampleRate)/double(kBShapeFft);
+            if(hz<kBShapeMinHz || hz>kBShapeMaxHz) continue;
+            const auto b=bShapeBandForHz(hz);
+            power[b]+=std::norm(buf[k]); ++count[b];
+        }
+    }
+    long double maxP=0.0L; for(auto v:power) maxP=std::max(maxP,v);
+    for(std::size_t b=0;b<kBShapeBands;++b){
+        if(count[b] && power[b]>maxP*1.0e-10L){
+            const double meanP=static_cast<double>(power[b]/static_cast<long double>(count[b]));
+            r.db[b]=10.0*std::log10(std::max(meanP,1.0e-30)); r.valid[b]=true;
+        }
+    }
+    return r;
+}
+
+double spectralShapeMae(const OutputSpectrumShape& candidate,const OutputSpectrumShape& target){
+    long double mean=0.0L; std::size_t used=0;
+    for(std::size_t b=0;b<kBShapeBands;++b){ if(candidate.valid[b]&&target.valid[b]){ mean+=candidate.db[b]-target.db[b]; ++used; } }
+    if(!used) return 0.0;
+    mean/=static_cast<long double>(used);
+    long double mae=0.0L;
+    for(std::size_t b=0;b<kBShapeBands;++b){ if(candidate.valid[b]&&target.valid[b]) mae+=std::abs((candidate.db[b]-target.db[b])-static_cast<double>(mean)); }
+    return static_cast<double>(mae/static_cast<long double>(used));
+}
+
+std::array<double,kBShapeBands> spectralResidualDb(const OutputSpectrumShape& candidate,const OutputSpectrumShape& target){
+    std::array<double,kBShapeBands> d{};
+    long double mean=0.0L; std::size_t used=0;
+    for(std::size_t b=0;b<kBShapeBands;++b){
+        if(candidate.valid[b]&&target.valid[b]){ d[b]=target.db[b]-candidate.db[b]; mean+=d[b]; ++used; }
+    }
+    const double m=used?static_cast<double>(mean/static_cast<long double>(used)):0.0;
+    for(std::size_t b=0;b<kBShapeBands;++b) d[b]-=m;
+    // Mild log-frequency smoothing. B is meant to correct the broad post-spectrum,
+    // not chase narrow FFT-bin details from one render.
+    auto src=d;
+    for(std::size_t b=0;b<kBShapeBands;++b){
+        double sum=0.0,w=0.0;
+        for(int j=-2;j<=2;++j){
+            const int bi=static_cast<int>(b)+j; if(bi<0||bi>=static_cast<int>(kBShapeBands)) continue;
+            const double ww=(j==0?3.0:(std::abs(j)==1?2.0:1.0)); sum+=ww*src[bi]; w+=ww;
+        }
+        d[b]=w?sum/w:src[b];
+    }
+    return d;
+}
+
+double interpBShapeDb(double hz,const std::array<double,kBShapeBands>& db){
+    if(hz<=bShapeBandHz(0)) return db[0];
+    if(hz>=bShapeBandHz(kBShapeBands-1)) return db[kBShapeBands-1];
+    const double x=std::log(std::max(hz,1.0));
+    for(std::size_t i=0;i+1<kBShapeBands;++i){
+        const double f0=bShapeBandHz(i), f1=bShapeBandHz(i+1);
+        if(hz<=f1){ const double t=(x-std::log(f0))/std::max(std::log(f1)-std::log(f0),1.0e-12); return db[i]+(db[i+1]-db[i])*t; }
+    }
+    return db.back();
+}
+
+std::vector<float> synthesizeB(const std::vector<float>& original,const std::array<double,kBShapeBands>& correctionDb){
+    const std::size_t N=nextPow2(std::max<std::size_t>(8192,original.size()*4));
+    std::vector<std::complex<float>> H(N);
+    for(std::size_t i=0;i<std::min(original.size(),N);++i) H[i]=std::complex<float>(original[i],0.0f);
+    fft(H,false);
+    for(std::size_t k=0;k<=N/2;++k){
+        const double hz=double(k)*double(kSampleRate)/double(N);
+        const double db=interpBShapeDb(std::clamp(hz,kBShapeMinHz,kBShapeMaxHz),correctionDb);
+        const float g=static_cast<float>(std::pow(10.0,db/20.0));
+        H[k]*=g; if(k>0&&k<N/2) H[N-k]*=g;
+    }
+    fft(H,true);
+    std::vector<float> out(original.size());
+    for(std::size_t i=0;i<out.size();++i) out[i]=H[i].real();
+    return out;
+}
+
+void renderWithB(const std::vector<float>& preB,const std::vector<float>& B,std::vector<float>& out){
+    FirFftPlan plan(B); plan.process(preB,out);
+}
+
+}
+
+bool refineCloBOnly(const fs::path& inputClo2048,const fs::path& stimulusWav,const fs::path& targetWav,
+                    const fs::path& outputClo2048,const fs::path& bestClo2048,const CloRefineConfig& config,
+                    CloRefineStats& stats,std::string& error,const RefineStatusCallback& status){
+    std::vector<std::uint8_t> bytes;
+    if(!readFileBytes(inputClo2048,bytes,error)) return false;
+    Model m; if(!parseModel(bytes,m,error)) return false;
+    if(m.B.size()<512){ error="v2.2 B-only refiner expects the Ampero 2048-tap Block B."; return false; }
+
+    std::vector<float> in,target;
+    if(!readMono44100(stimulusWav,in,error)||!readMono44100(targetWav,target,error)) return false;
+    const std::size_t n=std::min(in.size(),target.size());
+    if(n<static_cast<std::size_t>(kSampleRate)){ error="Not enough rendered audio for v2.2 B-only refinement."; return false; }
+    in.resize(n); target.resize(n);
+
+    if(status) status(L"v2.2 B-only: rendering fixed PRE + A + P/K + POST once...");
+    const auto aout=precomputeA(m,in,n);
+    std::vector<float> preB;
+    renderPreB(m,aout,m.pp,m.pn,m.kp,m.kn,preB);
+
+    std::vector<float> originalCandidate;
+    renderWithB(preB,m.B,originalCandidate);
+    const double fixedScale=fitScale(originalCandidate,target);
+    stats.outputScale=fixedScale;
+    stats.pPosBefore=m.pp; stats.pNegBefore=m.pn; stats.kPosBefore=m.kp; stats.kNegBefore=m.kn;
+    stats.pPosAfter=m.pp; stats.pNegAfter=m.pn; stats.kPosAfter=m.kp; stats.kNegAfter=m.kn;
+
+    const std::size_t split=std::min<std::size_t>(kStimulusFrames,n);
+    stats.originalNmse=nmseRange(originalCandidate,target,fixedScale,0,n);
+    stats.originalStimulusNmse=nmseRange(originalCandidate,target,fixedScale,0,split);
+    stats.originalTailNmse=nmseRange(originalCandidate,target,fixedScale,split,n);
+    const auto mrRef=buildMultiStftReference(target);
+    const auto envRef=buildMultiEnvelopeReference(target);
+    const auto levels=buildLevelReference(in);
+    stats.originalSpectralError=multiResolutionStftLoss(originalCandidate,fixedScale,mrRef);
+    stats.originalEnvelopeError=multiScaleEnvelopeError(originalCandidate,fixedScale,envRef);
+    const auto origLevels=levelNmse(originalCandidate,target,fixedScale,levels);
+    stats.originalLowLevelNmse=origLevels[0]; stats.originalMidLevelNmse=origLevels[1]; stats.originalHighLevelNmse=origLevels[2];
+
+    const auto targetShape=outputSpectrumShape(target,1.0,split);
+    const auto originalShape=outputSpectrumShape(originalCandidate,fixedScale,split);
+    const double originalShapeError=spectralShapeMae(originalShape,targetShape);
+    stats.originalResponseSpectralError=originalShapeError;
+
+    std::array<double,kBShapeBands> totalCorrection{};
+    std::vector<float> bestAudio=originalCandidate;
+    std::vector<float> bestB=m.B;
+    double bestShapeError=originalShapeError;
+    const int iterations=std::clamp(config.passes*2,6,12);
+
+    for(int it=0;it<iterations;++it){
+        if(status) status(L"v2.2 B-only spectral iteration "+std::to_wstring(it+1)+L"/"+std::to_wstring(iterations)+L"...");
+        const auto currentShape=outputSpectrumShape(bestAudio,fixedScale,split);
+        auto residual=spectralResidualDb(currentShape,targetShape);
+        for(auto& v:residual) v=std::clamp(v,-1.5,1.5);
+
+        bool found=false; double chosenError=bestShapeError; std::array<double,kBShapeBands> chosenCorr=totalCorrection; std::vector<float> chosenAudio,bCand;
+        for(double alpha : {0.25,0.5,0.75,1.0}){
+            auto testCorr=totalCorrection;
+            for(std::size_t b=0;b<kBShapeBands;++b) testCorr[b]=std::clamp(testCorr[b]+alpha*residual[b],-6.0,6.0);
+            auto testB=synthesizeB(m.B,testCorr);
+            std::vector<float> testAudio; renderWithB(preB,testB,testAudio);
+            const double e=spectralShapeMae(outputSpectrumShape(testAudio,fixedScale,split),targetShape);
+            if(std::isfinite(e) && e<chosenError*(1.0-1.0e-6)){
+                found=true; chosenError=e; chosenCorr=testCorr; chosenAudio=std::move(testAudio); bCand=std::move(testB);
+            }
+        }
+        if(!found) break;
+        const double rel=(bestShapeError-chosenError)/std::max(bestShapeError,1.0e-12);
+        bestShapeError=chosenError; totalCorrection=chosenCorr; bestAudio=std::move(chosenAudio); bestB=std::move(bCand);
+        if(rel<1.0e-4) break; // <0.01% relative improvement in one iteration
+    }
+
+    stats.searchedResponseSpectralError=bestShapeError;
+    stats.searchedResponseSpectralImprovementPercent=originalShapeError>0?100.0*(originalShapeError-bestShapeError)/originalShapeError:0.0;
+    stats.searchedNmse=nmseRange(bestAudio,target,fixedScale,0,n);
+    stats.searchedStimulusNmse=nmseRange(bestAudio,target,fixedScale,0,split);
+    stats.searchedTailNmse=nmseRange(bestAudio,target,fixedScale,split,n);
+    stats.searchedSpectralError=multiResolutionStftLoss(bestAudio,fixedScale,mrRef);
+    stats.searchedEnvelopeError=multiScaleEnvelopeError(bestAudio,fixedScale,envRef);
+    const auto bestLevels=levelNmse(bestAudio,target,fixedScale,levels);
+    stats.searchedLowLevelNmse=bestLevels[0]; stats.searchedMidLevelNmse=bestLevels[1]; stats.searchedHighLevelNmse=bestLevels[2];
+    auto imp=[](double a,double b){return a>0?100.0*(a-b)/a:0.0;};
+    stats.searchedNmseImprovementPercent=imp(stats.originalNmse,stats.searchedNmse);
+    stats.searchedStimulusImprovementPercent=imp(stats.originalStimulusNmse,stats.searchedStimulusNmse);
+    stats.searchedTailImprovementPercent=imp(stats.originalTailNmse,stats.searchedTailNmse);
+    stats.searchedSpectralImprovementPercent=imp(stats.originalSpectralError,stats.searchedSpectralError);
+    stats.searchedEnvelopeImprovementPercent=imp(stats.originalEnvelopeError,stats.searchedEnvelopeError);
+    stats.searchedLowLevelImprovementPercent=imp(stats.originalLowLevelNmse,bestLevels[0]);
+    stats.searchedMidLevelImprovementPercent=imp(stats.originalMidLevelNmse,bestLevels[1]);
+    stats.searchedHighLevelImprovementPercent=imp(stats.originalHighLevelNmse,bestLevels[2]);
+    stats.searchedComposite=bestShapeError/std::max(originalShapeError,kMetricEpsilon);
+    stats.searchedCompositeImprovementPercent=100.0*(1.0-stats.searchedComposite);
+    stats.searchedPPos=m.pp; stats.searchedPNeg=m.pn; stats.searchedKPos=m.kp; stats.searchedKNeg=m.kn;
+
+    // B is explicitly a post-nonlinearity spectral stage in our reconstructed CLO.
+    // Accept only when the direct output spectral shape improves materially; keep a
+    // loose temporal guard so B cannot obtain the match by destroying the waveform.
+    std::vector<std::string> failures;
+    if(!(bestShapeError<originalShapeError*0.9975)) failures.emplace_back("direct output spectral-shape error did not improve by at least 0.25%");
+    if(stats.searchedNmse>stats.originalNmse*1.05) failures.emplace_back("global NMSE regressed by more than 5%");
+    const bool accepted=failures.empty();
+    stats.searchedCandidateAccepted=accepted;
+    if(accepted) stats.searchedDecisionReason="accepted by v2.2 Block-B spectral gate";
+    else { for(std::size_t i=0;i<failures.size();++i){ if(i)stats.searchedDecisionReason+="; "; stats.searchedDecisionReason+=failures[i]; } }
+
+    const auto sb=le32(bytes.data()+0x80);
+    auto writeB=[&](std::vector<std::uint8_t>& d,const std::vector<float>& B){ for(std::size_t i=0;i<B.size();++i) putf(d.data()+kCoeffBase+4ull*(sb+i),B[i]); };
+    if(!bestClo2048.empty()){
+        auto b=bytes; writeB(b,bestB); if(!writeFileBytes(bestClo2048,b.data(),b.size(),error)) return false;
+    }
+    if(accepted) writeB(bytes,bestB);
+    if(!writeFileBytes(outputClo2048,bytes.data(),bytes.size(),error)) return false;
+
+    const bool finalIsBest=accepted;
+    stats.refinedNmse=finalIsBest?stats.searchedNmse:stats.originalNmse;
+    stats.refinedStimulusNmse=finalIsBest?stats.searchedStimulusNmse:stats.originalStimulusNmse;
+    stats.refinedTailNmse=finalIsBest?stats.searchedTailNmse:stats.originalTailNmse;
+    stats.refinedSpectralError=finalIsBest?stats.searchedSpectralError:stats.originalSpectralError;
+    stats.refinedEnvelopeError=finalIsBest?stats.searchedEnvelopeError:stats.originalEnvelopeError;
+    stats.refinedResponseSpectralError=finalIsBest?bestShapeError:originalShapeError;
+    stats.improved=accepted;
+    stats.improvementPercent=imp(stats.originalNmse,stats.refinedNmse);
+    stats.stimulusImprovementPercent=imp(stats.originalStimulusNmse,stats.refinedStimulusNmse);
+    stats.tailImprovementPercent=imp(stats.originalTailNmse,stats.refinedTailNmse);
+    stats.spectralImprovementPercent=imp(stats.originalSpectralError,stats.refinedSpectralError);
+    stats.envelopeImprovementPercent=imp(stats.originalEnvelopeError,stats.refinedEnvelopeError);
+    stats.responseSpectralImprovementPercent=imp(originalShapeError,stats.refinedResponseSpectralError);
+
+    if(status) status(L"v2.2 B-only complete. Direct output spectral-shape improvement: "+std::to_wstring(stats.searchedResponseSpectralImprovementPercent)+L"%; final gate: "+(accepted?L"ACCEPTED":L"REJECTED")+L".");
+    return true;
+}
+
 } // namespace ntc
