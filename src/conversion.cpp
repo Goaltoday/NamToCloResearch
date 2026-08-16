@@ -7,6 +7,7 @@
 #include <cwctype>
 
 #include <windows.h>
+#include <dbghelp.h>
 
 #include <chrono>
 #include <cstdint>
@@ -53,6 +54,7 @@ struct WorkerOptions {
     fs::path outputClo;
     std::wstring mappingName;
     fs::path diagnosticLog;
+    fs::path crashDump;
     int timeoutSeconds = kTimeoutSeconds;
 };
 
@@ -96,6 +98,113 @@ void appendDiagnostic(const fs::path& path, const std::string& text) noexcept {
         out << '[' << diagnosticTimestamp() << "][pid=" << GetCurrentProcessId() << "] " << text << "\r\n";
         out.flush();
     } catch (...) {}
+}
+
+
+fs::path gCrashDiagnosticLog;
+fs::path gCrashDumpPath;
+PVOID gVectoredHandler = nullptr;
+
+std::string exceptionModuleDiagnostic(void* address) {
+    MEMORY_BASIC_INFORMATION mbi{};
+    if (!address || VirtualQuery(address, &mbi, sizeof(mbi)) != sizeof(mbi)) return "module=<unknown>";
+    const auto module = static_cast<HMODULE>(mbi.AllocationBase);
+    wchar_t path[MAX_PATH * 4]{};
+    const DWORD n = GetModuleFileNameW(module, path, static_cast<DWORD>(sizeof(path) / sizeof(path[0])));
+    std::ostringstream os;
+    os << "module=" << (n ? pathToUtf8(fs::path(path)) : std::string("<unknown>"))
+       << " | moduleBase=0x" << std::hex << std::uppercase << reinterpret_cast<std::uintptr_t>(module);
+    return os.str();
+}
+
+bool writeCrashDump(EXCEPTION_POINTERS* ep) noexcept {
+    if (gCrashDumpPath.empty()) return false;
+    HANDLE file = CreateFileW(gCrashDumpPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        appendDiagnostic(gCrashDiagnosticLog, "CRASH: CreateFileW(dump) failed: " + win32ErrorMessage(GetLastError()));
+        return false;
+    }
+    MINIDUMP_EXCEPTION_INFORMATION mei{};
+    mei.ThreadId = GetCurrentThreadId();
+    mei.ExceptionPointers = ep;
+    mei.ClientPointers = FALSE;
+    const auto type = static_cast<MINIDUMP_TYPE>(
+        MiniDumpNormal |
+        MiniDumpWithDataSegs |
+        MiniDumpWithHandleData |
+        MiniDumpWithThreadInfo |
+        MiniDumpWithUnloadedModules |
+        MiniDumpWithIndirectlyReferencedMemory |
+        MiniDumpScanMemory);
+    const BOOL ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type,
+                                      ep ? &mei : nullptr, nullptr, nullptr);
+    const DWORD err = ok ? ERROR_SUCCESS : GetLastError();
+    CloseHandle(file);
+    if (!ok) {
+        appendDiagnostic(gCrashDiagnosticLog, "CRASH: MiniDumpWriteDump failed: " + win32ErrorMessage(err));
+        return false;
+    }
+    appendDiagnostic(gCrashDiagnosticLog, "CRASH: minidump written: " + pathToUtf8(gCrashDumpPath));
+    return true;
+}
+
+LONG WINAPI workerVectoredExceptionHandler(EXCEPTION_POINTERS* ep) {
+    if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
+    const auto code = ep->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION &&
+        code != EXCEPTION_STACK_OVERFLOW && code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    std::ostringstream os;
+    os << "CRASH VEH: code=" << hex32(code)
+       << " | thread=" << GetCurrentThreadId()
+       << " | address=0x" << std::hex << std::uppercase
+       << reinterpret_cast<std::uintptr_t>(ep->ExceptionRecord->ExceptionAddress)
+       << " | " << exceptionModuleDiagnostic(ep->ExceptionRecord->ExceptionAddress);
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
+        const auto op = ep->ExceptionRecord->ExceptionInformation[0];
+        const auto target = ep->ExceptionRecord->ExceptionInformation[1];
+        os << " | operation=" << (op == 0 ? "read" : (op == 1 ? "write" : (op == 8 ? "execute" : "unknown")))
+           << " | target=0x" << std::hex << std::uppercase << target;
+    }
+    appendDiagnostic(gCrashDiagnosticLog, os.str());
+    writeCrashDump(ep);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+LONG WINAPI workerUnhandledExceptionFilter(EXCEPTION_POINTERS* ep) {
+    if (ep && ep->ExceptionRecord) {
+        appendDiagnostic(gCrashDiagnosticLog, "CRASH UEF: unhandled exception code=" + hex32(ep->ExceptionRecord->ExceptionCode));
+    } else {
+        appendDiagnostic(gCrashDiagnosticLog, "CRASH UEF: unhandled exception (no exception record)");
+    }
+    writeCrashDump(ep);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+void installWorkerCrashDiagnostics(const WorkerOptions& options) {
+    gCrashDiagnosticLog = options.diagnosticLog;
+    gCrashDumpPath = options.crashDump;
+    SetUnhandledExceptionFilter(workerUnhandledExceptionFilter);
+    gVectoredHandler = AddVectoredExceptionHandler(1, workerVectoredExceptionHandler);
+    appendDiagnostic(options.diagnosticLog, "WORKER [0]: crash diagnostics installed; dump=" + pathToUtf8(options.crashDump));
+
+    SYSTEM_INFO si{};
+    GetNativeSystemInfo(&si);
+    OSVERSIONINFOW vi{};
+    vi.dwOSVersionInfoSize = sizeof(vi);
+#pragma warning(push)
+#pragma warning(disable:4996)
+    GetVersionExW(&vi);
+#pragma warning(pop)
+    std::ostringstream os;
+    os << "WORKER ENV: Windows=" << vi.dwMajorVersion << '.' << vi.dwMinorVersion << " build=" << vi.dwBuildNumber
+       << " | arch=" << si.wProcessorArchitecture << " | CPUs=" << si.dwNumberOfProcessors
+       << " | pageSize=" << si.dwPageSize;
+    appendDiagnostic(options.diagnosticLog, os.str());
+    appendDiagnostic(options.diagnosticLog, std::string("WORKER ENV: PF_XMMI64_INSTRUCTIONS_AVAILABLE=") +
+        (IsProcessorFeaturePresent(PF_XMMI64_INSTRUCTIONS_AVAILABLE) ? "yes" : "no"));
 }
 
 std::string fileDiagnostic(const fs::path& p) {
@@ -186,6 +295,7 @@ std::wstring makeWorkerCommandLine(const WorkerOptions& w) {
         L"--clo", w.outputClo.wstring(),
         L"--mapping", w.mappingName,
         L"--diag", w.diagnosticLog.wstring(),
+        L"--dump", w.crashDump.wstring(),
         L"--timeout", std::to_wstring(w.timeoutSeconds)
     };
     std::wstring cmd;
@@ -204,6 +314,7 @@ int launchWorker(const WorkerOptions& worker, SharedBuffer& shared, bool& captur
     appendDiagnostic(worker.diagnosticLog, "PARENT: input NAM: " + fileDiagnostic(worker.inputNam));
     appendDiagnostic(worker.diagnosticLog, "PARENT: output WAV: " + pathToUtf8(worker.outputWav));
     appendDiagnostic(worker.diagnosticLog, "PARENT: output CLO: " + pathToUtf8(worker.outputClo));
+    appendDiagnostic(worker.diagnosticLog, "PARENT: crash dump: " + pathToUtf8(worker.crashDump));
     std::wstring command = makeWorkerCommandLine(worker);
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
@@ -236,6 +347,7 @@ int launchWorker(const WorkerOptions& worker, SharedBuffer& shared, bool& captur
     CloseHandle(pi.hProcess);
 
     appendDiagnostic(worker.diagnosticLog, "PARENT: worker exit code=" + hex32(exitCode));
+    appendDiagnostic(worker.diagnosticLog, "PARENT: crash dump after worker: " + fileDiagnostic(worker.crashDump));
     const std::size_t changed = changedByteCount(shared.view);
     capturedValid = startsWithVtsi(shared.view) && changed > 0;
     appendDiagnostic(worker.diagnosticLog, "PARENT: shared buffer changed bytes=" + std::to_string(changed) + ", VTSI=" + (startsWithVtsi(shared.view) ? std::string("yes") : std::string("no")));
@@ -307,6 +419,7 @@ bool parseWorker(int argc, wchar_t** argv, WorkerOptions& w) {
         else if (a == L"--clo" && has(i)) w.outputClo = argv[++i];
         else if (a == L"--mapping" && has(i)) w.mappingName = argv[++i];
         else if (a == L"--diag" && has(i)) w.diagnosticLog = argv[++i];
+        else if (a == L"--dump" && has(i)) w.crashDump = argv[++i];
         else if (a == L"--timeout" && has(i)) {
             const auto v = positiveInt(argv[++i]); if (!v) return false; w.timeoutSeconds = *v;
         } else return false;
@@ -441,6 +554,7 @@ bool prepareA2FullModel(const fs::path& inputNam, const fs::path& workDir,
 }
 
 int runWorker(const WorkerOptions& options) {
+    installWorkerCrashDiagnostics(options);
     appendDiagnostic(options.diagnosticLog, "WORKER [1]: started");
     appendDiagnostic(options.diagnosticLog, "WORKER [2]: DLL before LoadLibraryExW: " + fileDiagnostic(options.dll));
     appendDiagnostic(options.diagnosticLog, "WORKER: input WAV: " + fileDiagnostic(options.inputWav));
@@ -616,6 +730,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     worker.inputNam = work / L"input.nam";
     worker.outputClo = work / L"ampero_2048.clo";
     worker.diagnosticLog = diagnosticLog;
+    worker.crashDump = uniquePath(outDir / (inputNam.stem().wstring() + L"_HTUSBTools_CRASH.dmp"));
 
     std::string error;
     const std::wstring stimulusStatus = std::wstring(L"Preparing stimulus: ") + stimulusModeDisplayName(stimulus.mode);
@@ -696,6 +811,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
             refineWorker.inputNam = worker.inputNam;
             refineWorker.outputClo = work / L"refine_unused_2048.clo";
             refineWorker.diagnosticLog = diagnosticLog;
+            refineWorker.crashDump = worker.crashDump;
             appendDiagnostic(diagnosticLog, "=== SECOND HTUSBTools PASS: matched-input refinement render ===");
 
             SharedBuffer refineShared;
