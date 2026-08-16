@@ -1,6 +1,9 @@
-# NAM to CLO v2.6.7
+# NAM to CLO v2.6.7-DIAG
 
-## v2.6.7 — matched-input refinement
+## v2.6.7-DIAG — HTUSBTools crash diagnostic build
+
+This diagnostic build is functionally based on the validated v2.6.7 matched-input refinement version. It adds persistent stage-by-stage logs around both HTUSBTools worker invocations so that a Windows 0xC0000005 crash can be localized without changing the conversion algorithm. See `DIAGNOSTIC_HTUSBTOOLS.md`.
+
 
 This version is based directly on v2.6.6.1. The abandoned v2.6.7 branch that compared an unrelated external target WAV directly is not included.
 
