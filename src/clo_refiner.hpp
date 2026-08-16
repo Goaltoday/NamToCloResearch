@@ -10,6 +10,9 @@ namespace fs = std::filesystem;
 struct CloRefineConfig {
     bool enabled = false;
     int passes = 4;
+    // Optional Tone Match target. When empty, HTUSBTools' own NAM render is used.
+    // When provided, the final 20 seconds of this WAV are used as the target.
+    fs::path targetWav;
 };
 
 struct CloRefineStats {

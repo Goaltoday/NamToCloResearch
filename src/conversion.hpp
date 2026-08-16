@@ -28,11 +28,7 @@ struct ConversionResult {
     fs::path inputNam;
     fs::path ampero2048;
     fs::path gp2001024;
-    fs::path refinedAmpero2048;
     fs::path refinedGp2001024;
-    fs::path bestAmpero2048;
-    fs::path bestGp2001024;
-    CloRefineStats refineStats{};
 };
 
 struct BatchConversionResult {

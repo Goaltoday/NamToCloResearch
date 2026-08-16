@@ -41,6 +41,8 @@ constexpr int IDC_APPLY_CORRECTIVE_IR = 118;
 constexpr int IDC_CORRECTIVE_IR_PATH = 119;
 constexpr int IDC_BROWSE_CORRECTIVE_IR = 120;
 constexpr int IDC_REFINE_CLO = 121;
+constexpr int IDC_REFINE_TARGET_PATH = 122;
+constexpr int IDC_BROWSE_REFINE_TARGET = 123;
 
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
@@ -88,6 +90,8 @@ HWND gCorrectiveCheck = nullptr;
 HWND gCorrectiveEdit = nullptr;
 HWND gBrowseCorrectiveButton = nullptr;
 HWND gRefineCheck = nullptr;
+HWND gRefineTargetEdit = nullptr;
+HWND gBrowseRefineTargetButton = nullptr;
 HWND gVersion = nullptr;
 HWND gInfo = nullptr;
 HWND gSubtitle = nullptr;
@@ -194,6 +198,10 @@ void enableControls(bool enable) {
     EnableWindow(gTailCombo, enable);
     EnableWindow(gCorrectiveCheck, enable);
     EnableWindow(gRefineCheck, enable);
+    if (!enable) {
+        EnableWindow(gRefineTargetEdit, FALSE);
+        EnableWindow(gBrowseRefineTargetButton, FALSE);
+    }
     if (!enable) {
         EnableWindow(gCustomStimulusEdit, FALSE);
         EnableWindow(gBrowseCustomStimulusButton, FALSE);
@@ -345,6 +353,19 @@ void chooseCorrectiveIr(HWND owner) {
     if (GetOpenFileNameW(&ofn)) setText(gCorrectiveEdit, fs::path(file).wstring());
 }
 
+void chooseRefineTarget(HWND owner) {
+    wchar_t file[32768]{};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"Tone Match target WAV (*.wav)\0*.wav\0All files (*.*)\0*.*\0";
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(file));
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrDefExt = L"wav";
+    if (GetOpenFileNameW(&ofn)) setText(gRefineTargetEdit, fs::path(file).wstring());
+}
+
 ntc::TailMode selectedTailMode() {
     return SendMessageW(gTailCombo, CB_GETCURSEL, 0, 0) == 1
         ? ntc::TailMode::RecordedAudio
@@ -367,6 +388,10 @@ void updateTailControls() {
     const bool correctiveEnabled = SendMessageW(gCorrectiveCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     EnableWindow(gCorrectiveEdit, correctiveEnabled ? TRUE : FALSE);
     EnableWindow(gBrowseCorrectiveButton, correctiveEnabled ? TRUE : FALSE);
+
+    const bool refineEnabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    EnableWindow(gRefineTargetEdit, refineEnabled ? TRUE : FALSE);
+    EnableWindow(gBrowseRefineTargetButton, refineEnabled ? TRUE : FALSE);
 }
 
 void postStatus(HWND hwnd, const std::wstring& s) {
@@ -413,6 +438,7 @@ void startConversion(HWND hwnd) {
     ntc::CloRefineConfig refine;
     refine.enabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     refine.passes = 4;
+    refine.targetWav = fs::path(getText(gRefineTargetEdit));
 
     enableControls(false);
     if (gInputMode == InputMode::SingleNam) {
@@ -456,7 +482,7 @@ void computeLayout(int clientW, int clientH) {
     gUi.sectionTail = RECT{ margin, y, clientW - margin, y + 66 }; y += 66 + gap;
     gUi.sectionRecorded = RECT{ margin, y, clientW - margin, y + 105 }; y += 105 + gap;
     gUi.sectionCorrective = RECT{ margin, y, clientW - margin, y + 86 }; y += 86 + gap;
-    gUi.sectionRefine = RECT{ margin, y, clientW - margin, y + 68 }; y += 68 + gap;
+    gUi.sectionRefine = RECT{ margin, y, clientW - margin, y + 108 }; y += 108 + gap;
     gUi.buttonArea = RECT{ margin, y, clientW - margin, y + 38 };
     gUi.footer = RECT{ 0, clientH - footerH, clientW, clientH };
     gUi.infoBox = RECT{ gUi.sectionRecorded.left + 108, gUi.sectionRecorded.top + 62,
@@ -513,8 +539,12 @@ void layoutControls(HWND hwnd) {
     moveCtrl(gCorrectiveEdit, correctiveEditX, gUi.sectionCorrective.top + 29, correctiveEditW, 28);
     moveCtrl(gBrowseCorrectiveButton, gUi.sectionCorrective.right - sectionRightInset - 124, gUi.sectionCorrective.top + 27, 124, 32);
 
-    moveCtrl(GetDlgItem(hwnd, 1009), contentX, gUi.sectionRefine.top + 7, 280, 22);
-    moveCtrl(gRefineCheck, contentX, gUi.sectionRefine.top + 34, 560, 24);
+    moveCtrl(GetDlgItem(hwnd, 1009), contentX, gUi.sectionRefine.top + 7, 360, 22);
+    moveCtrl(gRefineCheck, contentX, gUi.sectionRefine.top + 32, 560, 24);
+    moveCtrl(GetDlgItem(hwnd, 1010), contentX, gUi.sectionRefine.top + 58, 430, 20);
+    const int refineTargetEditW = (gUi.sectionRefine.right - sectionRightInset - 124 - 8) - contentX;
+    moveCtrl(gRefineTargetEdit, contentX, gUi.sectionRefine.top + 78, refineTargetEditW, 28);
+    moveCtrl(gBrowseRefineTargetButton, gUi.sectionRefine.right - sectionRightInset - 124, gUi.sectionRefine.top + 76, 124, 32);
 
     const int center = rc.right / 2;
     moveCtrl(gConvertButton, center - 222, gUi.buttonArea.top, 200, 36);
@@ -551,6 +581,7 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
     createSectionLabel(hwnd, 1008, L"Corrective IR");
     createSectionLabel(hwnd, 1009, L"CLO refinement (VST-style Tone Match - final 20 s)");
+    createSectionLabel(hwnd, 1010, L"Tone Match target WAV (optional; blank = NAM render)");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                  0, 0, 100, 30, hwnd, controlId(IDC_INPUT_PATH), nullptr, nullptr);
@@ -612,10 +643,17 @@ void createUi(HWND hwnd) {
                                              WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                              0, 0, 120, 34, hwnd, controlId(IDC_BROWSE_CORRECTIVE_IR), nullptr, nullptr);
 
-    gRefineCheck = CreateWindowW(L"BUTTON", L"Refine Block B spectrum against NAM render (slow)",
+    gRefineCheck = CreateWindowW(L"BUTTON", L"Refine Block B spectrum with Tone Match (slow)",
                                  WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                                  0, 0, 520, 24, hwnd, controlId(IDC_REFINE_CLO), nullptr, nullptr);
     applyFont(gRefineCheck);
+    gRefineTargetEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
+                                        0, 0, 100, 30, hwnd, controlId(IDC_REFINE_TARGET_PATH), nullptr, nullptr);
+    applyFont(gRefineTargetEdit);
+    gBrowseRefineTargetButton = CreateWindowW(L"BUTTON", L"Browse WAV...",
+                                               WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                               0, 0, 124, 32, hwnd, controlId(IDC_BROWSE_REFINE_TARGET), nullptr, nullptr);
 
     gInfo = CreateWindowW(L"STATIC",
                           L"CLO files will be created as Mono, PCM16, 44.1 kHz.\r\n"
@@ -813,7 +851,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (ctrl == gSubtitle || ctrl == GetDlgItem(hwnd, 1001)
             || ctrl == GetDlgItem(hwnd, 1002) || ctrl == GetDlgItem(hwnd, 1003) || ctrl == GetDlgItem(hwnd, 1004)
             || ctrl == GetDlgItem(hwnd, 1005) || ctrl == GetDlgItem(hwnd, 1006) || ctrl == GetDlgItem(hwnd, 1007)
-            || ctrl == GetDlgItem(hwnd, 1008) || ctrl == GetDlgItem(hwnd, 1009)) {
+            || ctrl == GetDlgItem(hwnd, 1008) || ctrl == GetDlgItem(hwnd, 1009) || ctrl == GetDlgItem(hwnd, 1010)) {
             SetTextColor(hdc, ctrl == gSubtitle ? kColorSubtleText : kColorText);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
@@ -839,7 +877,11 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_BROWSE_RECORDED: chooseRecordedAudio(hwnd); return 0;
         case IDC_BROWSE_CUSTOM_STIMULUS: chooseCustomStimulus(hwnd); return 0;
         case IDC_BROWSE_CORRECTIVE_IR: chooseCorrectiveIr(hwnd); return 0;
+        case IDC_BROWSE_REFINE_TARGET: chooseRefineTarget(hwnd); return 0;
         case IDC_APPLY_CORRECTIVE_IR:
+            if (HIWORD(wParam) == BN_CLICKED) updateTailControls();
+            return 0;
+        case IDC_REFINE_CLO:
             if (HIWORD(wParam) == BN_CLICKED) updateTailControls();
             return 0;
         case IDC_STIMULUS_MODE:
@@ -877,44 +919,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (r && r->ok) {
             std::wstring resultMessage = L"Conversion complete.\r\n\r\nAmpero 2048:\r\n" + r->ampero2048.wstring()
                                       + L"\r\n\r\nGP-200 1024:\r\n" + r->gp2001024.wstring();
-            if (!r->refinedAmpero2048.empty()) {
-                resultMessage += L"\r\n\r\nBEST Block-B Ampero 2048 (VST tail tone-match candidate):\r\n" + r->bestAmpero2048.wstring()
-                              + L"\r\n\r\nBEST Block-B GP-200 1024 (VST tail tone-match candidate):\r\n" + r->bestGp2001024.wstring()
-                              + L"\r\n\r\nRefined Ampero 2048:\r\n" + r->refinedAmpero2048.wstring()
-                              + L"\r\n\r\nRefined GP-200 1024:\r\n" + r->refinedGp2001024.wstring()
-                              + L"\r\n\r\nBlock-B full-render NMSE improvement: "
-                              + std::to_wstring(r->refineStats.improvementPercent) + L"%"
-                              + L"\r\nStimulus (first 50 s): "
-                              + std::to_wstring(r->refineStats.stimulusImprovementPercent) + L"%"
-                              + L"\r\nTail (remaining audio): "
-                              + std::to_wstring(r->refineStats.tailImprovementPercent) + L"%"
-                              + L"\r\nMR-STFT (512/2048/8192): "
-                              + std::to_wstring(r->refineStats.spectralImprovementPercent) + L"%"
-                              + L"\r\nEnvelope RMS (256/2048/8192): "
-                              + std::to_wstring(r->refineStats.envelopeImprovementPercent) + L"%"
-                              + L"\r\n\r\n--- VST-style Tone Match diagnostics (final 20 s) ---"
-                              + L"\r\nBest searched candidate: "
-                              + std::wstring(r->refineStats.searchedCandidateAccepted ? L"ACCEPTED" : L"REJECTED")
-                              + L"\r\nVST final-20-s tone-match error improvement: "
-                              + std::to_wstring(r->refineStats.searchedResponseSpectralImprovementPercent) + L"%"
-                              + L"\r\nBest searched NMSE improvement: "
-                              + std::to_wstring(r->refineStats.searchedNmseImprovementPercent) + L"%"
-                              + L"\r\nBest searched MR-STFT improvement: "
-                              + std::to_wstring(r->refineStats.searchedSpectralImprovementPercent) + L"%"
-                              + L"\r\nBest searched envelope improvement: "
-                              + std::to_wstring(r->refineStats.searchedEnvelopeImprovementPercent) + L"%"
-                              + L"\r\nLow / Mid / High NMSE improvement: "
-                              + std::to_wstring(r->refineStats.searchedLowLevelImprovementPercent) + L"% / "
-                              + std::to_wstring(r->refineStats.searchedMidLevelImprovementPercent) + L"% / "
-                              + std::to_wstring(r->refineStats.searchedHighLevelImprovementPercent) + L"%"
-                              + L"\r\n\r\nAbsolute metrics (original -> BEST):"
-                              + L"\r\nVST final-20-s weighted correction RMSE (dB): " + std::to_wstring(r->refineStats.originalResponseSpectralError) + L" -> " + std::to_wstring(r->refineStats.searchedResponseSpectralError)
-                              + L"\r\nNMSE: " + std::to_wstring(r->refineStats.originalNmse) + L" -> " + std::to_wstring(r->refineStats.searchedNmse)
-                              + L"\r\nMR-STFT: " + std::to_wstring(r->refineStats.originalSpectralError) + L" -> " + std::to_wstring(r->refineStats.searchedSpectralError)
-                              + L"\r\nDecision: " + ntc::fromUtf8(r->refineStats.searchedDecisionReason)
-                              + L"\r\n\r\nNote: the current refiner uses the SOURCE_latest_19-style RAW TARGET-SOURCE analysis on the final 20 s, generates a 2048-sample minimum-phase auto_tonematch_ir.wav, and applies it through the existing Corrective IR path. This is VST-style, not yet a bit/exact replica of the VST export solver.";
+            if (!r->refinedGp2001024.empty()) {
+                resultMessage += L"\r\n\r\nRefined GP-200 1024:\r\n" + r->refinedGp2001024.wstring();
             }
-            setText(gStatus, L"Done. Two CLO files were generated successfully.");
+            setText(gStatus, r->refinedGp2001024.empty() ? L"Done. Two CLO files were generated successfully." : L"Done. Three CLO files were generated successfully.");
             const std::wstring doneTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;
             MessageBoxW(hwnd, resultMessage.c_str(), doneTitle.c_str(), MB_ICONINFORMATION | MB_OK);
         } else {
@@ -990,7 +998,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     const std::wstring windowTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;
     HWND hwnd = CreateWindowExW(0, kClassName, windowTitle.c_str(),
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 870,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 915,
                                 nullptr, nullptr, instance, nullptr);
     if (!hwnd) { CoUninitialize(); return 1; }
     ShowWindow(hwnd, show);

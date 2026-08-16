@@ -464,41 +464,35 @@ bool refineCloBOnly(const fs::path& inputClo2048,
     std::vector<float> in, target;
     if (!readMono44100(stimulusWav, in, error) || !readMono44100(targetWav, target, error)) return false;
 
-    const std::size_t n = std::min(in.size(), target.size());
     const std::size_t tailFrames = 20u * kSampleRate;
-    if (n < tailFrames + kV26Fft) {
-        error = "Not enough audio for final-20-s Tone Match";
+    if (in.size() < tailFrames + kV26Fft) {
+        error = "The conversion stimulus is too short for the final-20-s Tone Match";
         return false;
     }
-    in.resize(n);
-    target.resize(n);
-    const std::size_t tailStart = n - tailFrames;
+    if (target.size() < tailFrames) {
+        error = "The refinement target WAV must contain at least 20.000 seconds of audio";
+        return false;
+    }
 
-    if (status) status(L"Rendering official CLO for VST-style final-20-s Tone Match...");
-    auto aout = precomputeA(m, in, n);
+    if (status) status(L"Rendering CLO for VST-style Tone Match...");
+    auto aout = precomputeA(m, in, in.size());
     std::vector<float> preB, orig;
     renderPreB(m, aout, m.pp, m.pn, m.kp, m.kn, preB);
     renderWithB(preB, m.B, orig);
 
-    const double fixedScale = fitScale(orig, target);
+    // Tone Match is always performed on the last 20 seconds of each signal.
+    // This lets an external 20-second (or longer) WAV be used as the target
+    // without requiring it to contain the preceding 50-second stimulus.
+    const std::size_t sourceStart = orig.size() - tailFrames;
+    const std::size_t targetStart = target.size() - tailFrames;
+    std::vector<float> sourceTail(orig.begin() + static_cast<std::ptrdiff_t>(sourceStart), orig.end());
+    std::vector<float> targetTail(target.begin() + static_cast<std::ptrdiff_t>(targetStart), target.end());
+
+    const double fixedScale = fitScale(sourceTail, targetTail);
     stats.outputScale = fixedScale;
-    const std::size_t split = std::min<std::size_t>(n, 50u * kSampleRate);
-    stats.originalNmse = nmseRange(orig, target, fixedScale, 0, n);
-    stats.originalStimulusNmse = nmseRange(orig, target, fixedScale, 0, split);
-    stats.originalTailNmse = nmseRange(orig, target, fixedScale, split, n);
 
-    const auto mr = buildMultiStftReference(target);
-    const auto env = buildMultiEnvelopeReference(target);
-    const auto levels = buildLevelReference(in);
-    stats.originalSpectralError = multiResolutionStftLoss(orig, fixedScale, mr);
-    stats.originalEnvelopeError = multiScaleEnvelopeError(orig, fixedScale, env);
-    const auto originalLevels = levelNmse(orig, target, fixedScale, levels);
-    stats.originalLowLevelNmse = originalLevels[0];
-    stats.originalMidLevelNmse = originalLevels[1];
-    stats.originalHighLevelNmse = originalLevels[2];
-
-    const auto sourceProfile = v26analyse(orig, fixedScale, tailStart, tailFrames);
-    const auto targetProfile = v26analyse(target, 1.0, tailStart, tailFrames);
+    const auto sourceProfile = v26analyse(sourceTail, fixedScale, 0, tailFrames);
+    const auto targetProfile = v26analyse(targetTail, 1.0, 0, tailFrames);
     const auto comparison = v26compare(sourceProfile, targetProfile);
     if (!comparison.valid()) {
         error = "Tone Match comparison invalid";
@@ -512,10 +506,12 @@ bool refineCloBOnly(const fs::path& inputClo2048,
     const fs::path irPath = bestClo2048.parent_path() / L"auto_tonematch_ir.wav";
     if (!v26writeFloatWav(irPath, ir, error)) return false;
 
-    if (status) status(L"Applying generated auto_tonematch_ir.wav through the existing Corrective IR path...");
+    if (status) status(L"Applying Tone Match correction to Block B...");
     CorrectiveIrStats correctionStats;
     const fs::path applied = bestClo2048.parent_path() / L"v26_applied.clo";
-    if (!applyCorrectiveIrToClo(inputClo2048, irPath, applied, correctionStats, error)) return false;
+    // Refinement intentionally uses 0 dB post gain; the historical manual
+    // Corrective IR path keeps its own -6 dB default.
+    if (!applyCorrectiveIrToClo(inputClo2048, irPath, applied, correctionStats, error, 0.0)) return false;
 
     std::vector<std::uint8_t> appliedBytes;
     if (!readFileBytes(applied, appliedBytes, error)) return false;
@@ -524,61 +520,33 @@ bool refineCloBOnly(const fs::path& inputClo2048,
 
     std::vector<float> candidate;
     renderWithB(preB, appliedModel.B, candidate);
+    std::vector<float> candidateTail(candidate.begin() + static_cast<std::ptrdiff_t>(sourceStart), candidate.end());
 
-    const auto candidateProfile = v26analyse(candidate, fixedScale, tailStart, tailFrames);
+    const auto candidateProfile = v26analyse(candidateTail, fixedScale, 0, tailFrames);
     const auto candidateComparison = v26compare(candidateProfile, targetProfile);
     const double after = v26toneError(candidateComparison);
     const auto improvement = [](double a, double b) { return a > 0.0 ? 100.0 * (a - b) / a : 0.0; };
-
     stats.searchedResponseSpectralError = after;
     stats.searchedResponseSpectralImprovementPercent = improvement(before, after);
-    stats.searchedNmse = nmseRange(candidate, target, fixedScale, 0, n);
-    stats.searchedStimulusNmse = nmseRange(candidate, target, fixedScale, 0, split);
-    stats.searchedTailNmse = nmseRange(candidate, target, fixedScale, split, n);
-    stats.searchedSpectralError = multiResolutionStftLoss(candidate, fixedScale, mr);
-    stats.searchedEnvelopeError = multiScaleEnvelopeError(candidate, fixedScale, env);
 
-    const auto candidateLevels = levelNmse(candidate, target, fixedScale, levels);
-    stats.searchedLowLevelNmse = candidateLevels[0];
-    stats.searchedMidLevelNmse = candidateLevels[1];
-    stats.searchedHighLevelNmse = candidateLevels[2];
-    stats.searchedNmseImprovementPercent = improvement(stats.originalNmse, stats.searchedNmse);
-    stats.searchedStimulusImprovementPercent = improvement(stats.originalStimulusNmse, stats.searchedStimulusNmse);
-    stats.searchedTailImprovementPercent = improvement(stats.originalTailNmse, stats.searchedTailNmse);
-    stats.searchedSpectralImprovementPercent = improvement(stats.originalSpectralError, stats.searchedSpectralError);
-    stats.searchedEnvelopeImprovementPercent = improvement(stats.originalEnvelopeError, stats.searchedEnvelopeError);
-    stats.searchedLowLevelImprovementPercent = improvement(stats.originalLowLevelNmse, candidateLevels[0]);
-    stats.searchedMidLevelImprovementPercent = improvement(stats.originalMidLevelNmse, candidateLevels[1]);
-    stats.searchedHighLevelImprovementPercent = improvement(stats.originalHighLevelNmse, candidateLevels[2]);
-    stats.searchedCompositeImprovementPercent = stats.searchedResponseSpectralImprovementPercent;
-
+    // Keep an internal candidate copy for validation/debugging only. It is not
+    // exported to the user's output folder.
     if (!copyFileCreatingParents(applied, bestClo2048, error)) return false;
 
     const bool accepted = after < before;
     stats.searchedCandidateAccepted = accepted;
+    stats.improved = accepted;
+    stats.refinedResponseSpectralError = accepted ? after : before;
+    stats.responseSpectralImprovementPercent = improvement(before, stats.refinedResponseSpectralError);
     if (accepted) {
         if (!copyFileCreatingParents(applied, outputClo2048, error)) return false;
-        stats.searchedDecisionReason = "VST-style final-20-s Tone Match error improved";
+        stats.searchedDecisionReason = "Tone Match target improved";
     } else {
         if (!copyFileCreatingParents(inputClo2048, outputClo2048, error)) return false;
-        stats.searchedDecisionReason = "Rejected: final-20-s VST-style Tone Match error did not improve after Corrective IR application";
+        stats.searchedDecisionReason = "Tone Match candidate rejected";
     }
 
-    stats.refinedNmse = accepted ? stats.searchedNmse : stats.originalNmse;
-    stats.refinedStimulusNmse = accepted ? stats.searchedStimulusNmse : stats.originalStimulusNmse;
-    stats.refinedTailNmse = accepted ? stats.searchedTailNmse : stats.originalTailNmse;
-    stats.refinedSpectralError = accepted ? stats.searchedSpectralError : stats.originalSpectralError;
-    stats.refinedEnvelopeError = accepted ? stats.searchedEnvelopeError : stats.originalEnvelopeError;
-    stats.refinedResponseSpectralError = accepted ? after : before;
-    stats.improved = accepted;
-    stats.improvementPercent = improvement(stats.originalNmse, stats.refinedNmse);
-    stats.stimulusImprovementPercent = improvement(stats.originalStimulusNmse, stats.refinedStimulusNmse);
-    stats.tailImprovementPercent = improvement(stats.originalTailNmse, stats.refinedTailNmse);
-    stats.spectralImprovementPercent = improvement(stats.originalSpectralError, stats.refinedSpectralError);
-    stats.envelopeImprovementPercent = improvement(stats.originalEnvelopeError, stats.refinedEnvelopeError);
-    stats.responseSpectralImprovementPercent = improvement(before, stats.refinedResponseSpectralError);
-
-    if (status) status(L"VST-style Tone Match refinement complete; auto_tonematch_ir.wav generated and passed through the existing Corrective IR pipeline.");
+    if (status) status(L"CLO refinement complete.");
     return true;
 }
 

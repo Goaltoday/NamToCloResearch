@@ -546,36 +546,37 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
         return result;
     }
 
-    // Preserve the existing conversion path. Refinement is an optional,
-    // additional research output generated from the raw official Ampero B2048
-    // model and HTUSBTools' own rendered NAM target.
+    // Optional Block-B Tone Match refinement. By default the target is the
+    // NAM render produced by HTUSBTools. The user can instead provide an
+    // external WAV; in either case the final 20 seconds are compared.
     fs::path refinedWorkClo;
     fs::path bestWorkClo;
+    CloRefineStats refineStats{};
     if (refine.enabled) {
-        report(status, L"VST-style CAB Tone Match refinement on final 20 seconds...");
-        refinedWorkClo = work / L"ampero_2048_VST_EXACT_REFINE.clo";
-        bestWorkClo = work / L"ampero_2048_VST_EXACT_BEST.clo";
-        if (!refineCloBOnly(worker.outputClo, worker.inputWav, worker.outputWav, refinedWorkClo, bestWorkClo,
-                         refine, result.refineStats, error, status)
-            || !valid2048(refinedWorkClo) || !valid2048(bestWorkClo)) {
+        fs::path refineTarget = refine.targetWav.empty() ? worker.outputWav : refine.targetWav;
+        if (!refine.targetWav.empty()) {
+            std::error_code targetEc;
+            if (!fs::exists(refineTarget, targetEc) || targetEc) {
+                result.exitCode = kExitStageFailure;
+                result.error = "The selected refinement target WAV does not exist.";
+                fs::remove_all(work, ec);
+                return result;
+            }
+            report(status, L"Refinement target: external WAV (last 20 seconds).");
+        } else {
+            report(status, L"Refinement target: NAM render (last 20 seconds).");
+        }
+
+        refinedWorkClo = work / L"ampero_2048_REFINED.clo";
+        bestWorkClo = work / L"ampero_2048_REFINED_CANDIDATE.clo";
+        if (!refineCloBOnly(worker.outputClo, worker.inputWav, refineTarget, refinedWorkClo, bestWorkClo,
+                           refine, refineStats, error, status)
+            || !valid2048(refinedWorkClo)) {
             result.exitCode = kExitStageFailure;
             result.error = error.empty() ? "CLO refinement failed." : error;
             fs::remove_all(work, ec);
             return result;
         }
-        const std::wstring refineStatus =
-            L"Tone match complete: NMSE " + std::to_wstring(result.refineStats.originalNmse)
-            + L" -> " + std::to_wstring(result.refineStats.refinedNmse)
-            + L" (" + std::to_wstring(result.refineStats.improvementPercent) + L"% improvement; stimulus "
-            + std::to_wstring(result.refineStats.stimulusImprovementPercent) + L"%; tail "
-            + std::to_wstring(result.refineStats.tailImprovementPercent) + L"%; MR-STFT "
-            + std::to_wstring(result.refineStats.spectralImprovementPercent) + L"%; direct output spectrum "
-            + std::to_wstring(result.refineStats.responseSpectralImprovementPercent) + L"%; envelope "
-            + std::to_wstring(result.refineStats.envelopeImprovementPercent) + L"%; searched low/mid/high "
-            + std::to_wstring(result.refineStats.searchedLowLevelImprovementPercent) + L"/"
-            + std::to_wstring(result.refineStats.searchedMidLevelImprovementPercent) + L"/"
-            + std::to_wstring(result.refineStats.searchedHighLevelImprovementPercent) + L"%).";
-        report(status, refineStatus.c_str());
     }
 
     fs::path sourceForOutput = worker.outputClo;
@@ -625,40 +626,14 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     }
 
     if (refine.enabled) {
-        result.bestAmpero2048 = uniquePath(outDir / (base + L"_Ampero_2048_VST_EXACT_BEST.clo"));
-        if (!copyFileCreatingParents(bestWorkClo, result.bestAmpero2048, error)) {
-            result.exitCode = kExitCopyFailure; result.error = error; fs::remove_all(work, ec); return result;
-        }
-        report(status, L"Generating BEST GP-200 1024 compact CLO for audition...");
-        result.bestGp2001024 = uniquePath(outDir / (base + L"_GP200_1024_VST_EXACT_BEST.clo"));
-        if (!makeGp200CompactClo(bestWorkClo, result.bestGp2001024, error)
-            || !valid1024(result.bestGp2001024)) {
-            result.exitCode = kExitCopyFailure;
-            result.error = error.empty() ? "The BEST GP-200 compact CLO failed validation." : error;
-            fs::remove_all(work, ec); return result;
-        }
-
-        {
-            const fs::path autoIrWork = work / L"auto_tonematch_ir.wav";
-            if (fs::exists(autoIrWork)) {
-                const fs::path autoIrOut = uniquePath(outDir / (base + L"_auto_tonematch_ir.wav"));
-                if (!copyFileCreatingParents(autoIrWork, autoIrOut, error)) {
-                    result.exitCode = kExitCopyFailure; result.error = error; fs::remove_all(work, ec); return result;
-                }
-            }
-        }
-
-        result.refinedAmpero2048 = uniquePath(outDir / (base + L"_Ampero_2048_VST_EXACT_REFINE.clo"));
-        if (!copyFileCreatingParents(refinedWorkClo, result.refinedAmpero2048, error)) {
-            result.exitCode = kExitCopyFailure; result.error = error; fs::remove_all(work, ec); return result;
-        }
         report(status, L"Generating refined GP-200 1024 compact CLO...");
-        result.refinedGp2001024 = uniquePath(outDir / (base + L"_GP200_1024_VST_EXACT_REFINE.clo"));
+        result.refinedGp2001024 = uniquePath(outDir / (base + L"_GP200_1024_REFINED.clo"));
         if (!makeGp200CompactClo(refinedWorkClo, result.refinedGp2001024, error)
             || !valid1024(result.refinedGp2001024)) {
             result.exitCode = kExitCopyFailure;
             result.error = error.empty() ? "The refined GP-200 compact CLO failed validation." : error;
-            fs::remove_all(work, ec); return result;
+            fs::remove_all(work, ec);
+            return result;
         }
     }
 

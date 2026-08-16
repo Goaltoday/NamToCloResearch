@@ -1,4 +1,12 @@
-# NAM to CLO v2.6.4
+# NAM to CLO v2.6.6
+
+## v2.6.6
+
+- Refinement can optionally use a user-selected WAV as the Tone Match target. The final 20 seconds of that WAV are used; leaving the field blank keeps the NAM render as target.
+- Refinement comparison diagnostics are no longer shown.
+- With refinement enabled, the output folder receives only the normal Ampero B2048 CLO, the normal GP-200 B1024 CLO, and the refined GP-200 B1024 CLO.
+- Intermediate BEST/candidate CLOs and `auto_tonematch_ir.wav` are no longer exported.
+
 
 Clean baseline containing only the conversion paths and conclusions currently in use.
 
@@ -51,3 +59,7 @@ Important limitation: this is currently **VST-style**, not an exact replica of t
 ## Build
 
 The project targets Windows and is built with CMake/MSVC. See `CMakePresets.json` and the runtime setup script for the existing build/runtime layout.
+
+### Refinement level handling
+
+Automatic refinement uses 0 dB post-correction gain after Block B RMS normalization. Manual Corrective IR retains the historical -6 dB post-correction gain.
