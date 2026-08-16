@@ -1,3 +1,9 @@
+# NamToCloResearch
+
+## v2.6.1 - A2 Full rendering
+
+A2 `SlimmableContainer` NAMs are now explicitly preprocessed through `HTUSBTools.dll::convertNamToNambWithSlim(..., 1.0)` and the resulting Full `.namb` is supplied to the existing CLO conversion path. Normal non-slimmable NAMs are unchanged. There is no fallback to Slim if Full preprocessing fails. See `TESTING_A2_FULL_V2.6.1.md`.
+
 # NAM to CLO 2.5.1
 
 ## v2.6.0 Band-wise Residual-Guard VST Tail Tone Match

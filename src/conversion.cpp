@@ -39,6 +39,7 @@ constexpr int kExitSehBase = 100;
 constexpr std::uint8_t kBufferSentinel = 0xCC;
 constexpr std::uint64_t kNamConvertArg6 = 0;
 constexpr int kTimeoutSeconds = 180;
+constexpr double kA2FullSlimFactor = 1.0;
 
 struct WorkerOptions {
     fs::path dll;
@@ -48,6 +49,7 @@ struct WorkerOptions {
     fs::path outputClo;
     std::wstring mappingName;
     int timeoutSeconds = kTimeoutSeconds;
+    bool forceA2Full = true;
 };
 
 struct SharedBuffer {
@@ -146,10 +148,12 @@ std::wstring makeWorkerCommandLine(const WorkerOptions& w) {
         L"--mapping", w.mappingName,
         L"--timeout", std::to_wstring(w.timeoutSeconds)
     };
+    std::vector<std::wstring> finalArgs = args;
+    if (w.forceA2Full) finalArgs.push_back(L"--a2-full");
     std::wstring cmd;
-    for (std::size_t i = 0; i < args.size(); ++i) {
+    for (std::size_t i = 0; i < finalArgs.size(); ++i) {
         if (i) cmd.push_back(L' ');
-        cmd += quoteWindowsArg(args[i]);
+        cmd += quoteWindowsArg(finalArgs[i]);
     }
     return cmd;
 }
@@ -256,10 +260,70 @@ bool parseWorker(int argc, wchar_t** argv, WorkerOptions& w) {
         else if (a == L"--mapping" && has(i)) w.mappingName = argv[++i];
         else if (a == L"--timeout" && has(i)) {
             const auto v = positiveInt(argv[++i]); if (!v) return false; w.timeoutSeconds = *v;
-        } else return false;
+        } else if (a == L"--a2-full") w.forceA2Full = true;
+        else return false;
     }
     return !w.dll.empty() && !w.inputWav.empty() && !w.outputWav.empty() && !w.inputNam.empty()
         && !w.outputClo.empty() && !w.mappingName.empty();
+}
+
+bool isA2SlimmableNam(const fs::path& path) {
+    std::vector<std::uint8_t> bytes;
+    std::string error;
+    if (!readFileBytes(path, bytes, error)) return false;
+    static constexpr char kMarker[] = "SlimmableContainer";
+    return std::search(bytes.begin(), bytes.end(),
+                       reinterpret_cast<const std::uint8_t*>(kMarker),
+                       reinterpret_cast<const std::uint8_t*>(kMarker) + sizeof(kMarker) - 1) != bytes.end();
+}
+
+using ConvertNamToNambWithSlimFn = const char*(__cdecl*)(const char*, double);
+
+fs::path findGeneratedNamb(const fs::path& inputNam) {
+    std::error_code ec;
+    fs::path expected = inputNam;
+    expected.replace_extension(L".namb");
+    if (fs::exists(expected, ec) && !ec) return expected;
+    ec.clear();
+    const fs::path appended = fs::path(inputNam.wstring() + L".namb");
+    if (fs::exists(appended, ec) && !ec) return appended;
+    ec.clear();
+    for (const auto& entry : fs::directory_iterator(inputNam.parent_path(), ec)) {
+        if (ec) break;
+        if (!entry.is_regular_file(ec) || ec) { ec.clear(); continue; }
+        std::wstring ext = entry.path().extension().wstring();
+        for (auto& c : ext) c = static_cast<wchar_t>(towlower(c));
+        if (ext == L".namb") return entry.path();
+    }
+    return {};
+}
+
+bool prepareA2FullModel(HMODULE module, const fs::path& inputNam, fs::path& modelPath, std::string& error) {
+    modelPath = inputNam;
+    if (!isA2SlimmableNam(inputNam)) return true;
+
+    auto convertFull = reinterpret_cast<ConvertNamToNambWithSlimFn>(
+        GetProcAddress(module, "convertNamToNambWithSlim"));
+    if (!convertFull) {
+        error = "A2 Full requested, but HTUSBTools.dll has no convertNamToNambWithSlim export.";
+        return false;
+    }
+
+    // Static analysis of this DLL shows SlimmableContainer thresholds are
+    // ascending: factor 0.0 selects the first/smallest model, while 1.0 falls
+    // through to the last/full model. Never fall back to the original A2 NAM,
+    // because that would silently re-introduce the Lite/Slim=0 path.
+    const std::string namUtf8 = pathToUtf8(inputNam);
+    const char* result = convertFull(namUtf8.c_str(), kA2FullSlimFactor);
+    (void)result;
+
+    const fs::path namb = findGeneratedNamb(inputNam);
+    if (namb.empty()) {
+        error = "HTUSBTools.dll did not produce the Full A2 .namb model (slim factor 1.0).";
+        return false;
+    }
+    modelPath = namb;
+    return true;
 }
 
 int runWorker(const WorkerOptions& options) {
@@ -273,9 +337,19 @@ int runWorker(const WorkerOptions& options) {
     auto* mapped = static_cast<std::uint8_t*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, kExpectedCloSize));
     if (!mapped) { CloseHandle(mapping); FreeLibrary(module); return kExitMappingFailure; }
 
+    fs::path modelPath = options.inputNam;
+    std::string modelError;
+    if (options.forceA2Full && !prepareA2FullModel(module, options.inputNam, modelPath, modelError)) {
+        std::cerr << "[worker] ERROR: " << modelError << "\n";
+        UnmapViewOfFile(mapped);
+        CloseHandle(mapping);
+        FreeLibrary(module);
+        return kExitStageFailure;
+    }
+
     const std::string inWav = pathToUtf8(options.inputWav);
     const std::string outWav = pathToUtf8(options.outputWav);
-    const std::string nam = pathToUtf8(options.inputNam);
+    const std::string nam = pathToUtf8(modelPath);
     std::uint32_t apiReturn = 0;
     const DWORD exceptionCode = invokeDataWithSeh(fn, inWav.c_str(), outWav.c_str(), nam.c_str(), mapped, &apiReturn);
     int result = kExitOk;
@@ -395,6 +469,8 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     }
     worker.mappingName = shared.name;
 
+    if (isA2SlimmableNam(worker.inputNam))
+        report(status, L"A2 SlimmableContainer detected: forcing FULL model (slim factor 1.0)...");
     report(status, L"Generating Ampero 2048 CLO...");
     bool capturedValid = false;
     const int workerExit = launchWorker(worker, shared, capturedValid, error);
