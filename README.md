@@ -1,5 +1,9 @@
 # NamToCloResearch
 
+## v2.6.3 - A2 Full/Lite verification diagnostics
+
+For A2 `SlimmableContainer` NAMs the converter now exports the lowest- and highest-`max_value` embedded models next to the CLO output as `_A2_LITE_EXTRACTED.nam` and `_A2_FULL_EXTRACTED.nam`, plus `_A2_SUBMODEL_DIAGNOSTICS.txt`. The highest-`max_value` model is the exact JSON model passed to `namConvertCloData`. The labels FULL/LITE remain intentionally testable: compare the extracted files in a NAM player against the original container in its Full and Lite modes.
+
 ## v2.6.2 - A2 Full rendering
 
 A2 `SlimmableContainer` NAMs are now handled by extracting the embedded submodel with the highest `max_value` (normally `1.0`) to a temporary standard `.nam`, which is then supplied to the unchanged `namConvertCloData` path. This replaces the invalid v2.6.1 `.namb` hand-off that could crash with Windows exception `0xC0000005`. Normal non-slimmable NAMs are unchanged. See `TESTING_A2_FULL_V2.6.2.md`.

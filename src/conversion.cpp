@@ -16,6 +16,7 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
+#include <sstream>
 #include <optional>
 #include <string>
 #include <thread>
@@ -322,45 +323,31 @@ std::optional<double> parseJsonNumberAfter(const std::string& text, std::size_t 
     return v;
 }
 
-bool prepareA2FullModel(const fs::path& inputNam, const fs::path& workDir,
-                        fs::path& modelPath, std::string& error) {
-    modelPath = inputNam;
-    if (!isA2SlimmableNam(inputNam)) return true;
+struct A2SubmodelRecord {
+    double maxValue = 0.0;
+    std::string modelJson;
+};
 
+bool parseA2Submodels(const fs::path& inputNam, std::vector<A2SubmodelRecord>& records, std::string& error) {
+    records.clear();
     std::vector<std::uint8_t> bytes;
     if (!readFileBytes(inputNam, bytes, error)) return false;
     const std::string text(reinterpret_cast<const char*>(bytes.data()), bytes.size());
 
     const std::string submodelsKey = "\"submodels\"";
     const auto key = text.find(submodelsKey);
-    if (key == std::string::npos) {
-        error = "A2 SlimmableContainer has no submodels array.";
-        return false;
-    }
+    if (key == std::string::npos) { error = "A2 SlimmableContainer has no submodels array."; return false; }
     const auto arrayOpen = text.find('[', key + submodelsKey.size());
-    if (arrayOpen == std::string::npos) {
-        error = "A2 SlimmableContainer submodels array is malformed.";
-        return false;
-    }
+    if (arrayOpen == std::string::npos) { error = "A2 SlimmableContainer submodels array is malformed."; return false; }
 
-    double bestMax = -1.0e300;
-    std::size_t bestModelOpen = std::string::npos;
-    std::size_t bestModelEnd = std::string::npos;
     std::size_t pos = arrayOpen + 1;
-
     while (pos < text.size()) {
         while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) ++pos;
         if (pos >= text.size() || text[pos] == ']') break;
         if (text[pos] == ',') { ++pos; continue; }
-        if (text[pos] != '{') {
-            error = "A2 SlimmableContainer submodel entry is malformed.";
-            return false;
-        }
+        if (text[pos] != '{') { error = "A2 SlimmableContainer submodel entry is malformed."; return false; }
         const auto entryEndOpt = jsonObjectEnd(text, pos);
-        if (!entryEndOpt) {
-            error = "A2 SlimmableContainer submodel object is malformed.";
-            return false;
-        }
+        if (!entryEndOpt) { error = "A2 SlimmableContainer submodel object is malformed."; return false; }
         const std::size_t entryEnd = *entryEndOpt;
         const std::string maxKey = "\"max_value\"";
         const auto maxPos = text.find(maxKey, pos);
@@ -372,40 +359,76 @@ bool prepareA2FullModel(const fs::path& inputNam, const fs::path& workDir,
             const auto modelOpen = modelColon == std::string::npos ? std::string::npos : text.find('{', modelColon + 1);
             if (maxValue && modelOpen < entryEnd) {
                 const auto modelEnd = jsonObjectEnd(text, modelOpen);
-                if (modelEnd && *modelEnd <= entryEnd && *maxValue > bestMax) {
-                    bestMax = *maxValue;
-                    bestModelOpen = modelOpen;
-                    bestModelEnd = *modelEnd;
-                }
+                if (modelEnd && *modelEnd <= entryEnd)
+                    records.push_back({*maxValue, text.substr(modelOpen, *modelEnd - modelOpen)});
             }
         }
         pos = entryEnd;
     }
+    if (records.empty()) { error = "Could not extract any A2 submodels from SlimmableContainer."; return false; }
+    std::sort(records.begin(), records.end(), [](const auto& a, const auto& b) { return a.maxValue < b.maxValue; });
+    return true;
+}
 
-    if (bestModelOpen == std::string::npos || bestModelEnd == std::string::npos) {
-        error = "Could not extract the Full A2 submodel from SlimmableContainer.";
-        return false;
-    }
+std::uint64_t fnv1a64(const std::string& data) {
+    std::uint64_t h = 14695981039346656037ull;
+    for (const unsigned char c : data) { h ^= c; h *= 1099511628211ull; }
+    return h;
+}
 
-    // The highest max_value is the Full submodel (normally max_value == 1.0).
-    // Crucially, this remains a normal .nam file. Passing the .namb produced by
-    // convertNamToNambWithSlim() to namConvertCloData() is invalid and caused
-    // the 0xC0000005 crash observed in v2.6.1.
+bool writeTextFile(const fs::path& path, const std::string& text, std::string& error) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) { error = "Could not create diagnostic file: " + pathToUtf8(path); return false; }
+    out.write(text.data(), static_cast<std::streamsize>(text.size()));
+    if (!out.good()) { error = "Could not write diagnostic file: " + pathToUtf8(path); return false; }
+    return true;
+}
+
+bool prepareA2FullModel(const fs::path& inputNam, const fs::path& workDir,
+                        fs::path& modelPath, std::string& error) {
+    modelPath = inputNam;
+    if (!isA2SlimmableNam(inputNam)) return true;
+    std::vector<A2SubmodelRecord> records;
+    if (!parseA2Submodels(inputNam, records, error)) return false;
+    const auto& full = records.back();
     const fs::path fullNam = workDir / L"a2_full_model.nam";
-    std::ofstream out(fullNam, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        error = "Could not create temporary A2 Full NAM.";
-        return false;
-    }
-    out.write(text.data() + bestModelOpen,
-              static_cast<std::streamsize>(bestModelEnd - bestModelOpen));
-    if (!out.good()) {
-        error = "Could not write temporary A2 Full NAM.";
-        return false;
-    }
-    out.close();
+    if (!writeTextFile(fullNam, full.modelJson, error)) return false;
     modelPath = fullNam;
     return true;
+}
+
+bool exportA2Diagnostics(const fs::path& stagedNam, const fs::path& originalNam, const fs::path& outDir,
+                         fs::path& fullOut, fs::path& liteOut, fs::path& reportOut, std::string& error) {
+    if (!isA2SlimmableNam(stagedNam)) return true;
+    std::vector<A2SubmodelRecord> records;
+    if (!parseA2Submodels(stagedNam, records, error)) return false;
+    const auto& lite = records.front();
+    const auto& full = records.back();
+    const std::wstring base = originalNam.stem().wstring();
+    liteOut = uniquePath(outDir / (base + L"_A2_LITE_EXTRACTED.nam"));
+    fullOut = uniquePath(outDir / (base + L"_A2_FULL_EXTRACTED.nam"));
+    reportOut = uniquePath(outDir / (base + L"_A2_SUBMODEL_DIAGNOSTICS.txt"));
+    if (!writeTextFile(liteOut, lite.modelJson, error) || !writeTextFile(fullOut, full.modelJson, error)) return false;
+
+    std::ostringstream diag;
+    diag.setf(std::ios::fixed); diag.precision(9);
+    diag << "NAM to CLO v2.6.3 A2 submodel diagnostics\r\n";
+    diag << "Input: " << pathToUtf8(originalNam) << "\r\n";
+    diag << "Submodels found: " << records.size() << "\r\n\r\n";
+    for (std::size_t i = 0; i < records.size(); ++i) {
+        diag << "submodel[" << i << "] max_value=" << records[i].maxValue
+             << " bytes=" << records[i].modelJson.size()
+             << " fnv1a64=0x" << std::hex << std::uppercase << fnv1a64(records[i].modelJson)
+             << std::dec << "\r\n";
+    }
+    diag << "\r\nSelected for HTUSBTools: highest max_value\r\n";
+    diag << "selected max_value=" << full.maxValue << "\r\n";
+    diag << "selected bytes=" << full.modelJson.size() << "\r\n";
+    diag << "selected fnv1a64=0x" << std::hex << std::uppercase << fnv1a64(full.modelJson) << std::dec << "\r\n";
+    diag << "FULL extracted file: " << pathToUtf8(fullOut) << "\r\n";
+    diag << "LITE extracted file: " << pathToUtf8(liteOut) << "\r\n";
+    diag << "NOTE: FULL/LITE labels are the hypothesis under test: highest max_value is sent to HTUSBTools; audition against the original A2 Full/Lite modes to verify semantics.\r\n";
+    return writeTextFile(reportOut, diag.str(), error);
 }
 
 int runWorker(const WorkerOptions& options) {
@@ -542,6 +565,17 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
         return result;
     }
 
+    fs::path a2FullDiagnostic, a2LiteDiagnostic, a2ReportDiagnostic;
+    if (isA2SlimmableNam(worker.inputNam)) {
+        report(status, L"A2 SlimmableContainer detected: exporting FULL/LITE diagnostic NAMs...");
+        if (!exportA2Diagnostics(worker.inputNam, inputNam, outDir, a2FullDiagnostic, a2LiteDiagnostic, a2ReportDiagnostic, error)) {
+            result.exitCode = kExitStageFailure;
+            result.error = "Could not export A2 diagnostics: " + error;
+            fs::remove_all(work, ec);
+            return result;
+        }
+    }
+
     SharedBuffer shared;
     if (!createSharedBuffer(shared, error)) {
         result.exitCode = kExitMappingFailure;
@@ -552,7 +586,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     worker.mappingName = shared.name;
 
     if (isA2SlimmableNam(worker.inputNam))
-        report(status, L"A2 SlimmableContainer detected: extracting embedded FULL submodel (max_value 1.0)...");
+        report(status, L"A2 conversion: HTUSBTools will receive the extracted highest-max_value submodel (see A2 diagnostics file).");
     report(status, L"Generating Ampero 2048 CLO...");
     bool capturedValid = false;
     const int workerExit = launchWorker(worker, shared, capturedValid, error);
