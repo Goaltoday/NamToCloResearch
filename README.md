@@ -1,6 +1,6 @@
-# NAM to CLO v2.6.6
+# NAM to CLO v2.6.6.1
 
-## v2.6.6
+## v2.6.6.1
 
 - Refinement can optionally use a user-selected WAV as the Tone Match target. The final 20 seconds of that WAV are used; leaving the field blank keeps the NAM render as target.
 - Refinement comparison diagnostics are no longer shown.

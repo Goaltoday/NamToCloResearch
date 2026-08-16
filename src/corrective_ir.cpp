@@ -22,7 +22,6 @@ constexpr std::uint32_t kExpectedSampleRate = 44100;
 constexpr std::uint16_t kWaveFormatPcm = 0x0001;
 constexpr std::uint16_t kWaveFormatIeeeFloat = 0x0003;
 constexpr std::uint16_t kWaveFormatExtensible = 0xFFFE;
-constexpr double kPostCorrectionDb = -6.0;
 
 struct WavData {
     std::uint16_t format = 0;
@@ -264,7 +263,8 @@ bool applyCorrectiveIrToClo(const fs::path& sourceClo,
                             const fs::path& correctiveWav,
                             const fs::path& destinationClo,
                             CorrectiveIrStats& stats,
-                            std::string& error) {
+                            std::string& error,
+                            double postCorrectionDb) {
     stats = {};
 
     std::vector<std::uint8_t> data;
@@ -326,10 +326,10 @@ bool applyCorrectiveIrToClo(const fs::path& sourceClo,
 
     stats.rmsGain = stats.originalRms / stats.convolvedRms;
     stats.rmsGainDb = 20.0 * std::log10(stats.rmsGain);
-    const double postGain = std::pow(10.0, kPostCorrectionDb / 20.0);
+    const double postGain = std::pow(10.0, postCorrectionDb / 20.0);
     const double finalGain = stats.rmsGain * postGain;
-    stats.postGainDb = kPostCorrectionDb;
-    stats.totalGainDb = stats.rmsGainDb + kPostCorrectionDb;
+    stats.postGainDb = postCorrectionDb;
+    stats.totalGainDb = stats.rmsGainDb + postCorrectionDb;
 
     if (!std::isfinite(finalGain)) {
         error = "Corrective IR normalization produced an invalid gain.";

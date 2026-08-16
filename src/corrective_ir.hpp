@@ -25,6 +25,7 @@ bool applyCorrectiveIrToClo(const fs::path& sourceClo,
                             const fs::path& correctiveWav,
                             const fs::path& destinationClo,
                             CorrectiveIrStats& stats,
-                            std::string& error);
+                            std::string& error,
+                            double postCorrectionDb = -6.0);
 
 } // namespace ntc
