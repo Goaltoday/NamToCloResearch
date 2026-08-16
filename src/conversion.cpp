@@ -546,30 +546,81 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
         return result;
     }
 
-    // Optional Block-B Tone Match refinement. By default the target is the
-    // NAM render produced by HTUSBTools. The user can instead provide an
-    // external WAV; in either case the final 20 seconds are compared.
+    // Optional Block-B Tone Match refinement. The comparison must always use
+    // the SAME input performance through the NAM and through the already-created
+    // CLO. When a refinement test WAV is selected, its FIRST 20 seconds are
+    // adapted by StimulusBuilder and inserted as the 20-second tail of a second
+    // otherwise-identical 70-second stimulus. HTUSBTools renders that stimulus
+    // through the verified NAM Full path; CloPlayer renders the exact same
+    // stimulus through the original Ampero 2048 CLO. Tone Match then compares
+    // the common final 20-second section.
     fs::path refinedWorkClo;
     fs::path bestWorkClo;
     CloRefineStats refineStats{};
     if (refine.enabled) {
-        fs::path refineTarget = refine.targetWav.empty() ? worker.outputWav : refine.targetWav;
-        if (!refine.targetWav.empty()) {
-            std::error_code targetEc;
-            if (!fs::exists(refineTarget, targetEc) || targetEc) {
+        fs::path refineStimulus = worker.inputWav;
+        fs::path refineTarget = worker.outputWav;
+
+        if (!refine.referenceWav.empty()) {
+            std::error_code referenceEc;
+            if (!fs::exists(refine.referenceWav, referenceEc) || referenceEc) {
                 result.exitCode = kExitStageFailure;
-                result.error = "The selected refinement target WAV does not exist.";
+                result.error = "The selected refinement test WAV does not exist.";
                 fs::remove_all(work, ec);
                 return result;
             }
-            report(status, L"Refinement target: external WAV (last 20 seconds).");
+
+            report(status, L"Preparing matched refinement stimulus (first 20 s of selected WAV)...");
+            StimulusConfig refineStimulusConfig = stimulus;
+            refineStimulusConfig.tailMode = TailMode::RecordedAudio;
+            refineStimulusConfig.recordedAudio = refine.referenceWav;
+            refineStimulus = work / L"refine_input_wav.wav";
+            if (!buildStimulus(runtime, refineStimulusConfig, refineStimulus, error)) {
+                result.exitCode = kExitStageFailure;
+                result.error = "Could not prepare refinement test WAV: " + error;
+                fs::remove_all(work, ec);
+                return result;
+            }
+
+            // A second HTUSBTools pass is used only to obtain the NAM render of
+            // the matched refinement stimulus. The generated CLO is intentionally
+            // ignored: refinement is applied to the ORIGINAL CLO from the first pass.
+            WorkerOptions refineWorker;
+            refineWorker.dll = runtime.dll;
+            refineWorker.inputWav = refineStimulus;
+            refineWorker.outputWav = work / L"refine_nam_output.wav";
+            refineWorker.inputNam = worker.inputNam;
+            refineWorker.outputClo = work / L"refine_unused_2048.clo";
+
+            SharedBuffer refineShared;
+            if (!createSharedBuffer(refineShared, error)) {
+                result.exitCode = kExitMappingFailure;
+                result.error = error;
+                fs::remove_all(work, ec);
+                return result;
+            }
+            refineWorker.mappingName = refineShared.name;
+
+            report(status, L"Rendering refinement stimulus through NAM Full...");
+            bool refineCapturedValid = false;
+            const int refineWorkerExit = launchWorker(refineWorker, refineShared, refineCapturedValid, error);
+            if (refineWorkerExit != kExitOk || !refineCapturedValid || !valid2048(refineWorker.outputClo)) {
+                result.exitCode = refineWorkerExit != kExitOk ? refineWorkerExit : kExitConversionBadSize;
+                result.error = error.empty()
+                    ? "Could not render the refinement stimulus through the NAM."
+                    : error;
+                fs::remove_all(work, ec);
+                return result;
+            }
+            refineTarget = refineWorker.outputWav;
+            report(status, L"Tone Match: same refinement stimulus through NAM Full vs original CLO.");
         } else {
-            report(status, L"Refinement target: NAM render (last 20 seconds).");
+            report(status, L"Tone Match: original conversion stimulus through NAM Full vs original CLO.");
         }
 
         refinedWorkClo = work / L"ampero_2048_REFINED.clo";
         bestWorkClo = work / L"ampero_2048_REFINED_CANDIDATE.clo";
-        if (!refineCloBOnly(worker.outputClo, worker.inputWav, refineTarget, refinedWorkClo, bestWorkClo,
+        if (!refineCloBOnly(worker.outputClo, refineStimulus, refineTarget, refinedWorkClo, bestWorkClo,
                            refine, refineStats, error, status)
             || !valid2048(refinedWorkClo)) {
             result.exitCode = kExitStageFailure;

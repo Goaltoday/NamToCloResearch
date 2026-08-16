@@ -358,7 +358,7 @@ void chooseRefineTarget(HWND owner) {
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = owner;
-    ofn.lpstrFilter = L"Tone Match target WAV (*.wav)\0*.wav\0All files (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"Refinement test WAV (*.wav)\0*.wav\0All files (*.*)\0*.*\0";
     ofn.lpstrFile = file;
     ofn.nMaxFile = static_cast<DWORD>(std::size(file));
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
@@ -438,7 +438,7 @@ void startConversion(HWND hwnd) {
     ntc::CloRefineConfig refine;
     refine.enabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     refine.passes = 4;
-    refine.targetWav = fs::path(getText(gRefineTargetEdit));
+    refine.referenceWav = fs::path(getText(gRefineTargetEdit));
 
     enableControls(false);
     if (gInputMode == InputMode::SingleNam) {
@@ -580,8 +580,8 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
     createSectionLabel(hwnd, 1008, L"Corrective IR");
-    createSectionLabel(hwnd, 1009, L"CLO refinement (VST-style Tone Match - final 20 s)");
-    createSectionLabel(hwnd, 1010, L"Tone Match target WAV (optional; blank = NAM render)");
+    createSectionLabel(hwnd, 1009, L"CLO refinement (VST-style Tone Match - matched input)");
+    createSectionLabel(hwnd, 1010, L"Refinement test WAV (optional; first 20 s used)");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                  0, 0, 100, 30, hwnd, controlId(IDC_INPUT_PATH), nullptr, nullptr);

@@ -10,9 +10,12 @@ namespace fs = std::filesystem;
 struct CloRefineConfig {
     bool enabled = false;
     int passes = 4;
-    // Optional Tone Match target. When empty, HTUSBTools' own NAM render is used.
-    // When provided, the final 20 seconds of this WAV are used as the target.
-    fs::path targetWav;
+    // Optional refinement test audio. When provided, its FIRST 20 seconds are
+    // adapted to mono PCM16 44.1 kHz and inserted as the 20-second tail of a
+    // second, otherwise-identical conversion stimulus. That exact stimulus is
+    // rendered through both the verified NAM Full path and the original CLO,
+    // so Tone Match compares the same performance through both models.
+    fs::path referenceWav;
 };
 
 struct CloRefineStats {
