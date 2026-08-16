@@ -7,7 +7,6 @@
 #include <cwctype>
 
 #include <windows.h>
-#include <dbghelp.h>
 
 #include <chrono>
 #include <cstdint>
@@ -17,7 +16,6 @@
 #include <cstring>
 #include <filesystem>
 #include <iostream>
-#include <iomanip>
 #include <sstream>
 #include <optional>
 #include <string>
@@ -53,8 +51,6 @@ struct WorkerOptions {
     fs::path inputNam;
     fs::path outputClo;
     std::wstring mappingName;
-    fs::path diagnosticLog;
-    fs::path crashDump;
     int timeoutSeconds = kTimeoutSeconds;
 };
 
@@ -75,148 +71,6 @@ void report(const StatusCallback& cb, const wchar_t* text) {
     if (cb) cb(text);
 }
 
-std::string diagnosticTimestamp() {
-    SYSTEMTIME st{};
-    GetLocalTime(&st);
-    std::ostringstream os;
-    os << std::setfill('0')
-       << std::setw(4) << st.wYear << '-'
-       << std::setw(2) << st.wMonth << '-'
-       << std::setw(2) << st.wDay << ' '
-       << std::setw(2) << st.wHour << ':'
-       << std::setw(2) << st.wMinute << ':'
-       << std::setw(2) << st.wSecond << '.'
-       << std::setw(3) << st.wMilliseconds;
-    return os.str();
-}
-
-void appendDiagnostic(const fs::path& path, const std::string& text) noexcept {
-    if (path.empty()) return;
-    try {
-        std::ofstream out(path, std::ios::binary | std::ios::app);
-        if (!out) return;
-        out << '[' << diagnosticTimestamp() << "][pid=" << GetCurrentProcessId() << "] " << text << "\r\n";
-        out.flush();
-    } catch (...) {}
-}
-
-
-fs::path gCrashDiagnosticLog;
-fs::path gCrashDumpPath;
-PVOID gVectoredHandler = nullptr;
-
-std::string exceptionModuleDiagnostic(void* address) {
-    MEMORY_BASIC_INFORMATION mbi{};
-    if (!address || VirtualQuery(address, &mbi, sizeof(mbi)) != sizeof(mbi)) return "module=<unknown>";
-    const auto module = static_cast<HMODULE>(mbi.AllocationBase);
-    wchar_t path[MAX_PATH * 4]{};
-    const DWORD n = GetModuleFileNameW(module, path, static_cast<DWORD>(sizeof(path) / sizeof(path[0])));
-    std::ostringstream os;
-    os << "module=" << (n ? pathToUtf8(fs::path(path)) : std::string("<unknown>"))
-       << " | moduleBase=0x" << std::hex << std::uppercase << reinterpret_cast<std::uintptr_t>(module);
-    return os.str();
-}
-
-bool writeCrashDump(EXCEPTION_POINTERS* ep) noexcept {
-    if (gCrashDumpPath.empty()) return false;
-    HANDLE file = CreateFileW(gCrashDumpPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
-                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
-        appendDiagnostic(gCrashDiagnosticLog, "CRASH: CreateFileW(dump) failed: " + win32ErrorMessage(GetLastError()));
-        return false;
-    }
-    MINIDUMP_EXCEPTION_INFORMATION mei{};
-    mei.ThreadId = GetCurrentThreadId();
-    mei.ExceptionPointers = ep;
-    mei.ClientPointers = FALSE;
-    const auto type = static_cast<MINIDUMP_TYPE>(
-        MiniDumpNormal |
-        MiniDumpWithDataSegs |
-        MiniDumpWithHandleData |
-        MiniDumpWithThreadInfo |
-        MiniDumpWithUnloadedModules |
-        MiniDumpWithIndirectlyReferencedMemory |
-        MiniDumpScanMemory);
-    const BOOL ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), file, type,
-                                      ep ? &mei : nullptr, nullptr, nullptr);
-    const DWORD err = ok ? ERROR_SUCCESS : GetLastError();
-    CloseHandle(file);
-    if (!ok) {
-        appendDiagnostic(gCrashDiagnosticLog, "CRASH: MiniDumpWriteDump failed: " + win32ErrorMessage(err));
-        return false;
-    }
-    appendDiagnostic(gCrashDiagnosticLog, "CRASH: minidump written: " + pathToUtf8(gCrashDumpPath));
-    return true;
-}
-
-LONG WINAPI workerVectoredExceptionHandler(EXCEPTION_POINTERS* ep) {
-    if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
-    const auto code = ep->ExceptionRecord->ExceptionCode;
-    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION &&
-        code != EXCEPTION_STACK_OVERFLOW && code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED) {
-        return EXCEPTION_CONTINUE_SEARCH;
-    }
-    std::ostringstream os;
-    os << "CRASH VEH: code=" << hex32(code)
-       << " | thread=" << GetCurrentThreadId()
-       << " | address=0x" << std::hex << std::uppercase
-       << reinterpret_cast<std::uintptr_t>(ep->ExceptionRecord->ExceptionAddress)
-       << " | " << exceptionModuleDiagnostic(ep->ExceptionRecord->ExceptionAddress);
-    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
-        const auto op = ep->ExceptionRecord->ExceptionInformation[0];
-        const auto target = ep->ExceptionRecord->ExceptionInformation[1];
-        os << " | operation=" << (op == 0 ? "read" : (op == 1 ? "write" : (op == 8 ? "execute" : "unknown")))
-           << " | target=0x" << std::hex << std::uppercase << target;
-    }
-    appendDiagnostic(gCrashDiagnosticLog, os.str());
-    writeCrashDump(ep);
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
-LONG WINAPI workerUnhandledExceptionFilter(EXCEPTION_POINTERS* ep) {
-    if (ep && ep->ExceptionRecord) {
-        appendDiagnostic(gCrashDiagnosticLog, "CRASH UEF: unhandled exception code=" + hex32(ep->ExceptionRecord->ExceptionCode));
-    } else {
-        appendDiagnostic(gCrashDiagnosticLog, "CRASH UEF: unhandled exception (no exception record)");
-    }
-    writeCrashDump(ep);
-    return EXCEPTION_CONTINUE_SEARCH;
-}
-
-void installWorkerCrashDiagnostics(const WorkerOptions& options) {
-    gCrashDiagnosticLog = options.diagnosticLog;
-    gCrashDumpPath = options.crashDump;
-    SetUnhandledExceptionFilter(workerUnhandledExceptionFilter);
-    gVectoredHandler = AddVectoredExceptionHandler(1, workerVectoredExceptionHandler);
-    appendDiagnostic(options.diagnosticLog, "WORKER [0]: crash diagnostics installed; dump=" + pathToUtf8(options.crashDump));
-
-    SYSTEM_INFO si{};
-    GetNativeSystemInfo(&si);
-    OSVERSIONINFOW vi{};
-    vi.dwOSVersionInfoSize = sizeof(vi);
-#pragma warning(push)
-#pragma warning(disable:4996)
-    GetVersionExW(&vi);
-#pragma warning(pop)
-    std::ostringstream os;
-    os << "WORKER ENV: Windows=" << vi.dwMajorVersion << '.' << vi.dwMinorVersion << " build=" << vi.dwBuildNumber
-       << " | arch=" << si.wProcessorArchitecture << " | CPUs=" << si.dwNumberOfProcessors
-       << " | pageSize=" << si.dwPageSize;
-    appendDiagnostic(options.diagnosticLog, os.str());
-    appendDiagnostic(options.diagnosticLog, std::string("WORKER ENV: PF_XMMI64_INSTRUCTIONS_AVAILABLE=") +
-        (IsProcessorFeaturePresent(PF_XMMI64_INSTRUCTIONS_AVAILABLE) ? "yes" : "no"));
-}
-
-std::string fileDiagnostic(const fs::path& p) {
-    std::error_code ec;
-    const bool exists = fs::exists(p, ec) && !ec;
-    const auto size = exists ? fs::file_size(p, ec) : 0;
-    std::ostringstream os;
-    os << pathToUtf8(p) << " | exists=" << (exists ? "yes" : "no");
-    if (exists && !ec) os << " | bytes=" << size;
-    return os.str();
-}
-
 fs::path findFirstExisting(const std::vector<fs::path>& candidates) {
     std::error_code ec;
     for (const auto& p : candidates) {
@@ -235,6 +89,47 @@ fs::path makeWorkDirectory() {
     fs::path work = base / (L"job-" + std::to_wstring(pid) + L"-" + std::to_wstring(now));
     fs::create_directories(work, ec);
     return ec ? fs::path{} : work;
+}
+
+// HTUSBTools performs part of its work asynchronously and may create/open
+// auxiliary files using the process current directory or paths relative to the
+// loaded runtime.  Some Windows installations deny writes beside an application
+// installed in a protected/restricted folder.  Keep the proprietary runtime in
+// a per-job, user-writable sandbox instead of requiring elevation.
+bool stageHtusbRuntime(const fs::path& sourceDll, const fs::path& workDir,
+                       fs::path& stagedDll, std::string& error) {
+    const fs::path sourceDir = sourceDll.parent_path();
+    const fs::path stagedDir = workDir / L"htusb_runtime";
+    std::error_code ec;
+    fs::create_directories(stagedDir, ec);
+    if (ec) {
+        error = "Could not create HTUSBTools sandbox: " + ec.message();
+        return false;
+    }
+
+    for (fs::recursive_directory_iterator it(sourceDir, ec), end; !ec && it != end; it.increment(ec)) {
+        const fs::path rel = fs::relative(it->path(), sourceDir, ec);
+        if (ec) break;
+        const fs::path dst = stagedDir / rel;
+        if (it->is_directory(ec)) {
+            fs::create_directories(dst, ec);
+        } else if (it->is_regular_file(ec)) {
+            fs::create_directories(dst.parent_path(), ec);
+            if (!ec) fs::copy_file(it->path(), dst, fs::copy_options::overwrite_existing, ec);
+        }
+        if (ec) break;
+    }
+    if (ec) {
+        error = "Could not copy HTUSBTools runtime into the writable sandbox: " + ec.message();
+        return false;
+    }
+
+    stagedDll = stagedDir / sourceDll.filename();
+    if (!fs::exists(stagedDll, ec) || ec) {
+        error = "HTUSBTools.dll was not copied into the writable sandbox.";
+        return false;
+    }
+    return true;
 }
 
 std::wstring makeMappingName() {
@@ -294,8 +189,6 @@ std::wstring makeWorkerCommandLine(const WorkerOptions& w) {
         L"--nam", w.inputNam.wstring(),
         L"--clo", w.outputClo.wstring(),
         L"--mapping", w.mappingName,
-        L"--diag", w.diagnosticLog.wstring(),
-        L"--dump", w.crashDump.wstring(),
         L"--timeout", std::to_wstring(w.timeoutSeconds)
     };
     std::wstring cmd;
@@ -308,13 +201,6 @@ std::wstring makeWorkerCommandLine(const WorkerOptions& w) {
 
 int launchWorker(const WorkerOptions& worker, SharedBuffer& shared, bool& capturedValid, std::string& error) {
     capturedValid = false;
-    appendDiagnostic(worker.diagnosticLog, "PARENT: launchWorker begin");
-    appendDiagnostic(worker.diagnosticLog, "PARENT: dll: " + fileDiagnostic(worker.dll));
-    appendDiagnostic(worker.diagnosticLog, "PARENT: input WAV: " + fileDiagnostic(worker.inputWav));
-    appendDiagnostic(worker.diagnosticLog, "PARENT: input NAM: " + fileDiagnostic(worker.inputNam));
-    appendDiagnostic(worker.diagnosticLog, "PARENT: output WAV: " + pathToUtf8(worker.outputWav));
-    appendDiagnostic(worker.diagnosticLog, "PARENT: output CLO: " + pathToUtf8(worker.outputClo));
-    appendDiagnostic(worker.diagnosticLog, "PARENT: crash dump: " + pathToUtf8(worker.crashDump));
     std::wstring command = makeWorkerCommandLine(worker);
     std::vector<wchar_t> mutableCommand(command.begin(), command.end());
     mutableCommand.push_back(L'\0');
@@ -323,13 +209,16 @@ int launchWorker(const WorkerOptions& worker, SharedBuffer& shared, bool& captur
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
     const DWORD flags = CREATE_NO_WINDOW;
-    if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi)) {
-        appendDiagnostic(worker.diagnosticLog, "PARENT: CreateProcessW FAILED: " + win32ErrorMessage(GetLastError()));
+    // Launch the worker with a user-writable current directory. HTUSBTools has
+    // internal asynchronous file I/O and is not robust when an implicit write
+    // fails; using the job directory avoids needing Run as administrator.
+    const std::wstring workerCwd = worker.outputClo.parent_path().wstring();
+    if (!CreateProcessW(nullptr, mutableCommand.data(), nullptr, nullptr, FALSE, flags, nullptr,
+                        workerCwd.empty() ? nullptr : workerCwd.c_str(), &si, &pi)) {
         error = "Could not start conversion worker: " + win32ErrorMessage(GetLastError());
         return kExitWorkerLaunch;
     }
 
-    appendDiagnostic(worker.diagnosticLog, "PARENT: worker process created pid=" + std::to_string(pi.dwProcessId));
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(worker.timeoutSeconds + 15);
     while (std::chrono::steady_clock::now() < deadline) {
         const DWORD wait = WaitForSingleObject(pi.hProcess, 100);
@@ -346,11 +235,8 @@ int launchWorker(const WorkerOptions& worker, SharedBuffer& shared, bool& captur
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 
-    appendDiagnostic(worker.diagnosticLog, "PARENT: worker exit code=" + hex32(exitCode));
-    appendDiagnostic(worker.diagnosticLog, "PARENT: crash dump after worker: " + fileDiagnostic(worker.crashDump));
     const std::size_t changed = changedByteCount(shared.view);
     capturedValid = startsWithVtsi(shared.view) && changed > 0;
-    appendDiagnostic(worker.diagnosticLog, "PARENT: shared buffer changed bytes=" + std::to_string(changed) + ", VTSI=" + (startsWithVtsi(shared.view) ? std::string("yes") : std::string("no")));
     if (capturedValid) {
         if (!writeFileBytes(worker.outputClo, shared.view, static_cast<std::size_t>(kExpectedCloSize), error)) {
             capturedValid = false;
@@ -359,10 +245,10 @@ int launchWorker(const WorkerOptions& worker, SharedBuffer& shared, bool& captur
 
     if (capturedValid) return kExitOk;
     if (exitCode >= 0xC0000000u) {
-        error = "HTUSBTools worker terminated with Windows exception " + hex32(exitCode) + ". Diagnostic log: " + pathToUtf8(worker.diagnosticLog);
+        error = "HTUSBTools worker terminated with Windows exception " + hex32(exitCode);
         return static_cast<int>(exitCode & 0x7FFFFFFFu);
     }
-    if (error.empty()) error = "Conversion worker failed (exit code " + std::to_string(exitCode) + "). Diagnostic log: " + pathToUtf8(worker.diagnosticLog);
+    if (error.empty()) error = "Conversion worker failed (exit code " + std::to_string(exitCode) + ").";
     return static_cast<int>(exitCode);
 }
 
@@ -418,8 +304,6 @@ bool parseWorker(int argc, wchar_t** argv, WorkerOptions& w) {
         else if (a == L"--nam" && has(i)) w.inputNam = argv[++i];
         else if (a == L"--clo" && has(i)) w.outputClo = argv[++i];
         else if (a == L"--mapping" && has(i)) w.mappingName = argv[++i];
-        else if (a == L"--diag" && has(i)) w.diagnosticLog = argv[++i];
-        else if (a == L"--dump" && has(i)) w.crashDump = argv[++i];
         else if (a == L"--timeout" && has(i)) {
             const auto v = positiveInt(argv[++i]); if (!v) return false; w.timeoutSeconds = *v;
         } else return false;
@@ -554,89 +438,49 @@ bool prepareA2FullModel(const fs::path& inputNam, const fs::path& workDir,
 }
 
 int runWorker(const WorkerOptions& options) {
-    installWorkerCrashDiagnostics(options);
-    appendDiagnostic(options.diagnosticLog, "WORKER [1]: started");
-    appendDiagnostic(options.diagnosticLog, "WORKER [2]: DLL before LoadLibraryExW: " + fileDiagnostic(options.dll));
-    appendDiagnostic(options.diagnosticLog, "WORKER: input WAV: " + fileDiagnostic(options.inputWav));
-    appendDiagnostic(options.diagnosticLog, "WORKER: input NAM: " + fileDiagnostic(options.inputNam));
-    appendDiagnostic(options.diagnosticLog, "WORKER: output WAV: " + pathToUtf8(options.outputWav));
-    appendDiagnostic(options.diagnosticLog, "WORKER: output CLO: " + pathToUtf8(options.outputClo));
+    // Force all implicit relative/temp file activity performed by HTUSBTools into
+    // the per-job sandbox. This is intentionally done before loading the DLL.
+    const fs::path sandbox = options.outputClo.parent_path();
+    const std::wstring sandboxText = sandbox.wstring();
+    if (!sandboxText.empty()) {
+        SetCurrentDirectoryW(sandboxText.c_str());
+        SetEnvironmentVariableW(L"TEMP", sandboxText.c_str());
+        SetEnvironmentVariableW(L"TMP", sandboxText.c_str());
+    }
 
     HMODULE module = LoadLibraryExW(options.dll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
-    if (!module) {
-        appendDiagnostic(options.diagnosticLog, "WORKER [2]: LoadLibraryExW FAILED: " + win32ErrorMessage(GetLastError()));
-        return kExitDllLoad;
-    }
-    appendDiagnostic(options.diagnosticLog, "WORKER [3]: HTUSBTools.dll loaded successfully");
-
+    if (!module) return kExitDllLoad;
     auto fn = reinterpret_cast<NamConvertCloDataFn>(GetProcAddress(module, "namConvertCloData"));
-    if (!fn) {
-        appendDiagnostic(options.diagnosticLog, "WORKER [4]: GetProcAddress(namConvertCloData) FAILED");
-        FreeLibrary(module);
-        return kExitExportMissing;
-    }
-    appendDiagnostic(options.diagnosticLog, "WORKER [4]: namConvertCloData resolved");
+    if (!fn) { FreeLibrary(module); return kExitExportMissing; }
 
-    appendDiagnostic(options.diagnosticLog, "WORKER [5]: opening shared mapping");
     HANDLE mapping = OpenFileMappingW(FILE_MAP_ALL_ACCESS, FALSE, options.mappingName.c_str());
-    if (!mapping) {
-        appendDiagnostic(options.diagnosticLog, "WORKER [5]: OpenFileMappingW FAILED: " + win32ErrorMessage(GetLastError()));
-        FreeLibrary(module);
-        return kExitMappingFailure;
-    }
+    if (!mapping) { FreeLibrary(module); return kExitMappingFailure; }
     auto* mapped = static_cast<std::uint8_t*>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, kExpectedCloSize));
-    if (!mapped) {
-        appendDiagnostic(options.diagnosticLog, "WORKER [5]: MapViewOfFile FAILED: " + win32ErrorMessage(GetLastError()));
-        CloseHandle(mapping);
-        FreeLibrary(module);
-        return kExitMappingFailure;
-    }
-    appendDiagnostic(options.diagnosticLog, "WORKER [5]: shared mapping ready");
+    if (!mapped) { CloseHandle(mapping); FreeLibrary(module); return kExitMappingFailure; }
 
     fs::path modelPath = options.inputNam;
     std::string modelError;
-    const bool a2 = isA2SlimmableNam(options.inputNam);
-    appendDiagnostic(options.diagnosticLog, std::string("WORKER [6]: A2 SlimmableContainer=") + (a2 ? "yes" : "no"));
-    appendDiagnostic(options.diagnosticLog, "WORKER [7]: preparing model passed to HTUSBTools");
     if (!prepareA2FullModel(options.inputNam, options.outputClo.parent_path(), modelPath, modelError)) {
-        appendDiagnostic(options.diagnosticLog, "WORKER [7]: prepareA2FullModel FAILED: " + modelError);
+        std::cerr << "[worker] ERROR: " << modelError << "\n";
         UnmapViewOfFile(mapped);
         CloseHandle(mapping);
         FreeLibrary(module);
         return kExitStageFailure;
     }
-    appendDiagnostic(options.diagnosticLog, "WORKER [7]: model ready: " + fileDiagnostic(modelPath));
 
     const std::string inWav = pathToUtf8(options.inputWav);
     const std::string outWav = pathToUtf8(options.outputWav);
     const std::string nam = pathToUtf8(modelPath);
     std::uint32_t apiReturn = 0;
-    appendDiagnostic(options.diagnosticLog, "WORKER [8]: ENTER namConvertCloData");
     const DWORD exceptionCode = invokeDataWithSeh(fn, inWav.c_str(), outWav.c_str(), nam.c_str(), mapped, &apiReturn);
-    appendDiagnostic(options.diagnosticLog, "WORKER [9]: RETURN namConvertCloData exception=" + hex32(exceptionCode) + ", apiReturn=" + std::to_string(apiReturn));
-
     int result = kExitOk;
-    if (exceptionCode != 0) {
-        appendDiagnostic(options.diagnosticLog, "WORKER [9]: SEH exception caught inside namConvertCloData: " + hex32(exceptionCode));
-        result = kExitSehBase;
-    }
-    else if (apiReturn != kExpectedApiReturn) {
-        appendDiagnostic(options.diagnosticLog, "WORKER [9]: unexpected API return");
-        result = kExitConversionBadSize;
-    }
-    else {
-        appendDiagnostic(options.diagnosticLog, "WORKER [10]: observing CLO output buffer");
-        result = observeWorkerOutput(options, mapped);
-        appendDiagnostic(options.diagnosticLog, "WORKER [10]: observe result=" + std::to_string(result));
-    }
+    if (exceptionCode != 0) result = kExitSehBase;
+    else if (apiReturn != kExpectedApiReturn) result = kExitConversionBadSize;
+    else result = observeWorkerOutput(options, mapped);
 
-    appendDiagnostic(options.diagnosticLog, "WORKER [11]: output WAV after call: " + fileDiagnostic(options.outputWav));
-    appendDiagnostic(options.diagnosticLog, "WORKER [12]: unmapping shared buffer");
     UnmapViewOfFile(mapped);
     CloseHandle(mapping);
-    appendDiagnostic(options.diagnosticLog, "WORKER [13]: FreeLibrary begin");
     FreeLibrary(module);
-    appendDiagnostic(options.diagnosticLog, "WORKER [14]: clean exit result=" + std::to_string(result));
     return result;
 }
 
@@ -712,10 +556,6 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     }
 
     const fs::path work = makeWorkDirectory();
-    const fs::path diagnosticLog = uniquePath(outDir / (inputNam.stem().wstring() + L"_HTUSBTools_DIAGNOSTIC.log"));
-    appendDiagnostic(diagnosticLog, "=== NamToClo v2.6.7 diagnostic conversion begin ===");
-    appendDiagnostic(diagnosticLog, "Application: " + pathToUtf8(executablePath()));
-    appendDiagnostic(diagnosticLog, "Work directory: " + pathToUtf8(work));
     if (work.empty()) {
         result.exitCode = kExitStageFailure;
         result.error = "Could not create temporary work directory.";
@@ -723,16 +563,25 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     }
 
     report(status, L"Preparing conversion...");
+
+    // Copy the complete HTUSBTools runtime beside the job files.  The original
+    // runtime remains untouched; the worker loads only this writable private copy.
+    fs::path stagedHtusbDll;
+    std::string error;
+    if (!stageHtusbRuntime(runtime.dll, work, stagedHtusbDll, error)) {
+        result.exitCode = kExitStageFailure;
+        result.error = error;
+        fs::remove_all(work, ec);
+        return result;
+    }
+
     WorkerOptions worker;
-    worker.dll = runtime.dll;
+    worker.dll = stagedHtusbDll;
     worker.inputWav = work / L"nam_input_wav.wav";
     worker.outputWav = work / L"outputFile.wav";
     worker.inputNam = work / L"input.nam";
     worker.outputClo = work / L"ampero_2048.clo";
-    worker.diagnosticLog = diagnosticLog;
-    worker.crashDump = uniquePath(outDir / (inputNam.stem().wstring() + L"_HTUSBTools_CRASH.dmp"));
 
-    std::string error;
     const std::wstring stimulusStatus = std::wstring(L"Preparing stimulus: ") + stimulusModeDisplayName(stimulus.mode);
     report(status, stimulusStatus.c_str());
     if (!buildStimulus(runtime, stimulus, worker.inputWav, error)
@@ -754,13 +603,12 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
 
     if (isA2SlimmableNam(worker.inputNam))
         report(status, L"A2 Full: using the verified highest-max_value embedded submodel.");
-    appendDiagnostic(diagnosticLog, "=== FIRST HTUSBTools PASS: base conversion ===");
     report(status, L"Generating Ampero 2048 CLO...");
     bool capturedValid = false;
     const int workerExit = launchWorker(worker, shared, capturedValid, error);
     if (workerExit != kExitOk || !capturedValid || !valid2048(worker.outputClo)) {
         result.exitCode = workerExit != kExitOk ? workerExit : kExitConversionBadSize;
-        result.error = error.empty() ? "The generated Ampero CLO failed validation. Diagnostic log: " + pathToUtf8(diagnosticLog) : error;
+        result.error = error.empty() ? "The generated Ampero CLO failed validation." : error;
         fs::remove_all(work, ec);
         return result;
     }
@@ -805,14 +653,11 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
             // the matched refinement stimulus. The generated CLO is intentionally
             // ignored: refinement is applied to the ORIGINAL CLO from the first pass.
             WorkerOptions refineWorker;
-            refineWorker.dll = runtime.dll;
+            refineWorker.dll = stagedHtusbDll;
             refineWorker.inputWav = refineStimulus;
             refineWorker.outputWav = work / L"refine_nam_output.wav";
             refineWorker.inputNam = worker.inputNam;
             refineWorker.outputClo = work / L"refine_unused_2048.clo";
-            refineWorker.diagnosticLog = diagnosticLog;
-            refineWorker.crashDump = worker.crashDump;
-            appendDiagnostic(diagnosticLog, "=== SECOND HTUSBTools PASS: matched-input refinement render ===");
 
             SharedBuffer refineShared;
             if (!createSharedBuffer(refineShared, error)) {
@@ -829,7 +674,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
             if (refineWorkerExit != kExitOk || !refineCapturedValid || !valid2048(refineWorker.outputClo)) {
                 result.exitCode = refineWorkerExit != kExitOk ? refineWorkerExit : kExitConversionBadSize;
                 result.error = error.empty()
-                    ? "Could not render the refinement stimulus through the NAM. Diagnostic log: " + pathToUtf8(diagnosticLog)
+                    ? "Could not render the refinement stimulus through the NAM."
                     : error;
                 fs::remove_all(work, ec);
                 return result;
@@ -910,7 +755,6 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
         }
     }
 
-    appendDiagnostic(diagnosticLog, "=== Conversion completed successfully ===");
     fs::remove_all(work, ec);
     result.ok = true;
     result.exitCode = kExitOk;
