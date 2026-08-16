@@ -36,10 +36,7 @@ struct CloRefineStats {
     double refinedEnvelopeError = 0.0;
     double envelopeImprovementPercent = 0.0;
 
-    // v2.1 input-referenced spectral-profile error. Unlike MR-STFT, this
-    // compares a log-frequency transfer-magnitude curve derived from the
-    // known stimulus and output, so Block-A changes cannot improve the broad
-    // audio loss while moving the static spectral contour away from the NAM.
+    // Final-20-s VST-style Tone Match spectral error.
     double originalResponseSpectralError = 0.0;
     double refinedResponseSpectralError = 0.0;
     double responseSpectralImprovementPercent = 0.0;
@@ -48,12 +45,8 @@ struct CloRefineStats {
     // every candidate. It is intentionally not re-fitted during optimisation.
     double outputScale = 1.0;
 
-    // v2.0 A+P/K search: keep the best feasible point found inside
-    // global and low/mid/high temporal-error limits. This avoids reporting a misleading
-    // 0% across all metrics just because the accepted output falls back to the
-    // official CLO.
+    // Candidate metrics used by the current Block-B Tone Match validation.
     bool searchedCandidateAccepted = false;
-    double searchedComposite = 1.0;
     double searchedCompositeImprovementPercent = 0.0;
     double searchedNmse = 0.0;
     double searchedNmseImprovementPercent = 0.0;
@@ -68,28 +61,22 @@ struct CloRefineStats {
     double searchedResponseSpectralError = 0.0;
     double searchedResponseSpectralImprovementPercent = 0.0;
 
-    // P/K-specific level-conditioned temporal errors. Windows are classified
-    // from the actual stimulus RMS into low/mid/high excitation groups. This
-    // prevents the optimiser from trading a closer average spectrum for an
-    // audibly wrong amount of saturation.
+    // Level-conditioned temporal errors (low/mid/high stimulus excitation).
     double originalLowLevelNmse = 0.0, originalMidLevelNmse = 0.0, originalHighLevelNmse = 0.0;
     double searchedLowLevelNmse = 0.0, searchedMidLevelNmse = 0.0, searchedHighLevelNmse = 0.0;
     double searchedLowLevelImprovementPercent = 0.0;
     double searchedMidLevelImprovementPercent = 0.0;
     double searchedHighLevelImprovementPercent = 0.0;
-    double searchedLevelBalancedImprovementPercent = 0.0;
-    float searchedPPos = 0.0f, searchedPNeg = 0.0f, searchedKPos = 0.0f, searchedKNeg = 0.0f;
     std::string searchedDecisionReason;
 
-    float pPosBefore = 0.0f, pNegBefore = 0.0f, kPosBefore = 0.0f, kNegBefore = 0.0f;
-    float pPosAfter = 0.0f, pNegAfter = 0.0f, kPosAfter = 0.0f, kNegAfter = 0.0f;
 };
 
 using RefineStatusCallback = std::function<void(const std::wstring&)>;
 
-// Experimental v2.6.0 exact VST CAB Tone Match replication on the final 20 seconds.
+// Current VST-style CAB Tone Match refinement on the final 20 seconds.
 // Generates auto_tonematch_ir.wav (2048-sample minimum-phase), then applies it through
-// the existing Corrective IR implementation so the automatic and manual paths are identical.
+// the existing Corrective IR implementation. The analysis matches SOURCE_latest_19 style,
+// but the exported solver is not yet an exact replica of the VST 1024-sample export path.
 bool refineCloBOnly(const fs::path& inputClo2048,
                  const fs::path& stimulusWav,
                  const fs::path& targetWav,

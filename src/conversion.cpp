@@ -52,7 +52,6 @@ struct WorkerOptions {
     fs::path outputClo;
     std::wstring mappingName;
     int timeoutSeconds = kTimeoutSeconds;
-    bool forceA2Full = true;
 };
 
 struct SharedBuffer {
@@ -151,12 +150,10 @@ std::wstring makeWorkerCommandLine(const WorkerOptions& w) {
         L"--mapping", w.mappingName,
         L"--timeout", std::to_wstring(w.timeoutSeconds)
     };
-    std::vector<std::wstring> finalArgs = args;
-    if (w.forceA2Full) finalArgs.push_back(L"--a2-full");
     std::wstring cmd;
-    for (std::size_t i = 0; i < finalArgs.size(); ++i) {
+    for (std::size_t i = 0; i < args.size(); ++i) {
         if (i) cmd.push_back(L' ');
-        cmd += quoteWindowsArg(finalArgs[i]);
+        cmd += quoteWindowsArg(args[i]);
     }
     return cmd;
 }
@@ -263,8 +260,7 @@ bool parseWorker(int argc, wchar_t** argv, WorkerOptions& w) {
         else if (a == L"--mapping" && has(i)) w.mappingName = argv[++i];
         else if (a == L"--timeout" && has(i)) {
             const auto v = positiveInt(argv[++i]); if (!v) return false; w.timeoutSeconds = *v;
-        } else if (a == L"--a2-full") w.forceA2Full = true;
-        else return false;
+        } else return false;
     }
     return !w.dll.empty() && !w.inputWav.empty() && !w.outputWav.empty() && !w.inputNam.empty()
         && !w.outputClo.empty() && !w.mappingName.empty();
@@ -370,17 +366,11 @@ bool parseA2Submodels(const fs::path& inputNam, std::vector<A2SubmodelRecord>& r
     return true;
 }
 
-std::uint64_t fnv1a64(const std::string& data) {
-    std::uint64_t h = 14695981039346656037ull;
-    for (const unsigned char c : data) { h ^= c; h *= 1099511628211ull; }
-    return h;
-}
-
 bool writeTextFile(const fs::path& path, const std::string& text, std::string& error) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out) { error = "Could not create diagnostic file: " + pathToUtf8(path); return false; }
+    if (!out) { error = "Could not create temporary A2 Full model: " + pathToUtf8(path); return false; }
     out.write(text.data(), static_cast<std::streamsize>(text.size()));
-    if (!out.good()) { error = "Could not write diagnostic file: " + pathToUtf8(path); return false; }
+    if (!out.good()) { error = "Could not write temporary A2 Full model: " + pathToUtf8(path); return false; }
     return true;
 }
 
@@ -388,47 +378,17 @@ bool prepareA2FullModel(const fs::path& inputNam, const fs::path& workDir,
                         fs::path& modelPath, std::string& error) {
     modelPath = inputNam;
     if (!isA2SlimmableNam(inputNam)) return true;
+
     std::vector<A2SubmodelRecord> records;
     if (!parseA2Submodels(inputNam, records, error)) return false;
+
+    // Verified with Modelo4 A2: the highest-max_value embedded WaveNet is the
+    // Full renderer (8 channels, max_value 1.0); the lower entry is Lite.
     const auto& full = records.back();
     const fs::path fullNam = workDir / L"a2_full_model.nam";
     if (!writeTextFile(fullNam, full.modelJson, error)) return false;
     modelPath = fullNam;
     return true;
-}
-
-bool exportA2Diagnostics(const fs::path& stagedNam, const fs::path& originalNam, const fs::path& outDir,
-                         fs::path& fullOut, fs::path& liteOut, fs::path& reportOut, std::string& error) {
-    if (!isA2SlimmableNam(stagedNam)) return true;
-    std::vector<A2SubmodelRecord> records;
-    if (!parseA2Submodels(stagedNam, records, error)) return false;
-    const auto& lite = records.front();
-    const auto& full = records.back();
-    const std::wstring base = originalNam.stem().wstring();
-    liteOut = uniquePath(outDir / (base + L"_A2_LITE_EXTRACTED.nam"));
-    fullOut = uniquePath(outDir / (base + L"_A2_FULL_EXTRACTED.nam"));
-    reportOut = uniquePath(outDir / (base + L"_A2_SUBMODEL_DIAGNOSTICS.txt"));
-    if (!writeTextFile(liteOut, lite.modelJson, error) || !writeTextFile(fullOut, full.modelJson, error)) return false;
-
-    std::ostringstream diag;
-    diag.setf(std::ios::fixed); diag.precision(9);
-    diag << "NAM to CLO v2.6.3 A2 submodel diagnostics\r\n";
-    diag << "Input: " << pathToUtf8(originalNam) << "\r\n";
-    diag << "Submodels found: " << records.size() << "\r\n\r\n";
-    for (std::size_t i = 0; i < records.size(); ++i) {
-        diag << "submodel[" << i << "] max_value=" << records[i].maxValue
-             << " bytes=" << records[i].modelJson.size()
-             << " fnv1a64=0x" << std::hex << std::uppercase << fnv1a64(records[i].modelJson)
-             << std::dec << "\r\n";
-    }
-    diag << "\r\nSelected for HTUSBTools: highest max_value\r\n";
-    diag << "selected max_value=" << full.maxValue << "\r\n";
-    diag << "selected bytes=" << full.modelJson.size() << "\r\n";
-    diag << "selected fnv1a64=0x" << std::hex << std::uppercase << fnv1a64(full.modelJson) << std::dec << "\r\n";
-    diag << "FULL extracted file: " << pathToUtf8(fullOut) << "\r\n";
-    diag << "LITE extracted file: " << pathToUtf8(liteOut) << "\r\n";
-    diag << "NOTE: FULL/LITE labels are the hypothesis under test: highest max_value is sent to HTUSBTools; audition against the original A2 Full/Lite modes to verify semantics.\r\n";
-    return writeTextFile(reportOut, diag.str(), error);
 }
 
 int runWorker(const WorkerOptions& options) {
@@ -444,7 +404,7 @@ int runWorker(const WorkerOptions& options) {
 
     fs::path modelPath = options.inputNam;
     std::string modelError;
-    if (options.forceA2Full && !prepareA2FullModel(options.inputNam, options.outputClo.parent_path(), modelPath, modelError)) {
+    if (!prepareA2FullModel(options.inputNam, options.outputClo.parent_path(), modelPath, modelError)) {
         std::cerr << "[worker] ERROR: " << modelError << "\n";
         UnmapViewOfFile(mapped);
         CloseHandle(mapping);
@@ -565,17 +525,6 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
         return result;
     }
 
-    fs::path a2FullDiagnostic, a2LiteDiagnostic, a2ReportDiagnostic;
-    if (isA2SlimmableNam(worker.inputNam)) {
-        report(status, L"A2 SlimmableContainer detected: exporting FULL/LITE diagnostic NAMs...");
-        if (!exportA2Diagnostics(worker.inputNam, inputNam, outDir, a2FullDiagnostic, a2LiteDiagnostic, a2ReportDiagnostic, error)) {
-            result.exitCode = kExitStageFailure;
-            result.error = "Could not export A2 diagnostics: " + error;
-            fs::remove_all(work, ec);
-            return result;
-        }
-    }
-
     SharedBuffer shared;
     if (!createSharedBuffer(shared, error)) {
         result.exitCode = kExitMappingFailure;
@@ -586,7 +535,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     worker.mappingName = shared.name;
 
     if (isA2SlimmableNam(worker.inputNam))
-        report(status, L"A2 conversion: HTUSBTools will receive the extracted highest-max_value submodel (see A2 diagnostics file).");
+        report(status, L"A2 Full: using the verified highest-max_value embedded submodel.");
     report(status, L"Generating Ampero 2048 CLO...");
     bool capturedValid = false;
     const int workerExit = launchWorker(worker, shared, capturedValid, error);
@@ -603,14 +552,14 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     fs::path refinedWorkClo;
     fs::path bestWorkClo;
     if (refine.enabled) {
-        report(status, L"Exact VST CAB Tone Match replication on final 20 seconds (v2.6.0)...");
+        report(status, L"VST-style CAB Tone Match refinement on final 20 seconds...");
         refinedWorkClo = work / L"ampero_2048_VST_EXACT_REFINE.clo";
         bestWorkClo = work / L"ampero_2048_VST_EXACT_BEST.clo";
         if (!refineCloBOnly(worker.outputClo, worker.inputWav, worker.outputWav, refinedWorkClo, bestWorkClo,
                          refine, result.refineStats, error, status)
             || !valid2048(refinedWorkClo) || !valid2048(bestWorkClo)) {
             result.exitCode = kExitStageFailure;
-            result.error = error.empty() ? "Experimental CLO refinement failed." : error;
+            result.error = error.empty() ? "CLO refinement failed." : error;
             fs::remove_all(work, ec);
             return result;
         }
