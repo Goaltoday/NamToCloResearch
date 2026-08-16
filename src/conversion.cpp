@@ -10,6 +10,9 @@
 
 #include <chrono>
 #include <cstdint>
+#include <fstream>
+#include <cstdlib>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
@@ -39,7 +42,6 @@ constexpr int kExitSehBase = 100;
 constexpr std::uint8_t kBufferSentinel = 0xCC;
 constexpr std::uint64_t kNamConvertArg6 = 0;
 constexpr int kTimeoutSeconds = 180;
-constexpr double kA2FullSlimFactor = 1.0;
 
 struct WorkerOptions {
     fs::path dll;
@@ -271,58 +273,138 @@ bool isA2SlimmableNam(const fs::path& path) {
     std::vector<std::uint8_t> bytes;
     std::string error;
     if (!readFileBytes(path, bytes, error)) return false;
-    static constexpr char kMarker[] = "SlimmableContainer";
-    return std::search(bytes.begin(), bytes.end(),
-                       reinterpret_cast<const std::uint8_t*>(kMarker),
-                       reinterpret_cast<const std::uint8_t*>(kMarker) + sizeof(kMarker) - 1) != bytes.end();
+    static constexpr char kMarker[] = "\"architecture\"";
+    static constexpr char kSlim[] = "SlimmableContainer";
+    const auto a = std::search(bytes.begin(), bytes.end(),
+                               reinterpret_cast<const std::uint8_t*>(kMarker),
+                               reinterpret_cast<const std::uint8_t*>(kMarker) + sizeof(kMarker) - 1);
+    if (a == bytes.end()) return false;
+    const auto b = std::search(a, bytes.end(),
+                               reinterpret_cast<const std::uint8_t*>(kSlim),
+                               reinterpret_cast<const std::uint8_t*>(kSlim) + sizeof(kSlim) - 1);
+    return b != bytes.end();
 }
 
-using ConvertNamToNambWithSlimFn = const char*(__cdecl*)(const char*, double);
-
-fs::path findGeneratedNamb(const fs::path& inputNam) {
-    std::error_code ec;
-    fs::path expected = inputNam;
-    expected.replace_extension(L".namb");
-    if (fs::exists(expected, ec) && !ec) return expected;
-    ec.clear();
-    const fs::path appended = fs::path(inputNam.wstring() + L".namb");
-    if (fs::exists(appended, ec) && !ec) return appended;
-    ec.clear();
-    for (const auto& entry : fs::directory_iterator(inputNam.parent_path(), ec)) {
-        if (ec) break;
-        if (!entry.is_regular_file(ec) || ec) { ec.clear(); continue; }
-        std::wstring ext = entry.path().extension().wstring();
-        for (auto& c : ext) c = static_cast<wchar_t>(towlower(c));
-        if (ext == L".namb") return entry.path();
+// Return the end position (one past '}') of a JSON object beginning at openPos.
+// This tiny scanner is intentional: an A2 SlimmableContainer already contains each
+// submodel as a complete NAM JSON object, so we can copy the Full model verbatim
+// without introducing a JSON dependency or reserialising floating-point weights.
+std::optional<std::size_t> jsonObjectEnd(const std::string& text, std::size_t openPos) {
+    if (openPos >= text.size() || text[openPos] != '{') return std::nullopt;
+    int depth = 0;
+    bool inString = false;
+    bool escaped = false;
+    for (std::size_t i = openPos; i < text.size(); ++i) {
+        const char c = text[i];
+        if (inString) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') inString = false;
+            continue;
+        }
+        if (c == '"') { inString = true; continue; }
+        if (c == '{') ++depth;
+        else if (c == '}') {
+            if (--depth == 0) return i + 1;
+            if (depth < 0) return std::nullopt;
+        }
     }
-    return {};
+    return std::nullopt;
 }
 
-bool prepareA2FullModel(HMODULE module, const fs::path& inputNam, fs::path& modelPath, std::string& error) {
+std::optional<double> parseJsonNumberAfter(const std::string& text, std::size_t keyPos) {
+    const auto colon = text.find(':', keyPos);
+    if (colon == std::string::npos) return std::nullopt;
+    const char* begin = text.c_str() + colon + 1;
+    char* end = nullptr;
+    const double v = std::strtod(begin, &end);
+    if (end == begin) return std::nullopt;
+    return v;
+}
+
+bool prepareA2FullModel(const fs::path& inputNam, const fs::path& workDir,
+                        fs::path& modelPath, std::string& error) {
     modelPath = inputNam;
     if (!isA2SlimmableNam(inputNam)) return true;
 
-    auto convertFull = reinterpret_cast<ConvertNamToNambWithSlimFn>(
-        GetProcAddress(module, "convertNamToNambWithSlim"));
-    if (!convertFull) {
-        error = "A2 Full requested, but HTUSBTools.dll has no convertNamToNambWithSlim export.";
+    std::vector<std::uint8_t> bytes;
+    if (!readFileBytes(inputNam, bytes, error)) return false;
+    const std::string text(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+
+    const std::string submodelsKey = "\"submodels\"";
+    const auto key = text.find(submodelsKey);
+    if (key == std::string::npos) {
+        error = "A2 SlimmableContainer has no submodels array.";
+        return false;
+    }
+    const auto arrayOpen = text.find('[', key + submodelsKey.size());
+    if (arrayOpen == std::string::npos) {
+        error = "A2 SlimmableContainer submodels array is malformed.";
         return false;
     }
 
-    // Static analysis of this DLL shows SlimmableContainer thresholds are
-    // ascending: factor 0.0 selects the first/smallest model, while 1.0 falls
-    // through to the last/full model. Never fall back to the original A2 NAM,
-    // because that would silently re-introduce the Lite/Slim=0 path.
-    const std::string namUtf8 = pathToUtf8(inputNam);
-    const char* result = convertFull(namUtf8.c_str(), kA2FullSlimFactor);
-    (void)result;
+    double bestMax = -1.0e300;
+    std::size_t bestModelOpen = std::string::npos;
+    std::size_t bestModelEnd = std::string::npos;
+    std::size_t pos = arrayOpen + 1;
 
-    const fs::path namb = findGeneratedNamb(inputNam);
-    if (namb.empty()) {
-        error = "HTUSBTools.dll did not produce the Full A2 .namb model (slim factor 1.0).";
+    while (pos < text.size()) {
+        while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos]))) ++pos;
+        if (pos >= text.size() || text[pos] == ']') break;
+        if (text[pos] == ',') { ++pos; continue; }
+        if (text[pos] != '{') {
+            error = "A2 SlimmableContainer submodel entry is malformed.";
+            return false;
+        }
+        const auto entryEndOpt = jsonObjectEnd(text, pos);
+        if (!entryEndOpt) {
+            error = "A2 SlimmableContainer submodel object is malformed.";
+            return false;
+        }
+        const std::size_t entryEnd = *entryEndOpt;
+        const std::string maxKey = "\"max_value\"";
+        const auto maxPos = text.find(maxKey, pos);
+        const std::string modelKey = "\"model\"";
+        const auto modelPos = text.find(modelKey, pos);
+        if (maxPos < entryEnd && modelPos < entryEnd) {
+            const auto maxValue = parseJsonNumberAfter(text, maxPos);
+            const auto modelColon = text.find(':', modelPos + modelKey.size());
+            const auto modelOpen = modelColon == std::string::npos ? std::string::npos : text.find('{', modelColon + 1);
+            if (maxValue && modelOpen < entryEnd) {
+                const auto modelEnd = jsonObjectEnd(text, modelOpen);
+                if (modelEnd && *modelEnd <= entryEnd && *maxValue > bestMax) {
+                    bestMax = *maxValue;
+                    bestModelOpen = modelOpen;
+                    bestModelEnd = *modelEnd;
+                }
+            }
+        }
+        pos = entryEnd;
+    }
+
+    if (bestModelOpen == std::string::npos || bestModelEnd == std::string::npos) {
+        error = "Could not extract the Full A2 submodel from SlimmableContainer.";
         return false;
     }
-    modelPath = namb;
+
+    // The highest max_value is the Full submodel (normally max_value == 1.0).
+    // Crucially, this remains a normal .nam file. Passing the .namb produced by
+    // convertNamToNambWithSlim() to namConvertCloData() is invalid and caused
+    // the 0xC0000005 crash observed in v2.6.1.
+    const fs::path fullNam = workDir / L"a2_full_model.nam";
+    std::ofstream out(fullNam, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        error = "Could not create temporary A2 Full NAM.";
+        return false;
+    }
+    out.write(text.data() + bestModelOpen,
+              static_cast<std::streamsize>(bestModelEnd - bestModelOpen));
+    if (!out.good()) {
+        error = "Could not write temporary A2 Full NAM.";
+        return false;
+    }
+    out.close();
+    modelPath = fullNam;
     return true;
 }
 
@@ -339,7 +421,7 @@ int runWorker(const WorkerOptions& options) {
 
     fs::path modelPath = options.inputNam;
     std::string modelError;
-    if (options.forceA2Full && !prepareA2FullModel(module, options.inputNam, modelPath, modelError)) {
+    if (options.forceA2Full && !prepareA2FullModel(options.inputNam, options.outputClo.parent_path(), modelPath, modelError)) {
         std::cerr << "[worker] ERROR: " << modelError << "\n";
         UnmapViewOfFile(mapped);
         CloseHandle(mapping);
@@ -470,7 +552,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     worker.mappingName = shared.name;
 
     if (isA2SlimmableNam(worker.inputNam))
-        report(status, L"A2 SlimmableContainer detected: forcing FULL model (slim factor 1.0)...");
+        report(status, L"A2 SlimmableContainer detected: extracting embedded FULL submodel (max_value 1.0)...");
     report(status, L"Generating Ampero 2048 CLO...");
     bool capturedValid = false;
     const int workerExit = launchWorker(worker, shared, capturedValid, error);

@@ -1,8 +1,8 @@
 # NamToCloResearch
 
-## v2.6.1 - A2 Full rendering
+## v2.6.2 - A2 Full rendering
 
-A2 `SlimmableContainer` NAMs are now explicitly preprocessed through `HTUSBTools.dll::convertNamToNambWithSlim(..., 1.0)` and the resulting Full `.namb` is supplied to the existing CLO conversion path. Normal non-slimmable NAMs are unchanged. There is no fallback to Slim if Full preprocessing fails. See `TESTING_A2_FULL_V2.6.1.md`.
+A2 `SlimmableContainer` NAMs are now handled by extracting the embedded submodel with the highest `max_value` (normally `1.0`) to a temporary standard `.nam`, which is then supplied to the unchanged `namConvertCloData` path. This replaces the invalid v2.6.1 `.namb` hand-off that could crash with Windows exception `0xC0000005`. Normal non-slimmable NAMs are unchanged. See `TESTING_A2_FULL_V2.6.2.md`.
 
 # NAM to CLO 2.5.1
 
