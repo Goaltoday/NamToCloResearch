@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(NamToClo VERSION 2.7.0.1 LANGUAGES CXX RC)
+project(NamToClo VERSION 2.7.0.2 LANGUAGES CXX RC)
 
 if(NOT WIN32)
     message(FATAL_ERROR "NAM to CLO targets Windows x64.")
@@ -10,6 +10,7 @@ endif()
 
 option(NTC_ENABLE_INDEPENDENT_TRAINER "Build the independent NAM -> CLO trainer tab" ON)
 set(NAM_CORE_SOURCE_DIR "" CACHE PATH "Optional local NeuralAmpModelerCore source tree (avoids network FetchContent)")
+set(R8BRAIN_SOURCE_DIR "" CACHE PATH "Optional local r8brain-free-src source tree (avoids network FetchContent)")
 
 add_executable(NamToClo WIN32
     src/gui.cpp
@@ -59,6 +60,30 @@ if(NTC_ENABLE_INDEPENDENT_TRAINER)
             "Provide -DNAM_CORE_SOURCE_DIR=<path> or allow FetchContent network access.")
     endif()
 
+    # The official converter uses r8b::CDSPResampler24. r8brain-free-src is
+    # header-only and is compiled into this executable; there is no runtime DLL.
+    if(R8BRAIN_SOURCE_DIR)
+        set(_ntc_r8brain_dir "${R8BRAIN_SOURCE_DIR}")
+    else()
+        include(FetchContent)
+        FetchContent_Declare(
+            ntc_r8brain_src
+            GIT_REPOSITORY https://github.com/avaneev/r8brain-free-src.git
+            GIT_TAG master
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_GetProperties(ntc_r8brain_src)
+        if(NOT ntc_r8brain_src_POPULATED)
+            FetchContent_Populate(ntc_r8brain_src)
+        endif()
+        set(_ntc_r8brain_dir "${ntc_r8brain_src_SOURCE_DIR}")
+    endif()
+    if(NOT EXISTS "${_ntc_r8brain_dir}/CDSPResampler.h")
+        message(FATAL_ERROR
+            "Independent trainer requested but r8brain-free-src was not found. "
+            "Provide -DR8BRAIN_SOURCE_DIR=<path> or allow FetchContent network access.")
+    endif()
+
     file(GLOB_RECURSE NTC_NAMCORE_SOURCES CONFIGURE_DEPENDS
         "${_ntc_namcore_dir}/NAM/*.cpp"
     )
@@ -78,6 +103,7 @@ if(NTC_ENABLE_INDEPENDENT_TRAINER)
         src/independent_trainer.cpp
         src/independent_trainer.hpp
     )
+    target_include_directories(NamToClo PRIVATE "${_ntc_r8brain_dir}")
     target_link_libraries(NamToClo PRIVATE ntc_namcore)
     target_compile_definitions(NamToClo PRIVATE NTC_HAS_INDEPENDENT_TRAINER=1)
 
@@ -93,6 +119,9 @@ if(NTC_ENABLE_INDEPENDENT_TRAINER)
     endif()
     if(EXISTS "${_ntc_namcore_dir}/Dependencies/AudioDSPTools/LICENSE")
         install(FILES "${_ntc_namcore_dir}/Dependencies/AudioDSPTools/LICENSE" DESTINATION . RENAME AUDIODSPTOOLS_LICENSE.txt)
+    endif()
+    if(EXISTS "${_ntc_r8brain_dir}/LICENSE")
+        install(FILES "${_ntc_r8brain_dir}/LICENSE" DESTINATION . RENAME R8BRAIN_LICENSE.txt)
     endif()
 else()
     target_compile_definitions(NamToClo PRIVATE NTC_HAS_INDEPENDENT_TRAINER=0)

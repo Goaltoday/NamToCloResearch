@@ -1,6 +1,6 @@
-# NAM to CLO v2.7.0-NATIVE1
+# NAM to CLO v2.7.0-NATIVE2
 
-This build keeps the existing conversion path intact and adds a second, parallel **Independent / Native (experimental)** tab.
+This build keeps the existing conversion path intact and adds a second, parallel **Independent / Native** tab.
 
 ## Two independent tabs
 
@@ -8,7 +8,7 @@ This build keeps the existing conversion path intact and adds a second, parallel
 
 This is the existing v2.6.7/v1.8 research workflow. It uses the user-supplied `HTUSBTools.dll` conversion path and keeps the existing Corrective IR and Tone Match refinement options.
 
-### Independent / Native (experimental)
+### Independent / Native
 
 This new path does **not** load `GP-200.exe`, `HTUSBTools.dll`, or an Ampero/Valeton conversion DLL. The NAM is rendered locally with the open-source NeuralAmpModelerCore library compiled into the application, and the NAM -> CLO identification/training logic is implemented in this project.
 
@@ -36,8 +36,8 @@ The independent output filenames are deliberately different so they can be compa
 
 The Independent / Native tab is a **research baseline, not a claim of byte-identical Valeton conversion**. The major signal path and trainer decisions have been reconstructed, but this first implementation intentionally keeps two numerical/implementation substitutions visible for validation:
 
-- the source-rate conversion uses a self-contained windowed-sinc implementation instead of reproducing Valeton's exact r8brain build and floating-point order;
-- the exact proprietary 50-tap initial-conditioning implementation is not claimed bit-exact in this baseline.
+- source-rate conversion uses the same `r8b::CDSPResampler24` class identified in the official converter (statically/header-only, no runtime DLL); only last-bit identity with the exact historical Valeton build remains unclaimed;
+- the exact reconstructed 50-float conditioning tables for 44.1/48/96 kHz are embedded and used by the initial identification stage.
 
 The purpose of this tab is to generate independent CLOs for direct comparison against known official NAM -> CLO pairs. Once the measured differences are known, those remaining details can be narrowed without touching the existing HTUSBTools path.
 

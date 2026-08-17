@@ -3,6 +3,7 @@
 #include "stimulus.hpp"
 
 #include <NAM/get_dsp.h>
+#include <CDSPResampler.h>
 
 #include <algorithm>
 #include <array>
@@ -72,28 +73,81 @@ bool readPcm16Mono(const fs::path& path, std::vector<float>& x, std::uint32_t& s
     return true;
 }
 
-// Windowed-sinc SRC. This is deliberately local/self-contained: no runtime SRC DLL.
-std::vector<float> resampleSinc(const std::vector<float>& in, double inRate, double outRate) {
-    if(in.empty() || std::abs(inRate-outRate)<1e-9) return in;
-    const std::size_t outN=static_cast<std::size_t>(std::llround(static_cast<double>(in.size())*outRate/inRate));
-    std::vector<float> out(outN,0.0f);
-    constexpr int radius=32;
-    const double ratio=outRate/inRate;
-    const double cutoff=std::min(1.0,ratio)*0.94;
-    for(std::size_t i=0;i<outN;++i){
-        const double pos=static_cast<double>(i)*inRate/outRate;
-        const long center=static_cast<long>(std::floor(pos));
-        long double sum=0,ws=0;
-        for(int k=-radius+1;k<=radius;++k){
-            const long j=center+k; if(j<0||j>=static_cast<long>(in.size()))continue;
-            const double t=pos-static_cast<double>(j);
-            const double z=kPi*t*cutoff;
-            const double sinc=std::abs(z)<1e-12?1.0:std::sin(z)/z;
-            const double q=t/static_cast<double>(radius);
-            const double win=std::abs(q)>=1.0?0.0:0.5*(1.0+std::cos(kPi*q));
-            const double w=cutoff*sinc*win; sum+=static_cast<long double>(in[static_cast<std::size_t>(j)])*w; ws+=w;
-        }
-        out[i]=std::abs(static_cast<double>(ws))>1e-18?static_cast<float>(sum/ws):0.0f;
+// The official converter instantiates r8b::CDSPResampler24.  Use the same
+// r8brain class in-process (header-only/static source dependency), so the
+// native path has no Valeton/Hotone runtime DLL dependency.
+std::vector<float> resampleR8Brain24(const std::vector<float>& in, double inRate, double outRate) {
+    if (in.empty() || std::abs(inRate - outRate) < 1e-9) return in;
+    const std::size_t outN = static_cast<std::size_t>(
+        std::llround(static_cast<double>(in.size()) * outRate / inRate));
+    std::vector<float> out(outN, 0.0f);
+    const int maxIn = static_cast<int>(std::min<std::size_t>(
+        in.size(), static_cast<std::size_t>(std::numeric_limits<int>::max())));
+    r8b::CDSPResampler24 rs(inRate, outRate, std::max(1, maxIn));
+    rs.oneshot(in.data(), static_cast<int>(in.size()), out.data(), static_cast<int>(out.size()));
+    return out;
+}
+
+// Exact 50-float tables reconstructed from GP-200.exe.  The branch tests in
+// the official converter are against 44100.0f, 48000.0f and 96000.0f and the
+// selected table is passed to the 50-tap conditioning FIR used by the initial
+// 23-28 s identification stage.  These tables are trainer-only; they are not
+// serialized into Block A or Block B.
+constexpr std::array<float,50> kInitialFir44100 = {
+ 2.368210077f, 3.574280024f, 3.095710039f, -0.392399013f, -3.150949955f,
+ -3.830709934f, -2.215640068f, -0.8829950094f, -0.212944001f, -0.1931400001f,
+ 0.2239619941f, 0.4040279984f, 0.3783220053f, 0.08940640092f, 0.1935559958f,
+ 0.283547014f, 0.3439449966f, 0.05293060094f, -0.03797249869f, -0.06761389971f,
+ 0.07335829735f, -0.02648900077f, -0.02291630022f, 0.02360440046f, 0.08525899798f,
+ -0.009279790334f, 0.04381980002f, 0.0233258009f, 0.1348949969f, 0.006286839955f,
+ -0.02591219917f, -0.01955270022f, 0.08531299978f, -0.01847779937f, -0.07664210349f,
+ -0.0785638988f, 0.03350910172f, 0.02729599923f, -0.09931690246f, -0.09534750134f,
+ 0.05328249931f, 0.03427400067f, -0.09364210069f, -0.06697729975f, -0.01135309972f,
+ 0.03991980106f, -0.0771979019f, -0.09798060358f, 0.002032200107f, 0.04304929823f
+};
+constexpr std::array<float,50> kInitialFir48000 = {
+ 2.369808912f, 3.532199383f, 3.386006355f, 0.5711528063f, -2.494512081f,
+ -3.850381851f, -3.163845062f, -1.511753678f, -0.5816931129f, -0.1761655957f,
+ -0.1537622064f, 0.2662706077f, 0.4051620066f, 0.3895485103f, 0.1137828976f,
+ 0.1536727995f, 0.2604695857f, 0.3561989963f, 0.202282995f, -0.01788109913f,
+ -0.05925950035f, -0.03052599914f, 0.07328040153f, -0.0387939997f, -0.0205725003f,
+ 0.02094990015f, 0.08917230368f, -0.0006698999787f, 0.03298040107f, 0.01907679997f,
+ 0.095199503f, 0.09397300333f, -0.02691840008f, -0.02818600088f, 0.003533599898f,
+ 0.08518820256f, -0.02848079987f, -0.07661850005f, -0.08217039704f, 0.0129757002f,
+ 0.05085289851f, -0.06227429956f, -0.1223426983f, -0.02208109945f, 0.08036129922f,
+ -0.02014300041f, -0.09813290089f, -0.05815440044f, -0.003250899957f, 0.03926600143f
+};
+constexpr std::array<float,50> kInitialFir96000 = {
+ 2.369808912f, 3.144882202f, 3.532199383f, 3.684798717f, 3.386006594f,
+ 2.297138929f, 0.5711528063f, -1.175742626f, -2.494512081f, -3.369890928f,
+ -3.85038209f, -3.795108557f, -3.163845062f, -2.270354748f, -1.511753798f,
+ -0.987195015f, -0.5816931725f, -0.2824920118f, -0.1761655957f, -0.2019508034f,
+ -0.1537622064f, 0.04795689881f, 0.2662706077f, 0.3740029931f, 0.4051620066f,
+ 0.4213505089f, 0.3895485103f, 0.2569816113f, 0.1137828976f, 0.08147999644f,
+ 0.1536727995f, 0.2281782031f, 0.2604695857f, 0.3036418855f, 0.3561989963f,
+ 0.3322631121f, 0.202282995f, 0.05376290157f, -0.01788109913f, -0.0349936001f,
+ -0.05925950035f, -0.07576920092f, -0.03052599914f, 0.04923079908f, 0.07328040153f,
+ 0.01946049929f, -0.0387939997f, -0.04402400181f, -0.0205725003f, -0.004320300184f
+};
+
+const std::array<float,50>& initialFirForRate(double sr) {
+    if (std::abs(sr - 44100.0) < 1.0) return kInitialFir44100;
+    if (std::abs(sr - 48000.0) < 1.0) return kInitialFir48000;
+    if (std::abs(sr - 96000.0) < 1.0) return kInitialFir96000;
+    // Official tables exist only for the three reconstructed paths.  The NAM
+    // path normally resolves to one of them; 48 kHz is the official fallback.
+    return kInitialFir48000;
+}
+
+std::vector<float> applyInitialConditioningFir(const std::vector<float>& in, double sr) {
+    const auto& h = initialFirForRate(sr);
+    std::vector<float> out(in.size(), 0.0f);
+    for (std::size_t n = 0; n < in.size(); ++n) {
+        long double acc = 0.0;
+        const std::size_t kmax = std::min<std::size_t>(h.size() - 1, n);
+        for (std::size_t k = 0; k <= kmax; ++k)
+            acc += static_cast<long double>(h[k]) * in[n - k];
+        out[n] = static_cast<float>(acc);
     }
     return out;
 }
@@ -121,7 +175,7 @@ bool renderNam(const fs::path& path,const std::vector<float>& stimulus44100,int 
         auto dsp=nam::get_dsp(path); if(!dsp){error="NeuralAmpModelerCore could not load the NAM.";return false;}
         rate=dsp->GetExpectedSampleRate();if(!(rate>1000.0&&rate<384000.0))rate=48000.0;
         report(status,L"Independent: rendering NAM at "+std::to_wstring(static_cast<int>(std::llround(rate)))+L" Hz...");
-        input=resampleSinc(stimulus44100,44100.0,rate);
+        input=resampleR8Brain24(stimulus44100,44100.0,rate);
         target.assign(input.size(),0.0f);
         dsp->Reset(rate,blockSize);
         std::vector<NAM_SAMPLE> ib(static_cast<std::size_t>(blockSize)),ob(static_cast<std::size_t>(blockSize));
@@ -191,7 +245,15 @@ std::vector<double> spectrumOfFir(const std::vector<float>&h){std::vector<std::c
 double lossFromRatio(const std::vector<double>&r){long double s=0;for(std::size_t i=0;i<512;++i){const double pos=static_cast<double>(i)*(r.size()-1)/511.0;const auto a=static_cast<std::size_t>(pos),b=std::min(a+1,r.size()-1);const double f=pos-a,v=r[a]+(r[b]-r[a])*f;s+=std::abs(std::log(v+kEps));}return static_cast<double>(s/512.0);}
 
 void fitAB(Model& m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status){
-    std::vector<double>aState(kBins,1.0);double step=1.0,best=100.0;Model bestM=m;auto bestA=aState;
+    report(status,L"Independent: official 50-tap initial conditioning...");
+    const auto conditionedInput = applyInitialConditioningFir(input, sr);
+    std::vector<float> conditionedPrediction;
+    renderModel(m, conditionedInput, conditionedPrediction, true);
+    const std::size_t initB = static_cast<std::size_t>(std::llround(23.0 * sr));
+    const std::size_t initE = static_cast<std::size_t>(std::llround(28.0 * sr));
+    std::vector<double>aState = smoothDb(ratioSpectrum(conditionedPrediction,target,initB,initE),5);
+    for (auto& v : aState) v = std::clamp(v, 0.2, 5.0);
+    double step=1.0,best=100.0;Model bestM=m;auto bestA=aState;
     struct Phase{double t0,t1;int n;const wchar_t*name;};const Phase phases[]={{23,28,3,L"sweep"},{6,21,2,L"low-level"},{30,50,5,L"multi-level"}};
     int iter=0;
     for(const auto&ph:phases)for(int q=0;q<ph.n;++q){++iter;report(status,L"Independent: A/B fit "+std::to_wstring(iter)+L"/10 ("+ph.name+L")...");std::vector<float>pred;renderModel(m,input,pred,true);const std::size_t b=static_cast<std::size_t>(std::llround(ph.t0*sr)),e=static_cast<std::size_t>(std::llround(ph.t1*sr));auto corr=smoothDb(ratioSpectrum(pred,target,b,e),5);for(auto&v:corr)v=std::clamp(std::pow(std::max(1e-12,v),step),0.2,5.0);
@@ -206,7 +268,9 @@ std::vector<double> tailRatio(const std::vector<float>&model,const std::vector<f
 std::vector<float> convolveTruncate(const std::vector<float>&a,const std::vector<float>&b,std::size_t n){std::vector<float>o(n);for(std::size_t i=0;i<a.size();++i)for(std::size_t j=0;j<b.size()&&i+j<n;++j)o[i+j]+=a[i]*b[j];return o;}
 void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status){report(status,L"Independent: final Block B tail refinement...");std::vector<float>pred;renderModel(m,input,pred,true);auto r=tailRatio(pred,target,sr);for(auto&v:r)v=std::clamp(v,.1,10.0);auto c=minimumPhase(r,256);m.B=convolveTruncate(m.B,c,kB);const double mean=std::accumulate(m.B.begin(),m.B.end(),0.0)/m.B.size();for(auto&v:m.B)v=static_cast<float>(v-mean);renderModel(m,input,pred,true);const std::size_t b=static_cast<std::size_t>(std::llround(50*sr)),e=std::min(pred.size(),static_cast<std::size_t>(std::llround(70*sr)));long double et=0,ep=0;for(std::size_t i=b;i<e;++i){et+=static_cast<long double>(target[i])*target[i];ep+=static_cast<long double>(pred[i])*pred[i];}if(ep>1e-30){const double g=std::sqrt(static_cast<double>(et/ep));for(auto&v:m.B)v=static_cast<float>(v*g);}}
 
-std::vector<float> resampleFirFixed(const std::vector<float>&h,double sr,std::size_t outLen){auto r=resampleSinc(h,sr,44100.0);r.resize(outLen,0);return r;}
+std::vector<float> resampleFirFixed(const std::vector<float>&h,double sr,std::size_t outLen){
+    auto r=resampleR8Brain24(h,sr,44100.0);r.resize(outLen,0);return r;
+}
 bool serialize2048(const fs::path&path,const Model&m,double trainerRate,std::string&error){std::vector<std::uint8_t>d(kCloBytes,0);std::memcpy(d.data(),"VTSI",4);put32(d,0x04,0x2288);put32(d,0x14,0x2200);putDouble(d,0x18,1);putDouble(d,0x20,0);putDouble(d,0x28,0);putDouble(d,0x30,0);putDouble(d,0x38,0);
     putDouble(d,0x40,m.post.b0);putDouble(d,0x48,m.post.b1);putDouble(d,0x50,m.post.b2);putDouble(d,0x58,m.post.a1);putDouble(d,0x60,m.post.a2);putFloat(d,0x68,m.pk.pp);putFloat(d,0x6c,m.pk.pn);putFloat(d,0x70,m.pk.kp);putFloat(d,0x74,m.pk.kn);put32(d,0x78,0);put32(d,0x7c,128);put32(d,0x80,128);put32(d,0x84,2048);
     auto A44=resampleFirFixed(m.A,trainerRate,128),B44=resampleFirFixed(m.B,trainerRate,2048);for(auto&v:B44)v*=4.0f;for(std::size_t i=0;i<A44.size();++i)putFloat(d,0x88+4*i,A44[i]);for(std::size_t i=0;i<B44.size();++i)putFloat(d,0x88+4*(128+i),B44[i]);const auto crc=crc16Modbus(d.data()+0x0c,d.size()-0x0c);d[8]=static_cast<std::uint8_t>(crc>>8);d[9]=static_cast<std::uint8_t>(crc);return writeFileBytes(path,d.data(),d.size(),error);}

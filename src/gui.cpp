@@ -226,8 +226,8 @@ void updateBackendUi() {
         EnableWindow(gBrowseRefineTargetButton, FALSE);
         setText(gInfo,
             L"Independent / Native: NAM is rendered locally and the CLO is trained/serialized in this program. "
-            L"No GP-200.exe or HTUSBTools.dll is loaded. Experimental reconstructed baseline for comparison.");
-        setText(gStatus, L"Independent / Native backend selected. Ready for an experimental conversion.");
+            L"No GP-200.exe or HTUSBTools.dll is loaded. Reconstructed native conversion baseline for comparison.");
+        setText(gStatus, L"Independent / Native backend selected. Ready for conversion.");
     } else {
         setText(gInfo,
             L"Current backend: existing HTUSBTools conversion path. Corrective IR and Tone Match refinement remain available.");
@@ -664,7 +664,7 @@ void createUi(HWND hwnd) {
     tab.pszText = const_cast<LPWSTR>(L"Current / HTUSBTools");
     TabCtrl_InsertItem(gBackendTabs, 0, &tab);
 #if NTC_HAS_INDEPENDENT_TRAINER
-    tab.pszText = const_cast<LPWSTR>(L"Independent / Native (experimental)");
+    tab.pszText = const_cast<LPWSTR>(L"Independent / Native");
 #else
     tab.pszText = const_cast<LPWSTR>(L"Independent / Native (not built)");
 #endif

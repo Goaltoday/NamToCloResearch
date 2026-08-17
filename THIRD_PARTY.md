@@ -20,3 +20,8 @@ runtime\ampero\nam_input_wav.wav
 Those files must come from a legally obtained installation/package and remain subject to their original license terms.
 
 The source code dynamically loads `HTUSBTools.dll` only when the existing conversion path is used. The Independent / Native tab does not call that conversion DLL.
+
+
+## r8brain-free-src
+
+The independent trainer uses the header-only `r8b::CDSPResampler24` sample-rate converter from r8brain-free-src (MIT). It is compiled into the executable and is not a runtime DLL dependency. Credit: Sample rate converter designed by Aleksey Vaneev of Voxengo.

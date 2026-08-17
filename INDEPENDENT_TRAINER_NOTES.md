@@ -19,8 +19,8 @@
 
 ## Deliberate first-pass substitutions / not claimed bit-identical
 
-- Local windowed-sinc SRC is used instead of reproducing the exact r8brain implementation/version/order used by the official binary.
-- The exact 50-tap initial-conditioning stage is not asserted bit-identical in this first native implementation.
+- SRC now uses `r8b::CDSPResampler24`, matching the r8brain resampler class identified in the official converter. The source is compiled into the executable; no runtime DLL is used. Last-bit identity can still depend on the exact historical r8brain revision/compiler floating-point order.
+- The three exact 50-float initial-conditioning tables reconstructed from `GP-200.exe` (44.1/48/96 kHz) are now embedded and applied in the initial 23–28 s identification path.
 - FFT/exp/log/pow and floating-point accumulation order are not expected to match the official MSVC binary at the last bit.
 
 ## Golden-reference workflow
