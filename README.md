@@ -1,4 +1,6 @@
-# NAM to CLO v2.7.0-NATIVE2
+# NAM to CLO v2.7.0-NATIVE3
+
+Build fix: MSVC/r8brain const-input compatibility in the independent SRC path.
 
 This build keeps the existing conversion path intact and adds a second, parallel **Independent / Native** tab.
 

@@ -84,7 +84,15 @@ std::vector<float> resampleR8Brain24(const std::vector<float>& in, double inRate
     const int maxIn = static_cast<int>(std::min<std::size_t>(
         in.size(), static_cast<std::size_t>(std::numeric_limits<int>::max())));
     r8b::CDSPResampler24 rs(inRate, outRate, std::max(1, maxIn));
-    rs.oneshot(in.data(), static_cast<int>(in.size()), out.data(), static_cast<int>(out.size()));
+
+    // Some r8brain revisions expose oneshot() through an implementation path
+    // whose input helper requires a non-const float pointer.  `in` is const here,
+    // so passing in.data() directly fails to compile on MSVC with
+    // "Conversion loses qualifiers".  Keep a mutable working copy.  r8brain
+    // still performs its internal processing in double precision.
+    std::vector<float> inputWork(in.begin(), in.end());
+    rs.oneshot(inputWork.data(), static_cast<int>(inputWork.size()),
+               out.data(), static_cast<int>(out.size()));
     return out;
 }
 
