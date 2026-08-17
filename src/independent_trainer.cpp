@@ -310,37 +310,29 @@ std::vector<float> sliceSignal(const std::vector<float>&x,std::size_t b,std::siz
 
 std::vector<float> hammingF(std::size_t n){std::vector<float>w(n,1.0f);if(n<=1)return w;for(std::size_t i=0;i<n;++i){const double ph=2.0*kPi*static_cast<double>(i)/static_cast<double>(n-1);w[i]=static_cast<float>(0.54-0.46*std::cos(ph));}return w;}
 std::vector<double> fftFrequencyGrid(double sr){std::vector<double>f(kBins);for(std::size_t k=0;k<kBins;++k)f[k]=static_cast<double>(k)*(sr*0.5)/static_cast<double>(kBins-1);return f;}
+std::vector<float> fftFrequencyGridF(double sr){std::vector<float>f(kBins);const float ny=static_cast<float>(sr*0.5);for(std::size_t k=0;k<kBins;++k)f[k]=static_cast<float>(k)*ny/static_cast<float>(kBins-1);return f;}
 std::vector<double> linspace(double a,double b,std::size_t n){std::vector<double>v(n);if(!n)return v;if(n==1){v[0]=a;return v;}for(std::size_t i=0;i<n;++i)v[i]=a+(b-a)*static_cast<double>(i)/static_cast<double>(n-1);v.front()=a;v.back()=b;return v;}
 
 // 0x5557c0/related estimator: ceil(0.125*Fs) Hamming frames, 50% overlap,
-// frame means removed, long frames folded modulo 2048, then Sxx/Sxy.
-std::vector<double> ratioSpectrum(const std::vector<float>& model,const std::vector<float>& target,double sr){
+// frame means removed, long frames folded modulo 2048, then float32 Sxx/Sxy.
+std::vector<float> ratioSpectrumF(const std::vector<float>& model,const std::vector<float>& target,double sr){
     const std::size_t L=std::max<std::size_t>(1,static_cast<std::size_t>(std::ceil(0.125*sr)));
     const std::size_t hop=std::max<std::size_t>(1,L/2); const auto w=hammingF(L);
     const std::size_t end=std::min(model.size(),target.size());
-    if(end<L)return std::vector<double>(kBins,1.0);
+    if(end<L)return std::vector<float>(kBins,1.0f);
     std::vector<float>sxx(kBins,0.0f),sxyRe(kBins,0.0f),sxyIm(kBins,0.0f);std::size_t frames=0;
     for(std::size_t p=0;p+L<=end;p+=hop){
         float mx=0.0f,my=0.0f;for(std::size_t i=0;i<L;++i){mx+=model[p+i];my+=target[p+i];}mx/=static_cast<float>(L);my/=static_cast<float>(L);
-        std::vector<std::complex<double>>X(kFft),Y(kFft);
-        // The converter folds each 125 ms Hamming frame modulo 2048 before
-        // the FFT.  Frame/window arithmetic and spectral accumulators are
-        // float32 in the official binary.
-        std::vector<float>xf(kFft,0.0f),yf(kFft,0.0f);
+        std::vector<std::complex<double>>X(kFft),Y(kFft);std::vector<float>xf(kFft,0.0f),yf(kFft,0.0f);
         for(std::size_t i=0;i<L;++i){const std::size_t j=i&(kFft-1);xf[j]+=(model[p+i]-mx)*w[i];yf[j]+=(target[p+i]-my)*w[i];}
         for(std::size_t i=0;i<kFft;++i){X[i]=static_cast<double>(xf[i]);Y[i]=static_cast<double>(yf[i]);}
         fft(X,false);fft(Y,false);++frames;
-        for(std::size_t k=0;k<kBins;++k){
-            const float xr=static_cast<float>(X[k].real()),xi=static_cast<float>(X[k].imag());
-            const float yr=static_cast<float>(Y[k].real()),yi=static_cast<float>(Y[k].imag());
-            sxx[k]+=xr*xr+xi*xi;
-            sxyRe[k]+=xr*yr+xi*yi;
-            sxyIm[k]+=xr*yi-xi*yr;
-        }
+        for(std::size_t k=0;k<kBins;++k){const float xr=static_cast<float>(X[k].real()),xi=static_cast<float>(X[k].imag());const float yr=static_cast<float>(Y[k].real()),yi=static_cast<float>(Y[k].imag());sxx[k]+=xr*xr+xi*xi;sxyRe[k]+=xr*yr+xi*yi;sxyIm[k]+=xr*yi-xi*yr;}
     }
-    if(!frames)return std::vector<double>(kBins,1.0);
-    std::vector<double>r(kBins,1.0);for(std::size_t k=0;k<kBins;++k){const float mag=std::sqrt(sxyRe[k]*sxyRe[k]+sxyIm[k]*sxyIm[k]);const float den=sxx[k]+static_cast<float>(kEps);r[k]=static_cast<double>(mag/den);}return r;
+    if(!frames)return std::vector<float>(kBins,1.0f);
+    std::vector<float>r(kBins,1.0f);for(std::size_t k=0;k<kBins;++k){const float mag=std::sqrt(sxyRe[k]*sxyRe[k]+sxyIm[k]*sxyIm[k]);r[k]=mag/(sxx[k]+static_cast<float>(kEps));}return r;
 }
+std::vector<double> ratioSpectrum(const std::vector<float>& model,const std::vector<float>& target,double sr){const auto r=ratioSpectrumF(model,target,sr);return std::vector<double>(r.begin(),r.end());}
 
 float hzToMelF(float hz){return 2595.0f*static_cast<float>(std::log10(1.0+static_cast<double>(std::max(0.0f,hz))/700.0));}
 float melToHzF(float mel){return 700.0f*static_cast<float>(std::pow(10.0,static_cast<double>(mel)/2595.0)-1.0);}
@@ -375,15 +367,14 @@ ConditionedMagnitudeF conditionMagnitudeF(const std::vector<float>&srcFreq,const
     const std::size_t k2=std::max<std::size_t>(1,2*(n/destCount));linearDb=gaussianSmoothExactF(linearDb,k2);
     out.freq=linspaceF(f0,f1,destCount);out.mag.resize(destCount);for(std::size_t i=0;i<destCount;++i){const float d=interpLinearF(linearHz,linearDb,out.freq[i]);out.mag[i]=static_cast<float>(std::pow(10.0,static_cast<double>(d*0.05f)));}return out;
 }
-ConditionedMagnitude conditionMagnitude(const std::vector<double>&srcFreq,const std::vector<double>&srcMag,std::size_t destCount){
-    const std::size_t n=std::min(srcFreq.size(),srcMag.size());std::vector<float>f(n),m(n);for(std::size_t i=0;i<n;++i){f[i]=static_cast<float>(srcFreq[i]);m[i]=static_cast<float>(srcMag[i]);}auto cf=conditionMagnitudeF(f,m,destCount);ConditionedMagnitude o;o.freq.assign(cf.freq.begin(),cf.freq.end());o.mag.assign(cf.mag.begin(),cf.mag.end());return o;
-}
+ConditionedMagnitude conditionMagnitude(const std::vector<double>&srcFreq,const std::vector<double>&srcMag,std::size_t destCount){const std::size_t n=std::min(srcFreq.size(),srcMag.size());std::vector<float>f(n),m(n);for(std::size_t i=0;i<n;++i){f[i]=static_cast<float>(srcFreq[i]);m[i]=static_cast<float>(srcMag[i]);}auto cf=conditionMagnitudeF(f,m,destCount);ConditionedMagnitude o;o.freq.assign(cf.freq.begin(),cf.freq.end());o.mag.assign(cf.mag.begin(),cf.mag.end());return o;}
 
-void lowSmoothASequential(std::vector<double>&m,double sr){
-    if(m.size()<2)return;const std::size_t n=m.size();const std::size_t lim=std::min<std::size_t>(n-1,static_cast<std::size_t>(std::ceil((2.0/sr)*60.0*static_cast<double>(n))));
-    m[0]=std::sqrt(std::max(1.0e-30,m[0]*std::sqrt(std::max(1.0e-30,m[0]*m[1]))));
-    for(std::size_t i=1;i<lim&&i+1<n;++i)m[i]=std::sqrt(std::max(1.0e-30,m[i]*std::sqrt(std::max(1.0e-30,m[i-1]*m[i+1]))));
+void lowSmoothASequentialF(std::vector<float>&m,double sr){
+    if(m.size()<2)return;const std::size_t n=m.size();const float fs=static_cast<float>(sr);const std::size_t lim=std::min<std::size_t>(n-1,static_cast<std::size_t>(std::ceil((2.0f/fs)*60.0f*static_cast<float>(n))));
+    m[0]=std::sqrt(std::max(1.0e-30f,m[0]*std::sqrt(std::max(1.0e-30f,m[0]*m[1]))));
+    for(std::size_t i=1;i<lim&&i+1<n;++i)m[i]=std::sqrt(std::max(1.0e-30f,m[i]*std::sqrt(std::max(1.0e-30f,m[i-1]*m[i+1]))));
 }
+void lowSmoothASequential(std::vector<double>&m,double sr){std::vector<float>x(m.begin(),m.end());lowSmoothASequentialF(x,sr);m.assign(x.begin(),x.end());}
 
 void fftF(std::vector<std::complex<float>>& a,bool inv){
     const std::size_t n=a.size();for(std::size_t i=1,j=0;i<n;++i){std::size_t bit=n>>1;for(;j&bit;bit>>=1)j^=bit;j^=bit;if(i<j)std::swap(a[i],a[j]);}
@@ -393,52 +384,61 @@ void transformAnyF(std::vector<std::complex<float>>& a,bool inv){
     if(powerOfTwo(a.size())){fftF(a,inv);return;}const std::size_t n=a.size();std::vector<std::complex<float>>o(n);const float sign=inv?1.0f:-1.0f;
     for(std::size_t k=0;k<n;++k){std::complex<float>sum(0,0);for(std::size_t j=0;j<n;++j){const float ph=sign*static_cast<float>(2.0*kPi*static_cast<double>(j)*static_cast<double>(k)/static_cast<double>(n));sum+=a[j]*std::complex<float>(std::cos(ph),std::sin(ph));}if(inv)sum/=static_cast<float>(n);o[k]=sum;}a.swap(o);
 }
-std::vector<float> minimumPhase(const std::vector<double>&positive,std::size_t taps){
+std::vector<float> minimumPhaseF(const std::vector<float>&positive,std::size_t taps){
     if(positive.size()<2||!taps)return std::vector<float>(taps,0.0f);const std::size_t posN=positive.size(),fullN=2*posN-2;std::vector<float>m(fullN);
-    for(std::size_t i=0;i<posN;++i)m[i]=std::max(1.0e-30f,static_cast<float>(positive[i]));for(std::size_t i=1;i+1<posN;++i)m[fullN-i]=m[i];
+    for(std::size_t i=0;i<posN;++i)m[i]=std::max(1.0e-30f,positive[i]);for(std::size_t i=1;i+1<posN;++i)m[fullN-i]=m[i];
     const float mx=*std::max_element(m.begin(),m.end()),floor=mx*1.0e-5f;std::vector<std::complex<float>>c(fullN);for(std::size_t i=0;i<fullN;++i)c[i]=static_cast<float>(std::log(static_cast<double>(std::max(floor,m[i])+static_cast<float>(kEps))));
     transformAnyF(c,true);for(std::size_t i=1;i<fullN/2;++i)c[i]*=2.0f;for(std::size_t i=fullN/2+1;i<fullN;++i)c[i]=0.0f;transformAnyF(c,false);for(auto&v:c)v=std::exp(v);transformAnyF(c,true);
     float fullNorm2=0.0f;for(const auto&v:c)fullNorm2+=v.real()*v.real();std::vector<float>h(taps,0.0f);for(std::size_t i=0;i<std::min(taps,c.size());++i)h[i]=c[i].real();
     float sum=0.0f;for(float v:h)sum+=v;const float mean=sum/static_cast<float>(h.size());for(auto&v:h)v-=mean;float shortNorm2=0.0f;for(float v:h)shortNorm2+=v*v;
     if(shortNorm2>1.0e-30f&&fullNorm2>0.0f){const float g=std::sqrt(fullNorm2/shortNorm2);for(auto&v:h)v*=g;}return h;
 }
+std::vector<float> minimumPhase(const std::vector<double>&positive,std::size_t taps){std::vector<float>x(positive.size());for(std::size_t i=0;i<positive.size();++i)x[i]=static_cast<float>(positive[i]);return minimumPhaseF(x,taps);}
 
-std::vector<double> frequencyWeights(double sr){std::vector<double>w(kBins,1.0);std::size_t idx=static_cast<std::size_t>(std::ceil((2.0/sr)*80.0*static_cast<double>(kBins)));idx=std::clamp<std::size_t>(idx,1,kBins);const std::size_t start=idx-1,n=kBins-start;if(n==1){w[start]=1.0;return w;}for(std::size_t i=0;i<n;++i)w[start+i]=1.0-0.5*static_cast<double>(i)/static_cast<double>(n-1);return w;}
+std::vector<float> frequencyWeightsF(double sr){std::vector<float>w(kBins,1.0f);const float fs=static_cast<float>(sr);std::size_t idx=static_cast<std::size_t>(std::ceil((2.0f/fs)*80.0f*static_cast<float>(kBins)));idx=std::clamp<std::size_t>(idx,1,kBins);const std::size_t start=idx-1,n=kBins-start;if(n==1){w[start]=1.0f;return w;}for(std::size_t i=0;i<n;++i)w[start+i]=1.0f-0.5f*static_cast<float>(i)/static_cast<float>(n-1);return w;}
+std::vector<double> frequencyWeights(double sr){const auto x=frequencyWeightsF(sr);return std::vector<double>(x.begin(),x.end());}
 
-double lossFromRatio(const std::vector<double>&r,double sr){
-    const auto srcF=fftFrequencyGrid(sr);const double m0=hzToMel(80.0),m1=hzToMel(10000.0);long double sum=0;
-    for(std::size_t i=0;i<512;++i){const double mel=m0+(m1-m0)*static_cast<double>(i)/511.0;double f=melToHz(mel);if(i==0)f=80.0;if(i==511)f=10000.0;const double v=interpLinear(srcF,r,f);sum+=std::abs(std::log(v+kEps));}
-    return static_cast<double>(sum/512.0L);
+float lossFromRatioF(const std::vector<float>&r,double sr){
+    const auto srcF=fftFrequencyGridF(sr);const float m0=hzToMelF(80.0f),m1=hzToMelF(10000.0f);float sum=0.0f;
+    for(std::size_t i=0;i<512;++i){const float mel=m0+(m1-m0)*static_cast<float>(i)/511.0f;float f=melToHzF(mel);if(i==0)f=80.0f;if(i==511)f=10000.0f;const float v=interpLinearF(srcF,r,f);sum+=std::fabs(std::log(v+static_cast<float>(kEps)));}
+    return sum*(1.0f/512.0f);
 }
+double lossFromRatio(const std::vector<double>&r,double sr){std::vector<float>x(r.begin(),r.end());return static_cast<double>(lossFromRatioF(x,sr));}
 
-void regularizeInitialCurve(std::vector<double>&v,const std::vector<double>&reference){if(v.empty()||reference.empty())return;const double mx=*std::max_element(reference.begin(),reference.end());const double f=std::max(1.0e-30,0.001*mx);for(auto&x:v)if(x<2.0*f)x=f+(x*x)/(4.0*f);}
+void regularizeInitialCurveF(std::vector<float>&v,const std::vector<float>&reference){if(v.empty()||reference.empty())return;const float mx=*std::max_element(reference.begin(),reference.end());const float f=std::max(1.0e-30f,0.001f*mx);for(auto&x:v)if(x<2.0f*f)x=f+(x*x)/(4.0f*f);}
+void regularizeInitialCurve(std::vector<double>&v,const std::vector<double>&reference){std::vector<float>x(v.begin(),v.end()),r(reference.begin(),reference.end());regularizeInitialCurveF(x,r);v.assign(x.begin(),x.end());}
 
-struct FactorState{std::vector<double>a,b;};
+struct FactorState{std::vector<float>a,b;};
 FactorState initialFactorState(const Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr){
     const std::size_t lb=static_cast<std::size_t>(std::llround(6.0*sr)),le=static_cast<std::size_t>(std::llround(21.0*sr));
     const std::size_t sb=static_cast<std::size_t>(std::llround(23.0*sr)),se=static_cast<std::size_t>(std::llround(28.0*sr));
-    auto lowIn=sliceSignal(input,lb,le),lowTarget=sliceSignal(target,lb,le);std::vector<float>lowPred;renderModel(m,lowIn,lowPred,true);auto lowSpec=ratioSpectrum(lowPred,lowTarget,sr);
-    auto sweepIn=sliceSignal(input,sb,se),sweepTarget=sliceSignal(target,sb,se);sweepIn=applyInitialConditioningFir(sweepIn,sr);std::vector<float>sweepPred;renderModel(m,sweepIn,sweepPred,true);auto sweepSpec=ratioSpectrum(sweepPred,sweepTarget,sr);
-    const std::size_t n=sweepSpec.size();sweepSpec=gaussianSmoothExact(sweepSpec,std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<double>(n)*0.001)));sweepSpec=gaussianSmoothExact(sweepSpec,std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<double>(n)*0.005)));regularizeInitialCurve(sweepSpec,lowSpec);
-    FactorState st;st.a.resize(kBins,1.0);st.b=sweepSpec;for(std::size_t k=0;k<kBins;++k)st.a[k]=(1.0e6*lowSpec[k])/(1.0e6*std::max(1.0e-30,sweepSpec[k])+kEps);return st;
+    auto lowIn=sliceSignal(input,lb,le),lowTarget=sliceSignal(target,lb,le);std::vector<float>lowPred;renderModel(m,lowIn,lowPred,true);auto lowSpec=ratioSpectrumF(lowPred,lowTarget,sr);
+    auto sweepIn=sliceSignal(input,sb,se),sweepTarget=sliceSignal(target,sb,se);sweepIn=applyInitialConditioningFir(sweepIn,sr);std::vector<float>sweepPred;renderModel(m,sweepIn,sweepPred,true);auto sweepSpec=ratioSpectrumF(sweepPred,sweepTarget,sr);
+    const std::size_t n=sweepSpec.size();sweepSpec=gaussianSmoothExactF(sweepSpec,std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<float>(n)*0.001f)));sweepSpec=gaussianSmoothExactF(sweepSpec,std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<float>(n)*0.005f)));regularizeInitialCurveF(sweepSpec,lowSpec);
+    FactorState st;st.a.resize(kBins,1.0f);st.b=sweepSpec;for(std::size_t k=0;k<kBins;++k){const double num=static_cast<double>(lowSpec[k])*1000000.0;const double den=static_cast<double>(sweepSpec[k])*1000000.0+kEps;st.a[k]=static_cast<float>(num/den);}return st;
 }
 
 struct Phase{double t0,t1;int iterations;const wchar_t*name;};
 void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,const std::vector<float>&target,double sr,const Phase&ph,int&globalIter,const StatusCallback&status){
-    const auto freq=fftFrequencyGrid(sr),weights=frequencyWeights(sr);const std::size_t b=static_cast<std::size_t>(std::llround(ph.t0*sr)),e=static_cast<std::size_t>(std::llround(ph.t1*sr));const auto phaseIn=sliceSignal(input,b,e),phaseTarget=sliceSignal(target,b,e);
-    double step=1.0,bestLoss=100.0;Model bestM=m;FactorState bestState=state;std::vector<double>corr(kBins,1.0),bestCorr=corr;
+    const auto freq=fftFrequencyGridF(sr),weights=frequencyWeightsF(sr);const std::size_t b=static_cast<std::size_t>(std::llround(ph.t0*sr)),e=static_cast<std::size_t>(std::llround(ph.t1*sr));const auto phaseIn=sliceSignal(input,b,e),phaseTarget=sliceSignal(target,b,e);
+    float step=1.0f,bestLoss=100.0f;Model bestM=m;FactorState bestState=state;std::vector<float>corr(kBins,1.0f),bestCorr=corr;
     for(int it=0;it<ph.iterations;++it){
         ++globalIter;report(status,L"Independent: A/B fit "+std::to_wstring(globalIter)+L"/10 ("+ph.name+L")...");
-        std::vector<double>stepped(kBins);for(std::size_t k=0;k<kBins;++k)stepped[k]=std::clamp(std::pow(std::max(1.0e-30,corr[k]),weights[k]*step),0.2,5.0);
-        auto conditioned=conditionMagnitude(freq,stepped,kBins).mag;FactorState trial=state;for(std::size_t k=0;k<kBins;++k){trial.a[k]/=std::max(1.0e-30,conditioned[k]);trial.b[k]*=conditioned[k];}lowSmoothASequential(trial.a,sr);
-        Model candidate=m;const auto amag=conditionMagnitude(freq,trial.a,kA);candidate.A=minimumPhase(amag.mag,kA);
-        std::vector<float>pre;renderModel(candidate,phaseIn,pre,false);auto fresh=ratioSpectrum(pre,phaseTarget,sr);std::vector<double>rb(kBins);for(std::size_t k=0;k<kBins;++k)rb[k]=(1.0e6*fresh[k])/(1.0e6*std::max(1.0e-30,trial.b[k])+kEps);
-        auto bmag=conditionMagnitude(freq,rb,kBins);candidate.B=minimumPhase(bmag.mag,kB);
-        std::vector<float>final;renderModel(candidate,phaseIn,final,true);auto residual=ratioSpectrum(final,phaseTarget,sr);const double loss=lossFromRatio(residual,sr);
+        std::vector<float>stepped(kBins);for(std::size_t k=0;k<kBins;++k){const float base=std::max(1.0e-30f,corr[k]);const float exponent=weights[k]*step;stepped[k]=std::clamp(static_cast<float>(std::pow(static_cast<double>(base),static_cast<double>(exponent))),0.2f,5.0f);}
+        // Confirmed at 0x557532..0x557563: the correction traverses 0x554f00
+        // twice, back-to-back, before either factor state is updated.
+        const auto conditioned1=conditionMagnitudeF(freq,stepped,kBins);
+        const auto conditioned2=conditionMagnitudeF(conditioned1.freq,conditioned1.mag,kBins);
+        const auto& conditioned=conditioned2.mag;
+        FactorState trial=state;for(std::size_t k=0;k<kBins;++k){trial.b[k]*=conditioned[k];trial.a[k]/=conditioned[k];}lowSmoothASequentialF(trial.a,sr);
+        Model candidate=m;const auto amag=conditionMagnitudeF(freq,trial.a,kA);candidate.A=minimumPhaseF(amag.mag,kA);
+        std::vector<float>pre;renderModel(candidate,phaseIn,pre,false);auto fresh=ratioSpectrumF(pre,phaseTarget,sr);std::vector<float>rb(kBins);for(std::size_t k=0;k<kBins;++k){const double num=static_cast<double>(fresh[k])*1000000.0;const double den=static_cast<double>(trial.b[k])*1000000.0+kEps;rb[k]=static_cast<float>(num/den);}
+        auto bmag=conditionMagnitudeF(freq,rb,kBins);candidate.B=minimumPhaseF(bmag.mag,kB);
+        std::vector<float>final;renderModel(candidate,phaseIn,final,true);auto residual=ratioSpectrumF(final,phaseTarget,sr);const float loss=lossFromRatioF(residual,sr);
         if(loss<bestLoss){bestLoss=loss;bestM=candidate;bestState=trial;bestCorr=residual;m=candidate;state=trial;corr=residual;}
-        else if(loss>1.2*bestLoss){m=bestM;state=bestState;corr=bestCorr;step*=0.5;}
+        else if(loss>1.2f*bestLoss){m=bestM;state=bestState;corr=bestCorr;step*=0.5f;}
         else{m=candidate;state=trial;corr=residual;}
-        step*=0.9;
+        step*=0.8999999761581421f;
     }
     m=bestM;state=bestState;
 }
@@ -450,8 +450,8 @@ void fitAB(Model&m,const std::vector<float>&input,const std::vector<float>&targe
 
 std::vector<float> convolveTruncate(const std::vector<float>&a,const std::vector<float>&b,std::size_t n){std::vector<float>o(n,0.0f);for(std::size_t i=0;i<a.size();++i)for(std::size_t j=0;j<b.size()&&i+j<n;++j)o[i+j]+=a[i]*b[j];return o;}
 
-std::vector<double> finalTailCorrection(const std::vector<float>&model,const std::vector<float>&target,double sr){
-    const std::size_t L=std::max<std::size_t>(1,static_cast<std::size_t>(std::ceil(0.1*sr)));const std::size_t end=std::min(model.size(),target.size());if(end<L)return std::vector<double>(256,1.0);
+std::vector<float> finalTailCorrection(const std::vector<float>&model,const std::vector<float>&target,double sr){
+    const std::size_t L=std::max<std::size_t>(1,static_cast<std::size_t>(std::ceil(0.1*sr)));const std::size_t end=std::min(model.size(),target.size());if(end<L)return std::vector<float>(256,1.0f);
     std::vector<float>xm(L,0.0f),yt(L,0.0f);for(std::size_t i=0;i<end;++i){const std::size_t j=i%L;xm[j]+=model[i];yt[j]+=target[i];}
     float mm=0.0f,tm=0.0f;for(std::size_t i=0;i<L;++i){mm+=xm[i];tm+=yt[i];}mm/=static_cast<float>(L);tm/=static_cast<float>(L);const auto win=hammingF(L);for(std::size_t i=0;i<L;++i){xm[i]=(xm[i]-mm)*win[i];yt[i]=(yt[i]-tm)*win[i];}
     const std::size_t posN=L/2+1;std::vector<float>freq(posN),modelMag(posN),targetMag(posN);
@@ -465,12 +465,12 @@ std::vector<double> finalTailCorrection(const std::vector<float>&model,const std
     const auto cm=conditionMagnitudeF(freq,modelMag,posN);
     std::vector<float>ratio(posN,1.0f);for(std::size_t k=0;k<posN;++k){const double num=static_cast<double>(ct.mag[k])*1000000.0;const double den=static_cast<double>(cm.mag[k])*1000000.0+kEps;ratio[k]=std::clamp(static_cast<float>(num/den),0.1f,10.0f);}
     const std::size_t smoothN=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<float>(posN)*0.1f));ratio=gaussianSmoothExactF(ratio,smoothN);for(auto&v:ratio)v=std::clamp(v,0.1f,10.0f);
-    const auto final=conditionMagnitudeF(ct.freq,ratio,256);return std::vector<double>(final.mag.begin(),final.mag.end());
+    const auto final=conditionMagnitudeF(ct.freq,ratio,256);return final.mag;
 }
 
 void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status){
     report(status,L"Independent: final Block B tail refinement...");const std::size_t b=static_cast<std::size_t>(std::llround(50.0*sr)),e=static_cast<std::size_t>(std::llround(70.0*sr));const auto tailIn=sliceSignal(input,b,e),tailTarget=sliceSignal(target,b,e);std::vector<float>pred;renderModel(m,tailIn,pred,true);
-    auto corrMag=finalTailCorrection(pred,tailTarget,sr);auto corr=minimumPhase(corrMag,256);m.B=convolveTruncate(m.B,corr,kB);
+    auto corrMag=finalTailCorrection(pred,tailTarget,sr);auto corr=minimumPhaseF(corrMag,256);m.B=convolveTruncate(m.B,corr,kB);
     float sum=0.0f;for(float v:m.B)sum+=v;const float mean=sum/static_cast<float>(m.B.size());for(auto&v:m.B)v-=mean;
     renderModel(m,tailIn,pred,true);float et=0.0f,ep=0.0f;for(std::size_t i=0;i<std::min(pred.size(),tailTarget.size());++i){et+=tailTarget[i]*tailTarget[i];ep+=pred[i]*pred[i];}if(ep>1.0e-30f){const float g=std::sqrt(et)/std::sqrt(ep);for(auto&v:m.B)v*=g;}
 }

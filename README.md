@@ -1,6 +1,10 @@
-# NAM to CLO v2.7.0-NATIVE8
+# NAM to CLO v2.7.0-NATIVE9
 
 This build keeps the existing **Current / HTUSBTools** path untouched and updates the parallel **Independent / Native** backend with the complete trainer flow reconstructed from the GP-200 v1.8 converter analysis.
+
+## NATIVE9 official-optimizer fidelity pass
+
+NATIVE9 incorporates two details confirmed directly in the GP-200.exe optimizer after the NATIVE8 golden comparison: the per-iteration correction is passed through the official magnitude-conditioning routine **twice consecutively** before A/B redistribution, and the factor/correction/weight/step/loss working state is kept in **float32**, matching the `movss/mulss/divss` path in the official binary. The independent trainer still requires a fresh golden CLO comparison before byte-identity can be claimed.
 
 ## Independent / Native conversion
 

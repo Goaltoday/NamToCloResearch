@@ -36,3 +36,8 @@ Do not label a new native result “100% equivalent” solely from code inspecti
 The final B routine in GP-200.exe does **not** form a raw target/model magnitude ratio and then condition that ratio. It calls the magnitude-conditioning routine separately for target and candidate model, forms the ratio of those two conditioned curves, clamps/smooths it, then conditions that correction to 256 points and creates the minimum-phase FIR256. NATIVE8 follows that ordering.
 
 Where the disassembly uses `movss/addss/mulss/divss`, NATIVE8 keeps float32 state instead of accumulating in double/long double. The POST coefficients are also computed as float32 and only then promoted to the CLO double fields.
+
+
+## NATIVE9 optimizer corrections
+
+Direct disassembly of `0x557380` shows two consecutive calls to `0x554f00` on the per-iteration correction before the factor arrays are touched. NATIVE9 reproduces both calls. The same block updates the factor arrays with SIMD float operations (`mulps/mulss` for the post-nonlinearity factor and `divps/divss` for the pre-nonlinearity factor), so NATIVE9 keeps these working arrays, the correction, frequency weights, step and loss in float32 rather than double.
