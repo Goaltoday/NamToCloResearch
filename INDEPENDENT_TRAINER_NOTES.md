@@ -1,37 +1,35 @@
-# Independent NAM -> CLO trainer: validation notes
+# Independent NAM -> CLO trainer: NATIVE5 baseline
 
-## Confirmed/reconstructed baseline represented in code
+NATIVE5 applies the complete reconstructed conversion flow currently established in the research chat instead of the simplified NATIVE4 approximations.
 
-- NAM is treated as a black-box processor driven by the 70 s research stimulus.
-- NAM expected sample rate is used; invalid/missing rate falls back to 48 kHz.
-- Render block size: 1024 samples.
-- Target render scale: 0.31.
-- Target detrending and impulse-based latency alignment.
-- Separate positive/negative exponential P/K branches.
-- PRE is identity for the reconstructed NAM conversion path.
-- POST is the fixed source-rate-dependent high-pass reconstructed from the official converter.
-- Block A starts as a 128-tap impulse; Block B starts as a 2048-tap impulse.
+## Implemented reconstructed flow
+
+- NAM black-box render from the 70 s stimulus.
+- NAM expected sample rate; 48 kHz fallback.
+- r8b::CDSPResampler24 for stimulus/model-rate conversion and final FIR conversion to 44.1 kHz.
+- NAM render in 1024-sample blocks and target scale 0.31.
+- Target detrend and impulse-based latency alignment.
+- Ppos/Pneg from 0-5 s extrema; independent exponential K fit against all 100 ms ramp measurements.
+- PRE identity and reconstructed source-rate POST high-pass.
+- A128/B2048 impulse initialization.
+- Exact reconstructed 50-tap initial-conditioning table for 44.1/48/96 kHz.
+- Main spectral estimator: ceil(0.125*Fs) Hamming window, 50% overlap, mean removal, folding modulo 2048, 2048 FFT, |Sxy|/(Sxx+FLT_EPSILON).
+- Magnitude -> dB -> uniform Mel domain -> exact reconstructed Gaussian kernel -> linear-Hz grid.
+- Geometric A smoothing below approximately 60 Hz.
+- Cepstral minimum-phase reconstruction with 1e-5 magnitude floor, truncation, mean removal and norm restoration.
+- A/B multiplicative factor redistribution around the fixed P/K nonlinearity.
 - Main schedule: 23-28 s x3, 6-21 s x2, 30-50 s x5.
-- Magnitude/cross-spectrum-driven correction, minimum-phase FIR reconstruction, logarithmic spectral loss and rollback/step decay.
-- Dedicated final Block-B correction over 50-70 s.
-- Block B receives the reconstructed x4 serialization scale.
-- VTSI B2048 container plus GP-200 B1024 compact output and CRC16/MODBUS formatting.
+- Correction clamp [0.2,5], step 1.0, x0.9 decay, >1.2*best rollback and x0.5 step reduction.
+- 512-point mean absolute log-ratio loss.
+- Accumulated B spectral state in the post-nonlinearity residual solve.
+- Final 50-70 s B-only refinement using ceil(0.1*Fs) periodic folding, explicit positive-frequency DFT, [0.1,10] correction, 256-tap minimum-phase correction, convolution and energy normalization.
+- B x4 serialization scale.
+- VTSI B2048 output plus GP-200 B1024 compact output and CRC16/MODBUS byte order used by the converter.
 
-## Deliberate first-pass substitutions / not claimed bit-identical
+## Numerical identity
 
-- SRC now uses `r8b::CDSPResampler24`, matching the r8brain resampler class identified in the official converter. The source is compiled into the executable; no runtime DLL is used. Last-bit identity can still depend on the exact historical r8brain revision/compiler floating-point order.
-- The three exact 50-float initial-conditioning tables reconstructed from `GP-200.exe` (44.1/48/96 kHz) are now embedded and applied in the initial 23–28 s identification path.
-- FFT/exp/log/pow and floating-point accumulation order are not expected to match the official MSVC binary at the last bit.
+The algorithmic blocks above are implemented independently. Last-bit identity with the historical GP-200 Windows binary is not claimed because FFT/libm/compiler floating-point order and the exact historical r8brain revision can differ.
 
-## Golden-reference workflow
+## Golden-reference validation
 
-For each known NAM + official CLO pair, compare at minimum:
-
-- PRE/POST coefficients
-- Ppos/Pneg/Kpos/Kneg
-- correlation, MAE and RMSE of A[0..127]
-- correlation, MAE and RMSE of B[0..1023]
-- frequency responses of A, B and A*B
-- time-domain and harmonic response of the rendered native CLO vs NAM and official CLO
-
-The native tab intentionally writes different output suffixes so both paths can be run without overwriting one another.
+Compare each native result against the matching official/converter CLO in this order: P/K, POST, A correlation/RMSE, B correlation/RMSE, A/B magnitude response, then rendered harmonic/time-domain response.

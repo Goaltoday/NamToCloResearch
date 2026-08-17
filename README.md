@@ -1,6 +1,6 @@
-# NAM to CLO v2.7.0-NATIVE4
+# NAM to CLO v2.7.0-NATIVE5
 
-Build fix: MSVC/r8brain const-input compatibility in the independent SRC path.
+NATIVE5 replaces the simplified NATIVE4 trainer math with the complete reconstructed baseline currently established in the research: direct exponential K fitting, 125 ms folded spectral estimator, Mel/Gaussian conditioning, accumulated A/B factorization state and the dedicated 100 ms final-B estimator.
 
 This build keeps the existing conversion path intact and adds a second, parallel **Independent / Native** tab.
 
@@ -34,14 +34,11 @@ The independent output filenames are deliberately different so they can be compa
 <name>_NATIVE_GP200_1024.clo
 ```
 
-## Important validation status
+## Validation status
 
-The Independent / Native tab is a **research baseline, not a claim of byte-identical Valeton conversion**. The major signal path and trainer decisions have been reconstructed, but this first implementation intentionally keeps two numerical/implementation substitutions visible for validation:
+The Independent / Native tab now implements the full algorithmic baseline reconstructed in the research, including the 50-tap sample-rate-specific conditioning stage and `r8b::CDSPResampler24`. It is still **not a claim of byte-identical output**: the historical executable can differ in FFT/libm/compiler accumulation order and in the exact historical r8brain revision. Those are numerical-identity questions, not missing trainer blocks.
 
-- source-rate conversion uses the same `r8b::CDSPResampler24` class identified in the official converter (statically/header-only, no runtime DLL); only last-bit identity with the exact historical Valeton build remains unclaimed;
-- the exact reconstructed 50-float conditioning tables for 44.1/48/96 kHz are embedded and used by the initial identification stage.
-
-The purpose of this tab is to generate independent CLOs for direct comparison against known official NAM -> CLO pairs. Once the measured differences are known, those remaining details can be narrowed without touching the existing HTUSBTools path.
+The intended validation is field-by-field against known NAM + converter-CLO pairs: P/K first, then A, B and finally rendered response.
 
 Corrective IR and Tone Match refinement are disabled on the Independent / Native tab so the first comparisons measure only the reconstructed conversion algorithm.
 
