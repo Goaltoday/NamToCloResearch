@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(NamToClo VERSION 2.7.0.4 LANGUAGES CXX RC)
+project(NamToClo VERSION 2.7.0.3 LANGUAGES CXX RC)
 
 if(NOT WIN32)
     message(FATAL_ERROR "NAM to CLO targets Windows x64.")
@@ -87,16 +87,7 @@ if(NTC_ENABLE_INDEPENDENT_TRAINER)
     file(GLOB_RECURSE NTC_NAMCORE_SOURCES CONFIGURE_DEPENDS
         "${_ntc_namcore_dir}/NAM/*.cpp"
     )
-    # NAMCore v0.5.x registers architecture/config parsers (WaveNet, LSTM,
-    # ConvNet, SlimmableContainer, ...) from translation-unit static
-    # initializers.  When the sources are packed into a normal STATIC library,
-    # MSVC only extracts objects that satisfy referenced symbols, so parser-only
-    # objects can be discarded and get_dsp() then reports e.g.
-    # "No config parser registered for architecture: WaveNet" at runtime.
-    #
-    # Use an OBJECT library so every NAMCore translation unit is linked into the
-    # executable and all built-in parser registrations execute before main().
-    add_library(ntc_namcore OBJECT ${NTC_NAMCORE_SOURCES})
+    add_library(ntc_namcore STATIC ${NTC_NAMCORE_SOURCES})
     target_compile_features(ntc_namcore PUBLIC cxx_std_20)
     target_include_directories(ntc_namcore PUBLIC
         "${_ntc_namcore_dir}"
