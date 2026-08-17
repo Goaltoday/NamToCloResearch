@@ -1,40 +1,78 @@
-> Diagnostic build: **v2.6.7-DIAG3** adds permission/token/WAV staging diagnostics and minidumps. The conversion algorithm is unchanged from v2.6.7.
+# NAM to CLO v2.7.0-NATIVE1
 
-# NAM to CLO v2.6.7
+This build keeps the existing conversion path intact and adds a second, parallel **Independent / Native (experimental)** tab.
 
-## v2.6.7 — matched-input refinement
+## Two independent tabs
 
-This version is based directly on v2.6.6.1. The abandoned v2.6.7 branch that compared an unrelated external target WAV directly is not included.
+### Current / HTUSBTools
 
-The optional refinement test WAV is now used as an **input performance**, not as a pre-rendered Tone Match target:
+This is the existing v2.6.7/v1.8 research workflow. It uses the user-supplied `HTUSBTools.dll` conversion path and keeps the existing Corrective IR and Tone Match refinement options.
 
-1. The first 20 seconds of the selected WAV are automatically adapted to mono PCM16 44.1 kHz using the existing Recorded Audio adapter.
-2. Those 20 seconds replace the tail of a second otherwise-identical 70-second conversion stimulus.
-3. HTUSBTools renders that exact stimulus through the NAM. A2 SlimmableContainer models still use the verified Full submodel (highest `max_value`).
-4. The already-created original Ampero B2048 CLO renders the exact same second stimulus in the offline CLO player.
-5. Tone Match compares the common final 20 seconds: NAM render (TARGET) versus original CLO render (SOURCE).
-6. The correction is applied only to Block B and the refined result is compacted to GP-200 B1024.
+### Independent / Native (experimental)
 
-Leaving the refinement test WAV blank keeps the v2.6.6.1 behavior: the original conversion stimulus/NAM render pair is used.
+This new path does **not** load `GP-200.exe`, `HTUSBTools.dll`, or an Ampero/Valeton conversion DLL. The NAM is rendered locally with the open-source NeuralAmpModelerCore library compiled into the application, and the NAM -> CLO identification/training logic is implemented in this project.
 
-The selected refinement WAV may use the WAV formats already supported by the Recorded Audio adapter (PCM 8/16/24/32-bit or IEEE float 32/64-bit, mono or multichannel, arbitrary sample rate). It is downmixed/resampled automatically and the **first** 20 seconds are used; shorter files are zero-padded according to the existing adapter behavior.
+It currently reconstructs the researched baseline pipeline:
 
-Comparison diagnostics are not shown. With refinement enabled, the output folder receives only:
+1. Build the same 70-second stimulus from the selected 50-second stimulus profile + selected 20-second tail + 600 trailing zero samples.
+2. Load/render the NAM at its expected sample rate in 1024-sample blocks.
+3. Apply the reconstructed NAM target scale (`0.31`).
+4. Remove DC/linear trend and align the response from the impulse marker.
+5. Estimate independent positive/negative P/K parameters.
+6. Start Block A (128) and Block B (2048) as impulses.
+7. Run the reconstructed A/B identification schedule over the 23-28 s, 6-21 s and 30-50 s regions.
+8. Build minimum-phase FIR candidates from magnitude-domain corrections.
+9. Refine Block B with the final 50-70 s tail.
+10. Resample FIR coefficients to the 44.1 kHz CLO domain, serialize the B2048 VTSI container, and generate the GP-200 B1024 compact variant.
 
-1. `<name>_Ampero_2048.clo`
-2. `<name>_GP200_1024.clo`
-3. `<name>_GP200_1024_REFINED.clo`
+The independent output filenames are deliberately different so they can be compared side-by-side with the current converter:
 
-Intermediate candidate CLOs, the second-pass CLO generated only as a side effect of HTUSBTools, and `auto_tonematch_ir.wav` remain temporary and are deleted with the work directory.
+```text
+<name>_NATIVE_2048.clo
+<name>_NATIVE_GP200_1024.clo
+```
 
-## NAM A2: always use Full
+## Important validation status
 
-For an A2 `SlimmableContainer`, the converter selects the embedded model with the highest `max_value` and supplies that standard NAM model to HTUSBTools. This was verified with `Modelo4.nam`: the 8-channel `max_value=1.0` model matches A2 Full, while the 3-channel `max_value=0.5` model is Lite.
+The Independent / Native tab is a **research baseline, not a claim of byte-identical Valeton conversion**. The major signal path and trainer decisions have been reconstructed, but this first implementation intentionally keeps two numerical/implementation substitutions visible for validation:
 
-## Corrective IR and refinement level
+- the source-rate conversion uses a self-contained windowed-sinc implementation instead of reproducing Valeton's exact r8brain build and floating-point order;
+- the exact proprietary 50-tap initial-conditioning implementation is not claimed bit-exact in this baseline.
 
-Manual Corrective IR keeps the historical -6 dB post-correction gain. Automatic refinement uses 0 dB post-correction gain after Block-B RMS matching.
+The purpose of this tab is to generate independent CLOs for direct comparison against known official NAM -> CLO pairs. Once the measured differences are known, those remaining details can be narrowed without touching the existing HTUSBTools path.
 
-## Tone Match implementation
+Corrective IR and Tone Match refinement are disabled on the Independent / Native tab so the first comparisons measure only the reconstructed conversion algorithm.
 
-The current refiner remains VST-style rather than an exact export replica of `SOURCE_latest_19`: it uses the existing 2048-sample minimum-phase correction path rather than the VST's exact 1024-sample SolverV1/crest-optimised export pipeline.
+## NAM A2
+
+The native backend supports current NAM formats through NeuralAmpModelerCore. For an A2 `SlimmableContainer`, this research build extracts the embedded submodel with the highest `max_value` (Full) before rendering, matching the decision already used by the existing converter.
+
+## Building
+
+Windows x64 and CMake 3.24+ are required.
+
+By default CMake fetches NeuralAmpModelerCore v0.5.4 and its submodules at configure time and statically compiles it into `NamToClo.exe`:
+
+```powershell
+cmake -S . -B build -A x64
+cmake --build build --config Release
+```
+
+For an offline/reproducible build, clone NeuralAmpModelerCore v0.5.4 including submodules and provide it explicitly:
+
+```powershell
+cmake -S . -B build -A x64 -DNAM_CORE_SOURCE_DIR=D:\path\to\NeuralAmpModelerCore
+cmake --build build --config Release
+```
+
+The old tab can be built without the native trainer with:
+
+```powershell
+cmake -S . -B build -A x64 -DNTC_ENABLE_INDEPENDENT_TRAINER=OFF
+```
+
+## Runtime assets
+
+The Independent / Native conversion does not need `HTUSBTools.dll`, but the stimulus builder still uses the selected research stimulus/tail WAV assets from the application's `runtime` folder unless a Custom stimulus or Recorded Audio source is selected.
+
+The Current / HTUSBTools tab continues to require the legally obtained runtime files described in `THIRD_PARTY.md`.

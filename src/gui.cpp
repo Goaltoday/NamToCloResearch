@@ -1,9 +1,13 @@
 #include "conversion.hpp"
 #include "common.hpp"
 #include "resource.h"
+#if NTC_HAS_INDEPENDENT_TRAINER
+#include "independent_trainer.hpp"
+#endif
 
 #include <windows.h>
 #include <commdlg.h>
+#include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
 
@@ -43,6 +47,7 @@ constexpr int IDC_BROWSE_CORRECTIVE_IR = 120;
 constexpr int IDC_REFINE_CLO = 121;
 constexpr int IDC_REFINE_TARGET_PATH = 122;
 constexpr int IDC_BROWSE_REFINE_TARGET = 123;
+constexpr int IDC_BACKEND_TABS = 124;
 
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
@@ -57,6 +62,7 @@ constexpr COLORREF kColorStatusOk = RGB(73, 193, 89);
 constexpr COLORREF kColorDisabled = RGB(203, 210, 220);
 
 enum class InputMode { None, SingleNam, Folder };
+enum class BackendMode { CurrentDll, IndependentNative };
 
 struct UiMetrics {
     RECT header{};
@@ -72,6 +78,7 @@ struct UiMetrics {
     RECT infoBox{};
 };
 
+HWND gBackendTabs = nullptr;
 HWND gInputEdit = nullptr;
 HWND gOutEdit = nullptr;
 HWND gLoadFileButton = nullptr;
@@ -109,6 +116,7 @@ HBITMAP gSectionIcons[5] = { nullptr, nullptr, nullptr, nullptr, nullptr };
 UiMetrics gUi{};
 bool gBusy = false;
 InputMode gInputMode = InputMode::None;
+BackendMode gBackendMode = BackendMode::CurrentDll;
 
 std::wstring getText(HWND h) {
     const int len = GetWindowTextLengthW(h);
@@ -187,8 +195,48 @@ void applyFont(HWND h, HFONT font) {
 
 void applyFont(HWND h) { applyFont(h, gFont); }
 
+BackendMode selectedBackendMode() {
+    if (!gBackendTabs) return BackendMode::CurrentDll;
+    const int index = TabCtrl_GetCurSel(gBackendTabs);
+    return index == 1 ? BackendMode::IndependentNative : BackendMode::CurrentDll;
+}
+
+bool nativeBackendSelected() {
+    return selectedBackendMode() == BackendMode::IndependentNative;
+}
+
+void updateBackendUi() {
+    gBackendMode = selectedBackendMode();
+    const bool native = gBackendMode == BackendMode::IndependentNative;
+#if !NTC_HAS_INDEPENDENT_TRAINER
+    if (native) {
+        TabCtrl_SetCurSel(gBackendTabs, 0);
+        gBackendMode = BackendMode::CurrentDll;
+    }
+#endif
+    if (gBusy) return;
+
+    const bool allowLegacyExtras = gBackendMode == BackendMode::CurrentDll;
+    EnableWindow(gCorrectiveCheck, allowLegacyExtras ? TRUE : FALSE);
+    EnableWindow(gRefineCheck, allowLegacyExtras ? TRUE : FALSE);
+    if (!allowLegacyExtras) {
+        EnableWindow(gCorrectiveEdit, FALSE);
+        EnableWindow(gBrowseCorrectiveButton, FALSE);
+        EnableWindow(gRefineTargetEdit, FALSE);
+        EnableWindow(gBrowseRefineTargetButton, FALSE);
+        setText(gInfo,
+            L"Independent / Native: NAM is rendered locally and the CLO is trained/serialized in this program. "
+            L"No GP-200.exe or HTUSBTools.dll is loaded. Experimental reconstructed baseline for comparison.");
+        setText(gStatus, L"Independent / Native backend selected. Ready for an experimental conversion.");
+    } else {
+        setText(gInfo,
+            L"Current backend: existing HTUSBTools conversion path. Corrective IR and Tone Match refinement remain available.");
+    }
+}
+
 void enableControls(bool enable) {
     gBusy = !enable;
+    EnableWindow(gBackendTabs, enable);
     EnableWindow(gLoadFileButton, enable);
     EnableWindow(gLoadFolderButton, enable);
     EnableWindow(gBrowseButton, enable);
@@ -385,11 +433,14 @@ void updateTailControls() {
     EnableWindow(gRecordedEdit, recorded ? TRUE : FALSE);
     EnableWindow(gBrowseRecordedButton, recorded ? TRUE : FALSE);
 
-    const bool correctiveEnabled = SendMessageW(gCorrectiveCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const bool legacyExtras = !nativeBackendSelected();
+    EnableWindow(gCorrectiveCheck, legacyExtras ? TRUE : FALSE);
+    EnableWindow(gRefineCheck, legacyExtras ? TRUE : FALSE);
+    const bool correctiveEnabled = legacyExtras && SendMessageW(gCorrectiveCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     EnableWindow(gCorrectiveEdit, correctiveEnabled ? TRUE : FALSE);
     EnableWindow(gBrowseCorrectiveButton, correctiveEnabled ? TRUE : FALSE);
 
-    const bool refineEnabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const bool refineEnabled = legacyExtras && SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     EnableWindow(gRefineTargetEdit, refineEnabled ? TRUE : FALSE);
     EnableWindow(gBrowseRefineTargetButton, refineEnabled ? TRUE : FALSE);
 }
@@ -427,8 +478,10 @@ void startConversion(HWND hwnd) {
         return;
     }
 
+    const BackendMode backend = selectedBackendMode();
+
     ntc::CorrectiveIrConfig correction;
-    correction.enabled = SendMessageW(gCorrectiveCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    correction.enabled = backend == BackendMode::CurrentDll && SendMessageW(gCorrectiveCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     correction.wav = fs::path(getText(gCorrectiveEdit));
     if (correction.enabled && correction.wav.empty()) {
         MessageBoxW(hwnd, L"Select a Corrective IR WAV file.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
@@ -436,23 +489,50 @@ void startConversion(HWND hwnd) {
     }
 
     ntc::CloRefineConfig refine;
-    refine.enabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    refine.enabled = backend == BackendMode::CurrentDll && SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     refine.passes = 4;
     refine.referenceWav = fs::path(getText(gRefineTargetEdit));
 
     enableControls(false);
+    if (backend == BackendMode::IndependentNative) {
+#if NTC_HAS_INDEPENDENT_TRAINER
+        ntc::IndependentTrainerConfig nativeConfig;
+        if (gInputMode == InputMode::SingleNam) {
+            setText(gStatus, L"Starting independent/native conversion...");
+            std::thread([hwnd, input, out, stimulus, nativeConfig] {
+                auto result = std::make_unique<ntc::ConversionResult>(
+                    ntc::convertNamToBothIndependent(input, out, stimulus, nativeConfig,
+                        [hwnd](const std::wstring& text) { postStatus(hwnd, text); }));
+                PostMessageW(hwnd, WM_APP_DONE_SINGLE, 0, reinterpret_cast<LPARAM>(result.release()));
+            }).detach();
+        } else {
+            setText(gStatus, L"Starting independent/native batch conversion...");
+            std::thread([hwnd, input, out, stimulus, nativeConfig] {
+                auto result = std::make_unique<ntc::BatchConversionResult>(
+                    ntc::convertNamFolderIndependent(input, out, stimulus, nativeConfig,
+                        [hwnd](const std::wstring& text) { postStatus(hwnd, text); }));
+                PostMessageW(hwnd, WM_APP_DONE_BATCH, 0, reinterpret_cast<LPARAM>(result.release()));
+            }).detach();
+        }
+#else
+        enableControls(true);
+        MessageBoxW(hwnd, L"This build does not include the independent trainer.", L"NAM to CLO", MB_ICONERROR | MB_OK);
+#endif
+        return;
+    }
+
     if (gInputMode == InputMode::SingleNam) {
-        setText(gStatus, L"Starting conversion...");
+        setText(gStatus, L"Starting current/HTUSBTools conversion...");
         std::thread([hwnd, input, out, stimulus, correction, refine] {
             auto result = std::make_unique<ntc::ConversionResult>(
-                ntc::convertNamToBoth(input, out, stimulus, correction, refine, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
+                ntc::convertNamToBoth(input, out, stimulus, correction, refine, [hwnd](const std::wstring& text) { postStatus(hwnd, text); }));
             PostMessageW(hwnd, WM_APP_DONE_SINGLE, 0, reinterpret_cast<LPARAM>(result.release()));
         }).detach();
     } else {
-        setText(gStatus, L"Starting batch conversion...");
+        setText(gStatus, L"Starting current/HTUSBTools batch conversion...");
         std::thread([hwnd, input, out, stimulus, correction, refine] {
             auto result = std::make_unique<ntc::BatchConversionResult>(
-                ntc::convertNamFolder(input, out, stimulus, correction, refine, [hwnd](const std::wstring& s) { postStatus(hwnd, s); }));
+                ntc::convertNamFolder(input, out, stimulus, correction, refine, [hwnd](const std::wstring& text) { postStatus(hwnd, text); }));
             PostMessageW(hwnd, WM_APP_DONE_BATCH, 0, reinterpret_cast<LPARAM>(result.release()));
         }).detach();
     }
@@ -473,9 +553,9 @@ void computeLayout(int clientW, int clientH) {
     const int gap = 7;
     const int footerH = 38;
 
-    gUi.header = RECT{ margin, 12, clientW - margin, 98 };
+    gUi.header = RECT{ margin, 12, clientW - margin, 124 };
 
-    int y = 100;
+    int y = 128;
     gUi.sectionInput = RECT{ margin, y, clientW - margin, y + 76 }; y += 76 + gap;
     gUi.sectionOutput = RECT{ margin, y, clientW - margin, y + 70 }; y += 70 + gap;
     gUi.sectionStimulus = RECT{ margin, y, clientW - margin, y + 105 }; y += 105 + gap;
@@ -500,6 +580,7 @@ void layoutControls(HWND hwnd) {
     HWND title = GetDlgItem(hwnd, 1001);
     if (title) moveCtrl(title, 118, 18, 340, 42);
     if (gSubtitle) moveCtrl(gSubtitle, 120, 62, rc.right - 150, 22);
+    moveCtrl(gBackendTabs, 120, 88, rc.right - 150, 32);
 
     // Keep a visible gap between each label and its field/control.
     moveCtrl(GetDlgItem(hwnd, 1002), contentX, gUi.sectionInput.top + 8, 230, 20);
@@ -572,6 +653,23 @@ void createUi(HWND hwnd) {
                               WS_CHILD | WS_VISIBLE, 0, 0, 100, 20, hwnd,
                               controlId(IDC_SUBTITLE), nullptr, nullptr);
     applyFont(gSubtitle, gSubtitleFont);
+
+    gBackendTabs = CreateWindowExW(0, WC_TABCONTROLW, L"",
+                                    WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FIXEDWIDTH,
+                                    0, 0, 100, 32, hwnd, controlId(IDC_BACKEND_TABS), nullptr, nullptr);
+    applyFont(gBackendTabs);
+    SendMessageW(gBackendTabs, TCM_SETITEMSIZE, 0, MAKELPARAM(260, 25));
+    TCITEMW tab{};
+    tab.mask = TCIF_TEXT;
+    tab.pszText = const_cast<LPWSTR>(L"Current / HTUSBTools");
+    TabCtrl_InsertItem(gBackendTabs, 0, &tab);
+#if NTC_HAS_INDEPENDENT_TRAINER
+    tab.pszText = const_cast<LPWSTR>(L"Independent / Native (experimental)");
+#else
+    tab.pszText = const_cast<LPWSTR>(L"Independent / Native (not built)");
+#endif
+    TabCtrl_InsertItem(gBackendTabs, 1, &tab);
+    TabCtrl_SetCurSel(gBackendTabs, 0);
 
     createSectionLabel(hwnd, 1002, L"Input NAM or folder");
     createSectionLabel(hwnd, 1003, L"Output folder");
@@ -679,6 +777,7 @@ void createUi(HWND hwnd) {
     applyFont(gVersion);
 
     layoutControls(hwnd);
+    updateBackendUi();
     updateTailControls();
     DragAcceptFiles(hwnd, TRUE);
 }
@@ -824,8 +923,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         createUi(hwnd);
         std::string error;
         const auto rt = ntc::resolveDefaultRuntime();
-        if (ntc::validateRuntime(rt, error)) setText(gStatus, L"Runtime ready. Load a NAM, load a folder, or drag one onto this window.");
-        else setText(gStatus, L"Runtime missing: " + ntc::fromUtf8(error));
+        if (ntc::validateRuntime(rt, error)) {
+            setText(gStatus, L"Ready. Current/HTUSBTools and Independent/Native tabs are available.");
+        } else {
+#if NTC_HAS_INDEPENDENT_TRAINER
+            setText(gStatus, L"Independent/Native ready. Current/HTUSBTools runtime unavailable: " + ntc::fromUtf8(error));
+#else
+            setText(gStatus, L"Current runtime missing: " + ntc::fromUtf8(error));
+#endif
+        }
         return 0;
     }
     case WM_SIZE:
@@ -869,6 +975,15 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     case WM_ERASEBKGND:
         return 1;
+    case WM_NOTIFY: {
+        const auto* hdr = reinterpret_cast<LPNMHDR>(lParam);
+        if (hdr && hdr->hwndFrom == gBackendTabs && hdr->code == TCN_SELCHANGE) {
+            updateBackendUi();
+            updateTailControls();
+            return 0;
+        }
+        break;
+    }
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDC_LOAD_FILE: chooseNam(hwnd); return 0;
@@ -915,6 +1030,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_APP_DONE_SINGLE: {
         std::unique_ptr<ntc::ConversionResult> r(reinterpret_cast<ntc::ConversionResult*>(lParam));
         enableControls(true);
+        updateBackendUi();
         updateTailControls();
         if (r && r->ok) {
             std::wstring resultMessage = L"Conversion complete.\r\n\r\nAmpero 2048:\r\n" + r->ampero2048.wstring()
@@ -935,6 +1051,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_APP_DONE_BATCH: {
         std::unique_ptr<ntc::BatchConversionResult> r(reinterpret_cast<ntc::BatchConversionResult*>(lParam));
         enableControls(true);
+        updateBackendUi();
         updateTailControls();
         if (!r || r->total == 0) {
             setText(gStatus, L"Batch conversion did not find any NAM files.");
@@ -985,6 +1102,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.
     SetProcessDPIAware();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    INITCOMMONCONTROLSEX icc{};
+    icc.dwSize = sizeof(icc);
+    icc.dwICC = ICC_TAB_CLASSES;
+    InitCommonControlsEx(&icc);
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
     wc.hInstance = instance;
@@ -998,7 +1119,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     const std::wstring windowTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;
     HWND hwnd = CreateWindowExW(0, kClassName, windowTitle.c_str(),
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 915,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 945,
                                 nullptr, nullptr, instance, nullptr);
     if (!hwnd) { CoUninitialize(); return 1; }
     ShowWindow(hwnd, show);
