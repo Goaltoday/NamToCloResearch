@@ -1,4 +1,4 @@
-# NAM to CLO v2.7.0-NATIVE7
+# NAM to CLO v2.7.0-NATIVE8
 
 This build keeps the existing **Current / HTUSBTools** path untouched and updates the parallel **Independent / Native** backend with the complete trainer flow reconstructed from the GP-200 v1.8 converter analysis.
 
@@ -29,7 +29,7 @@ Output files remain separate from the current converter:
 
 ## Validation status
 
-NATIVE7 is the first build in this branch in which all trainer details confirmed in the reverse-engineering notes are transcribed into the native backend rather than replaced by simplified approximations. It is a **golden-reference candidate**, not a claim of already-proven byte identity: final equivalence must be checked by running the same NAM/stimulus through the official/current path and comparing P/K, A and B. Last-bit differences can also remain from the historical FFT/libm/compiler and exact r8brain revision.
+NATIVE8 is the strict-equivalence pass driven by the NATIVE7/official golden comparison. In addition to the previously reconstructed trainer flow, it reproduces the float32 arithmetic visible in the official POST, conditioning, minimum-phase and final-B paths; the final tail stage conditions target and model spectra independently before ratio; and FIR SRC output is truncated before zero padding. It remains a **golden-reference candidate** until a newly generated CLO is compared against the official output; no byte-identity claim is made before that test.
 
 Corrective IR and Tone Match remain outside the Independent / Native tab so validation measures only the reconstructed converter.
 

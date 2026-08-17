@@ -150,11 +150,11 @@ std::vector<float> applyInitialConditioningFir(const std::vector<float>& in, dou
     const auto& h = initialFirForRate(sr);
     std::vector<float> out(in.size(), 0.0f);
     for (std::size_t n = 0; n < in.size(); ++n) {
-        long double acc = 0.0;
+        float acc = 0.0f;
         const std::size_t kmax = std::min<std::size_t>(h.size() - 1, n);
         for (std::size_t k = 0; k <= kmax; ++k)
-            acc += static_cast<long double>(h[k]) * in[n - k];
-        out[n] = static_cast<float>(acc);
+            acc += h[k] * in[n - k];
+        out[n] = acc;
     }
     return out;
 }
@@ -264,7 +264,17 @@ PK fitPk(const std::vector<float>& in,const std::vector<float>& out,double sr){
 }
 
 struct Biquad{double b0=1,b1=0,b2=0,a1=0,a2=0,z1=0,z2=0;float p(float x){double y=b0*x+z1;z1=b1*x-a1*y+z2;z2=b2*x-a2*y;return static_cast<float>(y);}};
-Biquad postForRate(double fs){constexpr double c=177.7158051,w2=15791.45215;const double f2=fs*fs,D=f2+c*fs+w2;Biquad q;q.b0=f2/D;q.b1=-2*q.b0;q.b2=q.b0;q.a1=-(2*f2-2*w2)/D;q.a2=(f2-c*fs+w2)/D;return q;}
+Biquad postForRate(double fs){
+    // GP-200.exe computes this section in float, then stores/promotes the five
+    // float32 results into the double CLO fields.  Keeping the arithmetic in
+    // float reproduces the exact 48 kHz coefficients seen in official CLOs.
+    constexpr float c=177.7158051f,w2=15791.45215f;
+    const float f=static_cast<float>(fs),f2=f*f,D=f2+c*f+w2;
+    const float b0=f2/D,b1=-2.0f*b0,b2=b0;
+    const float a1=-(2.0f*f2-2.0f*w2)/D;
+    const float a2=(f2-c*f+w2)/D;
+    Biquad q;q.b0=static_cast<double>(b0);q.b1=static_cast<double>(b1);q.b2=static_cast<double>(b2);q.a1=static_cast<double>(a1);q.a2=static_cast<double>(a2);return q;
+}
 struct AP{float a=0,s=0;float p(float x){const float y=s+a*x;s=x-a*y;return y;}};
 struct Poly{std::vector<AP>a,b;float d=0;Poly(std::initializer_list<float>x,std::initializer_list<float>y){for(float v:x)a.push_back({v,0});for(float v:y)b.push_back({v,0});}float r(std::vector<AP>&v,float x){for(auto&s:v)x=s.p(x);return x;}void up(float x,float&e,float&o){e=r(a,x);o=r(b,x);}float down(float e,float o){const float x=r(a,e),y=r(b,o),z=.5f*(x+d);d=y;return z;}};
 
@@ -298,7 +308,7 @@ void renderModel(const Model& m,const std::vector<float>& in,std::vector<float>&
 }
 std::vector<float> sliceSignal(const std::vector<float>&x,std::size_t b,std::size_t e){b=std::min(b,x.size());e=std::min(e,x.size());if(e<=b)return {};return std::vector<float>(x.begin()+static_cast<std::ptrdiff_t>(b),x.begin()+static_cast<std::ptrdiff_t>(e));}
 
-std::vector<double> hamming(std::size_t n){std::vector<double>w(n,1.0);if(n<=1)return w;for(std::size_t i=0;i<n;++i)w[i]=.54-.46*std::cos(2*kPi*static_cast<double>(i)/static_cast<double>(n-1));return w;}
+std::vector<float> hammingF(std::size_t n){std::vector<float>w(n,1.0f);if(n<=1)return w;for(std::size_t i=0;i<n;++i){const double ph=2.0*kPi*static_cast<double>(i)/static_cast<double>(n-1);w[i]=static_cast<float>(0.54-0.46*std::cos(ph));}return w;}
 std::vector<double> fftFrequencyGrid(double sr){std::vector<double>f(kBins);for(std::size_t k=0;k<kBins;++k)f[k]=static_cast<double>(k)*(sr*0.5)/static_cast<double>(kBins-1);return f;}
 std::vector<double> linspace(double a,double b,std::size_t n){std::vector<double>v(n);if(!n)return v;if(n==1){v[0]=a;return v;}for(std::size_t i=0;i<n;++i)v[i]=a+(b-a)*static_cast<double>(i)/static_cast<double>(n-1);v.front()=a;v.back()=b;return v;}
 
@@ -306,51 +316,67 @@ std::vector<double> linspace(double a,double b,std::size_t n){std::vector<double
 // frame means removed, long frames folded modulo 2048, then Sxx/Sxy.
 std::vector<double> ratioSpectrum(const std::vector<float>& model,const std::vector<float>& target,double sr){
     const std::size_t L=std::max<std::size_t>(1,static_cast<std::size_t>(std::ceil(0.125*sr)));
-    const std::size_t hop=std::max<std::size_t>(1,L/2); const auto w=hamming(L);
+    const std::size_t hop=std::max<std::size_t>(1,L/2); const auto w=hammingF(L);
     const std::size_t end=std::min(model.size(),target.size());
     if(end<L)return std::vector<double>(kBins,1.0);
-    std::vector<long double>sxx(kBins,0.0L);std::vector<std::complex<long double>>sxy(kBins,{0,0});std::size_t frames=0;
+    std::vector<float>sxx(kBins,0.0f),sxyRe(kBins,0.0f),sxyIm(kBins,0.0f);std::size_t frames=0;
     for(std::size_t p=0;p+L<=end;p+=hop){
-        long double mx=0,my=0;for(std::size_t i=0;i<L;++i){mx+=model[p+i];my+=target[p+i];}mx/=static_cast<long double>(L);my/=static_cast<long double>(L);
+        float mx=0.0f,my=0.0f;for(std::size_t i=0;i<L;++i){mx+=model[p+i];my+=target[p+i];}mx/=static_cast<float>(L);my/=static_cast<float>(L);
         std::vector<std::complex<double>>X(kFft),Y(kFft);
-        for(std::size_t i=0;i<L;++i){const std::size_t j=i&(kFft-1);X[j]+=static_cast<double>((static_cast<long double>(model[p+i])-mx)*w[i]);Y[j]+=static_cast<double>((static_cast<long double>(target[p+i])-my)*w[i]);}
+        // The converter folds each 125 ms Hamming frame modulo 2048 before
+        // the FFT.  Frame/window arithmetic and spectral accumulators are
+        // float32 in the official binary.
+        std::vector<float>xf(kFft,0.0f),yf(kFft,0.0f);
+        for(std::size_t i=0;i<L;++i){const std::size_t j=i&(kFft-1);xf[j]+=(model[p+i]-mx)*w[i];yf[j]+=(target[p+i]-my)*w[i];}
+        for(std::size_t i=0;i<kFft;++i){X[i]=static_cast<double>(xf[i]);Y[i]=static_cast<double>(yf[i]);}
         fft(X,false);fft(Y,false);++frames;
-        for(std::size_t k=0;k<kBins;++k){sxx[k]+=static_cast<long double>(std::norm(X[k]));const std::complex<long double>xl(X[k].real(),X[k].imag()),yl(Y[k].real(),Y[k].imag());sxy[k]+=std::conj(xl)*yl;}
+        for(std::size_t k=0;k<kBins;++k){
+            const float xr=static_cast<float>(X[k].real()),xi=static_cast<float>(X[k].imag());
+            const float yr=static_cast<float>(Y[k].real()),yi=static_cast<float>(Y[k].imag());
+            sxx[k]+=xr*xr+xi*xi;
+            sxyRe[k]+=xr*yr+xi*yi;
+            sxyIm[k]+=xr*yi-xi*yr;
+        }
     }
-    if(!frames)return std::vector<double>(kBins,1.0);std::vector<double>r(kBins,1.0);for(std::size_t k=0;k<kBins;++k)r[k]=static_cast<double>(std::abs(sxy[k])/(sxx[k]+kEps));return r;
+    if(!frames)return std::vector<double>(kBins,1.0);
+    std::vector<double>r(kBins,1.0);for(std::size_t k=0;k<kBins;++k){const float mag=std::sqrt(sxyRe[k]*sxyRe[k]+sxyIm[k]*sxyIm[k]);const float den=sxx[k]+static_cast<float>(kEps);r[k]=static_cast<double>(mag/den);}return r;
 }
 
-double hzToMel(double hz){return 2595.0*std::log10(1.0+std::max(0.0,hz)/700.0);}double melToHz(double mel){return 700.0*(std::pow(10.0,mel/2595.0)-1.0);}
+float hzToMelF(float hz){return 2595.0f*static_cast<float>(std::log10(1.0+static_cast<double>(std::max(0.0f,hz))/700.0));}
+float melToHzF(float mel){return 700.0f*static_cast<float>(std::pow(10.0,static_cast<double>(mel)/2595.0)-1.0);}
+double hzToMel(double hz){return static_cast<double>(hzToMelF(static_cast<float>(hz)));}double melToHz(double mel){return static_cast<double>(melToHzF(static_cast<float>(mel)));}
+float interpLinearF(const std::vector<float>&x,const std::vector<float>&y,float q){if(x.empty()||y.empty())return 0.0f;if(q<=x.front())return y.front();if(q>=x.back())return y.back();const auto it=std::lower_bound(x.begin(),x.end(),q);const std::size_t b=static_cast<std::size_t>(it-x.begin()),a=b-1;const float dx=x[b]-x[a];if(std::abs(dx)<1e-30f)return y[a];const float t=(q-x[a])/dx;return y[a]+(y[b]-y[a])*t;}
 double interpLinear(const std::vector<double>&x,const std::vector<double>&y,double q){if(x.empty()||y.empty())return 0.0;if(q<=x.front())return y.front();if(q>=x.back())return y.back();const auto it=std::lower_bound(x.begin(),x.end(),q);const std::size_t b=static_cast<std::size_t>(it-x.begin()),a=b-1;const double dx=x[b]-x[a];if(std::abs(dx)<1e-30)return y[a];const double t=(q-x[a])/dx;return y[a]+(y[b]-y[a])*t;}
+std::vector<float> linspaceF(float a,float b,std::size_t n){std::vector<float>v(n);if(!n)return v;if(n==1){v[0]=a;return v;}const float den=static_cast<float>(n-1);for(std::size_t i=0;i<n;++i)v[i]=a+(b-a)*(static_cast<float>(i)/den);v.front()=a;v.back()=b;return v;}
 
-// Exact kernel layout reconstructed from 0x555460. Even N intentionally
-// allocates N+1 slots; the extra slot remains zero. The N normalized weights
-// are copied in reverse and edge convolution renormalizes the used weights.
-std::vector<double> gaussianKernelExact(std::size_t n){
-    n=std::max<std::size_t>(1,n);const std::size_t storage=(n&1u)?n:n+1;std::vector<double>raw(n),g(storage,0.0);const double center=std::ceil(static_cast<double>(n)/2.0);long double sum=0;
-    for(std::size_t i=0;i<n;++i){const double x=(static_cast<double>(i+1)-center)*5.0/static_cast<double>(n);raw[i]=std::exp(-0.5*x*x);sum+=raw[i];}
-    for(auto&v:raw)v/=static_cast<double>(sum);for(std::size_t i=0;i<n;++i)g[i]=raw[n-1-i];return g;
+// Exact 0x555460 layout, with float32 arithmetic like GP-200.exe.
+std::vector<float> gaussianKernelExactF(std::size_t n){
+    n=std::max<std::size_t>(1,n);const std::size_t storage=(n&1u)?n:n+1;std::vector<float>raw(n),g(storage,0.0f);const float center=std::ceil(static_cast<float>(n)/2.0f);float sum=0.0f;
+    for(std::size_t i=0;i<n;++i){const float x=(static_cast<float>(i+1)-center)*5.0f/static_cast<float>(n);raw[i]=static_cast<float>(std::exp(-0.5*static_cast<double>(x*x)));sum+=raw[i];}
+    if(sum!=0.0f)for(auto&v:raw)v/=sum;for(std::size_t i=0;i<n;++i)g[i]=raw[n-1-i];return g;
 }
-std::vector<double> gaussianSmoothExact(const std::vector<double>&v,std::size_t n){
-    if(v.empty())return {};const auto g=gaussianKernelExact(n);const long center=static_cast<long>(g.size()/2);std::vector<double>o(v.size());
-    for(std::size_t i=0;i<v.size();++i){long double s=0,w=0;for(std::size_t k=0;k<g.size();++k){const long j=static_cast<long>(i)+static_cast<long>(k)-center;if(j<0||j>=static_cast<long>(v.size())||g[k]==0.0)continue;s+=static_cast<long double>(v[static_cast<std::size_t>(j)])*g[k];w+=g[k];}o[i]=w>0?static_cast<double>(s/w):v[i];}
-    return o;
+std::vector<float> gaussianSmoothExactF(const std::vector<float>&v,std::size_t n){
+    if(v.empty())return {};const auto g=gaussianKernelExactF(n);const long center=static_cast<long>(g.size()/2);std::vector<float>o(v.size());
+    for(std::size_t i=0;i<v.size();++i){float s=0.0f,w=0.0f;for(std::size_t k=0;k<g.size();++k){const long j=static_cast<long>(i)+static_cast<long>(k)-center;if(j<0||j>=static_cast<long>(v.size())||g[k]==0.0f)continue;s+=v[static_cast<std::size_t>(j)]*g[k];w+=g[k];}o[i]=w>0.0f?s/w:v[i];}return o;
 }
+std::vector<double> gaussianSmoothExact(const std::vector<double>&v,std::size_t n){std::vector<float>x(v.size());for(std::size_t i=0;i<v.size();++i)x[i]=static_cast<float>(v[i]);const auto y=gaussianSmoothExactF(x,n);return std::vector<double>(y.begin(),y.end());}
 
 struct ConditionedMagnitude{std::vector<double>freq,mag;};
-// 0x554f00: magnitude -> dB, uniform-Mel working grid, Gaussian #1
-// int(N1*.002), interpolation to linear-Hz grid, Gaussian #2
-// 2*(N1/N2), interpolation to N2 linear-Hz points, dB -> magnitude.
+struct ConditionedMagnitudeF{std::vector<float>freq,mag;};
+// 0x554f00, transcribed with the same float working arrays/constants.
+ConditionedMagnitudeF conditionMagnitudeF(const std::vector<float>&srcFreq,const std::vector<float>&srcMag,std::size_t destCount){
+    const std::size_t n=std::min(srcFreq.size(),srcMag.size());ConditionedMagnitudeF out;if(!n||!destCount)return out;
+    const float f0=srcFreq.front(),f1=srcFreq[n-1];std::vector<float>sf(srcFreq.begin(),srcFreq.begin()+static_cast<std::ptrdiff_t>(n)),db(n);
+    for(std::size_t i=0;i<n;++i)db[i]=20.0f*static_cast<float>(std::log10(std::max(1.0e-20,static_cast<double>(srcMag[i]))));
+    auto melGrid=linspaceF(hzToMelF(f0),hzToMelF(f1),n);std::vector<float>melHz(n);for(std::size_t i=0;i<n;++i)melHz[i]=melToHzF(melGrid[i]);melHz.front()=f0;melHz.back()=f1;
+    std::vector<float>work(n);for(std::size_t i=0;i<n;++i)work[i]=interpLinearF(sf,db,melHz[i]);
+    const std::size_t k1=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<float>(n)*0.002f));work=gaussianSmoothExactF(work,k1);
+    const auto linearHz=linspaceF(f0,f1,n);std::vector<float>linearDb(n);for(std::size_t i=0;i<n;++i)linearDb[i]=interpLinearF(melHz,work,linearHz[i]);
+    const std::size_t k2=std::max<std::size_t>(1,2*(n/destCount));linearDb=gaussianSmoothExactF(linearDb,k2);
+    out.freq=linspaceF(f0,f1,destCount);out.mag.resize(destCount);for(std::size_t i=0;i<destCount;++i){const float d=interpLinearF(linearHz,linearDb,out.freq[i]);out.mag[i]=static_cast<float>(std::pow(10.0,static_cast<double>(d*0.05f)));}return out;
+}
 ConditionedMagnitude conditionMagnitude(const std::vector<double>&srcFreq,const std::vector<double>&srcMag,std::size_t destCount){
-    const std::size_t n=std::min(srcFreq.size(),srcMag.size());ConditionedMagnitude out;if(!n||!destCount)return out;
-    const double f0=srcFreq.front(),f1=srcFreq[n-1];std::vector<double>sf(srcFreq.begin(),srcFreq.begin()+static_cast<std::ptrdiff_t>(n));std::vector<double>db(n);
-    for(std::size_t i=0;i<n;++i)db[i]=20.0*std::log10(std::max(1.0e-20,srcMag[i]));
-    auto melGrid=linspace(hzToMel(f0),hzToMel(f1),n);std::vector<double>melHz(n);for(std::size_t i=0;i<n;++i)melHz[i]=melToHz(melGrid[i]);melHz.front()=f0;melHz.back()=f1;
-    std::vector<double>work(n);for(std::size_t i=0;i<n;++i)work[i]=interpLinear(sf,db,melHz[i]);
-    const std::size_t k1=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<double>(n)*0.002));work=gaussianSmoothExact(work,k1);
-    const auto linearHz=linspace(f0,f1,n);std::vector<double>linearDb(n);for(std::size_t i=0;i<n;++i)linearDb[i]=interpLinear(melHz,work,linearHz[i]);
-    const std::size_t k2=std::max<std::size_t>(1,2*(n/destCount));linearDb=gaussianSmoothExact(linearDb,k2);
-    out.freq=linspace(f0,f1,destCount);out.mag.resize(destCount);for(std::size_t i=0;i<destCount;++i){const double d=interpLinear(linearHz,linearDb,out.freq[i]);out.mag[i]=std::pow(10.0,d*0.05);}return out;
+    const std::size_t n=std::min(srcFreq.size(),srcMag.size());std::vector<float>f(n),m(n);for(std::size_t i=0;i<n;++i){f[i]=static_cast<float>(srcFreq[i]);m[i]=static_cast<float>(srcMag[i]);}auto cf=conditionMagnitudeF(f,m,destCount);ConditionedMagnitude o;o.freq.assign(cf.freq.begin(),cf.freq.end());o.mag.assign(cf.mag.begin(),cf.mag.end());return o;
 }
 
 void lowSmoothASequential(std::vector<double>&m,double sr){
@@ -359,14 +385,22 @@ void lowSmoothASequential(std::vector<double>&m,double sr){
     for(std::size_t i=1;i<lim&&i+1<n;++i)m[i]=std::sqrt(std::max(1.0e-30,m[i]*std::sqrt(std::max(1.0e-30,m[i-1]*m[i+1]))));
 }
 
+void fftF(std::vector<std::complex<float>>& a,bool inv){
+    const std::size_t n=a.size();for(std::size_t i=1,j=0;i<n;++i){std::size_t bit=n>>1;for(;j&bit;bit>>=1)j^=bit;j^=bit;if(i<j)std::swap(a[i],a[j]);}
+    for(std::size_t len=2;len<=n;len<<=1){const float ang=static_cast<float>((inv?2.0:-2.0)*kPi/static_cast<double>(len));const std::complex<float>wl(std::cos(ang),std::sin(ang));for(std::size_t i=0;i<n;i+=len){std::complex<float>w(1,0);for(std::size_t j=0;j<len/2;++j){auto u=a[i+j],v=a[i+j+len/2]*w;a[i+j]=u+v;a[i+j+len/2]=u-v;w*=wl;}}}if(inv){const float d=static_cast<float>(n);for(auto&v:a)v/=d;}
+}
+void transformAnyF(std::vector<std::complex<float>>& a,bool inv){
+    if(powerOfTwo(a.size())){fftF(a,inv);return;}const std::size_t n=a.size();std::vector<std::complex<float>>o(n);const float sign=inv?1.0f:-1.0f;
+    for(std::size_t k=0;k<n;++k){std::complex<float>sum(0,0);for(std::size_t j=0;j<n;++j){const float ph=sign*static_cast<float>(2.0*kPi*static_cast<double>(j)*static_cast<double>(k)/static_cast<double>(n));sum+=a[j]*std::complex<float>(std::cos(ph),std::sin(ph));}if(inv)sum/=static_cast<float>(n);o[k]=sum;}a.swap(o);
+}
 std::vector<float> minimumPhase(const std::vector<double>&positive,std::size_t taps){
-    if(positive.size()<2||!taps)return std::vector<float>(taps,0.0f);const std::size_t posN=positive.size(),fullN=2*posN-2;std::vector<double>m(fullN);
-    for(std::size_t i=0;i<posN;++i)m[i]=std::max(1.0e-30,positive[i]);for(std::size_t i=1;i+1<posN;++i)m[fullN-i]=m[i];
-    const double mx=*std::max_element(m.begin(),m.end()),floor=mx*1.0e-5;std::vector<std::complex<double>>c(fullN);for(std::size_t i=0;i<fullN;++i)c[i]=std::log(std::max(floor,m[i])+kEps);
-    transformAny(c,true);for(std::size_t i=1;i<fullN/2;++i)c[i]*=2.0;for(std::size_t i=fullN/2+1;i<fullN;++i)c[i]=0.0;transformAny(c,false);for(auto&v:c)v=std::exp(v);transformAny(c,true);
-    long double fullNorm2=0;for(const auto&v:c)fullNorm2+=static_cast<long double>(v.real())*v.real();std::vector<float>h(taps,0.0f);for(std::size_t i=0;i<std::min(taps,c.size());++i)h[i]=static_cast<float>(c[i].real());
-    const double mean=std::accumulate(h.begin(),h.end(),0.0)/static_cast<double>(h.size());for(auto&v:h)v=static_cast<float>(v-mean);long double shortNorm2=0;for(float v:h)shortNorm2+=static_cast<long double>(v)*v;
-    if(shortNorm2>1.0e-30L&&fullNorm2>0){const double g=std::sqrt(static_cast<double>(fullNorm2/shortNorm2));for(auto&v:h)v=static_cast<float>(v*g);}return h;
+    if(positive.size()<2||!taps)return std::vector<float>(taps,0.0f);const std::size_t posN=positive.size(),fullN=2*posN-2;std::vector<float>m(fullN);
+    for(std::size_t i=0;i<posN;++i)m[i]=std::max(1.0e-30f,static_cast<float>(positive[i]));for(std::size_t i=1;i+1<posN;++i)m[fullN-i]=m[i];
+    const float mx=*std::max_element(m.begin(),m.end()),floor=mx*1.0e-5f;std::vector<std::complex<float>>c(fullN);for(std::size_t i=0;i<fullN;++i)c[i]=static_cast<float>(std::log(static_cast<double>(std::max(floor,m[i])+static_cast<float>(kEps))));
+    transformAnyF(c,true);for(std::size_t i=1;i<fullN/2;++i)c[i]*=2.0f;for(std::size_t i=fullN/2+1;i<fullN;++i)c[i]=0.0f;transformAnyF(c,false);for(auto&v:c)v=std::exp(v);transformAnyF(c,true);
+    float fullNorm2=0.0f;for(const auto&v:c)fullNorm2+=v.real()*v.real();std::vector<float>h(taps,0.0f);for(std::size_t i=0;i<std::min(taps,c.size());++i)h[i]=c[i].real();
+    float sum=0.0f;for(float v:h)sum+=v;const float mean=sum/static_cast<float>(h.size());for(auto&v:h)v-=mean;float shortNorm2=0.0f;for(float v:h)shortNorm2+=v*v;
+    if(shortNorm2>1.0e-30f&&fullNorm2>0.0f){const float g=std::sqrt(fullNorm2/shortNorm2);for(auto&v:h)v*=g;}return h;
 }
 
 std::vector<double> frequencyWeights(double sr){std::vector<double>w(kBins,1.0);std::size_t idx=static_cast<std::size_t>(std::ceil((2.0/sr)*80.0*static_cast<double>(kBins)));idx=std::clamp<std::size_t>(idx,1,kBins);const std::size_t start=idx-1,n=kBins-start;if(n==1){w[start]=1.0;return w;}for(std::size_t i=0;i<n;++i)w[start+i]=1.0-0.5*static_cast<double>(i)/static_cast<double>(n-1);return w;}
@@ -418,21 +452,37 @@ std::vector<float> convolveTruncate(const std::vector<float>&a,const std::vector
 
 std::vector<double> finalTailCorrection(const std::vector<float>&model,const std::vector<float>&target,double sr){
     const std::size_t L=std::max<std::size_t>(1,static_cast<std::size_t>(std::ceil(0.1*sr)));const std::size_t end=std::min(model.size(),target.size());if(end<L)return std::vector<double>(256,1.0);
-    std::vector<double>xm(L,0.0),yt(L,0.0);for(std::size_t i=0;i<end;++i){const std::size_t j=i%L;xm[j]+=model[i];yt[j]+=target[i];}
-    const double mm=std::accumulate(xm.begin(),xm.end(),0.0)/static_cast<double>(L),tm=std::accumulate(yt.begin(),yt.end(),0.0)/static_cast<double>(L);const auto win=hamming(L);for(std::size_t i=0;i<L;++i){xm[i]=(xm[i]-mm)*win[i];yt[i]=(yt[i]-tm)*win[i];}
-    const std::size_t posN=L/2+1;std::vector<double>freq(posN),ratio(posN,1.0);
-    for(std::size_t k=0;k<posN;++k){long double xr=0,xi=0,yr=0,yi=0;const long double w=-2.0L*static_cast<long double>(kPi)*static_cast<long double>(k)/static_cast<long double>(L);for(std::size_t n=0;n<L;++n){const long double ph=w*static_cast<long double>(n),c=std::cos(ph),s=std::sin(ph);xr+=xm[n]*c;xi+=xm[n]*s;yr+=yt[n]*c;yi+=yt[n]*s;}const double am=std::hypot(static_cast<double>(xr),static_cast<double>(xi)),at=std::hypot(static_cast<double>(yr),static_cast<double>(yi));freq[k]=static_cast<double>(k)*sr/static_cast<double>(L);ratio[k]=std::clamp((1.0e6*at)/(1.0e6*am+kEps),0.1,10.0);}
-    const std::size_t smoothN=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<double>(posN)*0.1));ratio=gaussianSmoothExact(ratio,smoothN);for(auto&v:ratio)v=std::clamp(v,0.1,10.0);return conditionMagnitude(freq,ratio,256).mag;
+    std::vector<float>xm(L,0.0f),yt(L,0.0f);for(std::size_t i=0;i<end;++i){const std::size_t j=i%L;xm[j]+=model[i];yt[j]+=target[i];}
+    float mm=0.0f,tm=0.0f;for(std::size_t i=0;i<L;++i){mm+=xm[i];tm+=yt[i];}mm/=static_cast<float>(L);tm/=static_cast<float>(L);const auto win=hammingF(L);for(std::size_t i=0;i<L;++i){xm[i]=(xm[i]-mm)*win[i];yt[i]=(yt[i]-tm)*win[i];}
+    const std::size_t posN=L/2+1;std::vector<float>freq(posN),modelMag(posN),targetMag(posN);
+    // Official path explicitly DFTs the two folded 100 ms signals, keeping
+    // float32 accumulators/magnitudes.
+    for(std::size_t k=0;k<posN;++k){float xr=0.0f,xi=0.0f,yr=0.0f,yi=0.0f;const float w0=static_cast<float>(-2.0*kPi*static_cast<double>(k)/static_cast<double>(L));for(std::size_t n=0;n<L;++n){const float ph=w0*static_cast<float>(n),c=std::cos(ph),sn=std::sin(ph);xr+=xm[n]*c;xi+=xm[n]*sn;yr+=yt[n]*c;yi+=yt[n]*sn;}modelMag[k]=std::sqrt(xr*xr+xi*xi);targetMag[k]=std::sqrt(yr*yr+yi*yi);freq[k]=static_cast<float>(static_cast<double>(k)*sr/static_cast<double>(L));}
+
+    // Critical ordering from 0x556670: condition target magnitude and model
+    // magnitude independently with 0x554f00 BEFORE computing their ratio.
+    const auto ct=conditionMagnitudeF(freq,targetMag,posN);
+    const auto cm=conditionMagnitudeF(freq,modelMag,posN);
+    std::vector<float>ratio(posN,1.0f);for(std::size_t k=0;k<posN;++k){const double num=static_cast<double>(ct.mag[k])*1000000.0;const double den=static_cast<double>(cm.mag[k])*1000000.0+kEps;ratio[k]=std::clamp(static_cast<float>(num/den),0.1f,10.0f);}
+    const std::size_t smoothN=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<float>(posN)*0.1f));ratio=gaussianSmoothExactF(ratio,smoothN);for(auto&v:ratio)v=std::clamp(v,0.1f,10.0f);
+    const auto final=conditionMagnitudeF(ct.freq,ratio,256);return std::vector<double>(final.mag.begin(),final.mag.end());
 }
 
 void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status){
     report(status,L"Independent: final Block B tail refinement...");const std::size_t b=static_cast<std::size_t>(std::llround(50.0*sr)),e=static_cast<std::size_t>(std::llround(70.0*sr));const auto tailIn=sliceSignal(input,b,e),tailTarget=sliceSignal(target,b,e);std::vector<float>pred;renderModel(m,tailIn,pred,true);
-    auto corrMag=finalTailCorrection(pred,tailTarget,sr);auto corr=minimumPhase(corrMag,256);m.B=convolveTruncate(m.B,corr,kB);const double mean=std::accumulate(m.B.begin(),m.B.end(),0.0)/static_cast<double>(m.B.size());for(auto&v:m.B)v=static_cast<float>(v-mean);
-    renderModel(m,tailIn,pred,true);long double et=0,ep=0;for(std::size_t i=0;i<std::min(pred.size(),tailTarget.size());++i){et+=static_cast<long double>(tailTarget[i])*tailTarget[i];ep+=static_cast<long double>(pred[i])*pred[i];}if(ep>1.0e-30L){const double g=std::sqrt(static_cast<double>(et/ep));for(auto&v:m.B)v=static_cast<float>(v*g);}
+    auto corrMag=finalTailCorrection(pred,tailTarget,sr);auto corr=minimumPhase(corrMag,256);m.B=convolveTruncate(m.B,corr,kB);
+    float sum=0.0f;for(float v:m.B)sum+=v;const float mean=sum/static_cast<float>(m.B.size());for(auto&v:m.B)v-=mean;
+    renderModel(m,tailIn,pred,true);float et=0.0f,ep=0.0f;for(std::size_t i=0;i<std::min(pred.size(),tailTarget.size());++i){et+=tailTarget[i]*tailTarget[i];ep+=pred[i]*pred[i];}if(ep>1.0e-30f){const float g=std::sqrt(et)/std::sqrt(ep);for(auto&v:m.B)v*=g;}
 }
 
 std::vector<float> resampleFirFixed(const std::vector<float>&h,double sr,std::size_t outLen){
-    auto r=resampleR8Brain24(h,sr,44100.0);r.resize(outLen,0);return r;
+    if(std::abs(sr-44100.0)<1e-9){auto r=h;r.resize(outLen,0.0f);return r;}
+    auto r=resampleR8Brain24(h,sr,44100.0);
+    // The official FIR wrapper's effective coefficient count is truncated,
+    // not rounded.  For A128 at 48 kHz this yields 117 non-zero samples,
+    // matching the official golden CLO (NATIVE7 produced 118).
+    const std::size_t effective=std::min(outLen,static_cast<std::size_t>(std::floor(static_cast<double>(h.size())*44100.0/sr)));
+    if(r.size()>effective)r.resize(effective);r.resize(outLen,0.0f);return r;
 }
 bool serialize2048(const fs::path&path,const Model&m,double trainerRate,std::string&error){std::vector<std::uint8_t>d(kCloBytes,0);std::memcpy(d.data(),"VTSI",4);put32(d,0x04,0x2288);put32(d,0x14,0x2200);putDouble(d,0x18,1);putDouble(d,0x20,0);putDouble(d,0x28,0);putDouble(d,0x30,0);putDouble(d,0x38,0);
     putDouble(d,0x40,m.post.b0);putDouble(d,0x48,m.post.b1);putDouble(d,0x50,m.post.b2);putDouble(d,0x58,m.post.a1);putDouble(d,0x60,m.post.a2);putFloat(d,0x68,m.pk.pp);putFloat(d,0x6c,m.pk.pn);putFloat(d,0x70,m.pk.kp);putFloat(d,0x74,m.pk.kn);put32(d,0x78,0);put32(d,0x7c,128);put32(d,0x80,128);put32(d,0x84,2048);

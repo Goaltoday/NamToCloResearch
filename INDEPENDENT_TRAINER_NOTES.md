@@ -29,3 +29,10 @@ NATIVE7 replaces the remaining NATIVE5/NATIVE6 approximations with the details r
 ## Validation rule
 
 Do not label a new native result “100% equivalent” solely from code inspection. Equivalence is accepted only after golden-reference comparison of the same NAM + stimulus against the current/official converter. Compare P/K, POST, A, B and rendered response; byte identity is a stricter final check.
+
+
+## NATIVE8 strict-equivalence corrections
+
+The final B routine in GP-200.exe does **not** form a raw target/model magnitude ratio and then condition that ratio. It calls the magnitude-conditioning routine separately for target and candidate model, forms the ratio of those two conditioned curves, clamps/smooths it, then conditions that correction to 256 points and creates the minimum-phase FIR256. NATIVE8 follows that ordering.
+
+Where the disassembly uses `movss/addss/mulss/divss`, NATIVE8 keeps float32 state instead of accumulating in double/long double. The POST coefficients are also computed as float32 and only then promoted to the CLO double fields.
