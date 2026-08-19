@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(NamToClo VERSION 2.7.0.12 LANGUAGES C CXX RC)
+project(NamToClo VERSION 2.7.0.13 LANGUAGES C CXX RC)
 
 if(NOT WIN32)
     message(FATAL_ERROR "NAM to CLO targets Windows x64.")

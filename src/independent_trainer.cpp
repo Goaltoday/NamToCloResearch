@@ -70,10 +70,52 @@ void putDouble(std::vector<std::uint8_t>& d, std::size_t o, double v) {
     std::uint64_t u{}; std::memcpy(&u, &v, 8);
     for (int i=0;i<8;++i) d[o+i] = static_cast<std::uint8_t>(u >> (8*i));
 }
-std::uint16_t crc16Modbus(const std::uint8_t* p, std::size_t n) {
-    std::uint16_t crc=0xffff;
-    for(std::size_t i=0;i<n;++i){ crc^=p[i]; for(int b=0;b<8;++b) crc=(crc&1)?static_cast<std::uint16_t>((crc>>1)^0xa001):static_cast<std::uint16_t>(crc>>1); }
-    return crc;
+constexpr std::array<std::uint8_t,256> kCrcLoOfficial = {
+    0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,
+    0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,
+    0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,
+    0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,
+    0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,
+    0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,
+    0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,
+    0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,
+    0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,
+    0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,
+    0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,
+    0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,
+    0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,
+    0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,
+    0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,
+    0x00,0xc1,0x81,0x40,0x01,0xc0,0x80,0x41,0x01,0xc0,0x80,0x41,0x00,0xc1,0x81,0x40,
+};
+constexpr std::array<std::uint8_t,256> kCrcHiOfficial = {
+    0x00,0xc0,0xc1,0x01,0xc3,0x03,0x02,0xc2,0xc6,0x06,0x07,0xc7,0x05,0xc5,0xc4,0x04,
+    0xcc,0x0c,0x0d,0xcd,0x0f,0xcf,0xce,0x0e,0x0a,0xca,0xcb,0x0b,0xc9,0x09,0x08,0xc8,
+    0xd8,0x18,0x19,0xd9,0x1b,0xdb,0xda,0x1a,0x1e,0xde,0xdf,0x1f,0xdd,0x1d,0x1c,0xdc,
+    0x14,0xd4,0xd5,0x15,0xd7,0x17,0x16,0xd6,0xd2,0x12,0x13,0xd3,0x11,0xd1,0xd0,0x10,
+    0xf0,0x30,0x31,0xf1,0x33,0xf3,0xf2,0x32,0x36,0xf6,0xf7,0x37,0xf5,0x35,0x34,0xf4,
+    0x3c,0xfc,0xfd,0x3d,0xff,0x3f,0x3e,0xfe,0xfa,0x3a,0x3b,0xfb,0x39,0xf9,0xf8,0x38,
+    0x28,0xe8,0xe9,0x29,0xeb,0x2b,0x2a,0xea,0xee,0x2e,0x2f,0xef,0x2d,0xed,0xec,0x2c,
+    0xe4,0x24,0x25,0xe5,0x27,0xe7,0xe6,0x26,0x22,0xe2,0xe3,0x23,0xe1,0x21,0x20,0xe0,
+    0xa0,0x60,0x61,0xa1,0x63,0xa3,0xa2,0x62,0x66,0xa6,0xa7,0x67,0xa5,0x65,0x64,0xa4,
+    0x6c,0xac,0xad,0x6d,0xaf,0x6f,0x6e,0xae,0xaa,0x6a,0x6b,0xab,0x69,0xa9,0xa8,0x68,
+    0x78,0xb8,0xb9,0x79,0xbb,0x7b,0x7a,0xba,0xbe,0x7e,0x7f,0xbf,0x7d,0xbd,0xbc,0x7c,
+    0xb4,0x74,0x75,0xb5,0x77,0xb7,0xb6,0x76,0x72,0xb2,0xb3,0x73,0xb1,0x71,0x70,0xb0,
+    0x50,0x90,0x91,0x51,0x93,0x53,0x52,0x92,0x96,0x56,0x57,0x97,0x55,0x95,0x94,0x54,
+    0x9c,0x5c,0x5d,0x9d,0x5f,0x9f,0x9e,0x5e,0x5a,0x9a,0x9b,0x5b,0x99,0x59,0x58,0x98,
+    0x88,0x48,0x49,0x89,0x4b,0x8b,0x8a,0x4a,0x4e,0x8e,0x8f,0x4f,0x8d,0x4d,0x4c,0x8c,
+    0x44,0x84,0x85,0x45,0x87,0x47,0x46,0x86,0x82,0x42,0x43,0x83,0x41,0x81,0x80,0x40,
+};
+std::uint16_t crc16Official(const std::uint8_t* p, std::size_t n) {
+    // GP-200.exe 0x553150/0x553190.  dl/bl both start at 0xff.  The two
+    // 256-byte tables are copied verbatim from VA 0x7722d0/0x7723d0.
+    std::uint8_t lo=0xff,hi=0xff;
+    for(std::size_t i=0;i<n;++i){
+        const std::uint8_t idx=static_cast<std::uint8_t>(p[i]^lo);
+        lo=static_cast<std::uint8_t>(kCrcLoOfficial[idx]^hi);
+        hi=kCrcHiOfficial[idx];
+    }
+    return static_cast<std::uint16_t>((static_cast<std::uint16_t>(lo)<<8)|hi);
 }
 
 bool readPcm16Mono(const fs::path& path, std::vector<float>& x, std::uint32_t& sr, std::string& error) {
@@ -98,24 +140,36 @@ bool readPcm16Mono(const fs::path& path, std::vector<float>& x, std::uint32_t& s
 // Use the same bounded MaxInLen for construction and for oneshot(); r8brain
 // performs the internal blocking and zero flushing required to produce the
 // requested output length.
+// GP-200.exe 0x5a70a0.  The converter uses the same whole-buffer
+// CDSPResampler24 path for the 70-second stimulus and for FIR serialization.
+// Source/destination rates and the output length are first rounded to float;
+// MaxInLen is the COMPLETE input length.  The whole input is converted to
+// double and passed to process() once, then equal-size zero blocks are passed
+// until the requested (float-ratio, truncated) sample count has been produced.
 std::vector<float> resampleR8Brain24(const std::vector<float>& in, double inRate, double outRate) {
-    if (in.empty() || std::abs(inRate - outRate) < 1e-9) return in;
-
-    const std::size_t outN = static_cast<std::size_t>(
-        std::llround(static_cast<double>(in.size()) * outRate / inRate));
-    std::vector<float> out(outN, 0.0f);
-    if (outN == 0) return out;
-
-    constexpr int kProcessBlock = 16384;
-    if (in.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
-        out.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        return {};
+    if(in.empty()) return {};
+    const float srcF=static_cast<float>(inRate),dstF=static_cast<float>(outRate);
+    if(srcF==dstF) return in;
+    if(in.size()>static_cast<std::size_t>(std::numeric_limits<int>::max())) return {};
+    const int inCount=static_cast<int>(in.size());
+    const int targetCount=std::max(0,static_cast<int>(static_cast<float>(inCount)*dstF/srcF));
+    std::vector<float> out(static_cast<std::size_t>(targetCount),0.0f);
+    if(targetCount==0) return out;
+    std::vector<double> block(in.size());
+    for(std::size_t i=0;i<in.size();++i) block[i]=static_cast<double>(in[i]);
+    r8b::CDSPResampler24 rs(static_cast<double>(srcF),static_cast<double>(dstF),inCount);
+    std::size_t outPos=0; bool first=true;
+    while(outPos<out.size()){
+        if(!first) std::fill(block.begin(),block.end(),0.0);
+        first=false;
+        double* produced=nullptr;
+        const int count=rs.process(block.data(),inCount,produced);
+        if(count<0 || produced==nullptr) break;
+        const std::size_t take=std::min<std::size_t>(static_cast<std::size_t>(count),out.size()-outPos);
+        for(std::size_t i=0;i<take;++i) out[outPos+i]=static_cast<float>(produced[i]);
+        outPos+=take;
     }
-
-    r8b::CDSPResampler24 rs(inRate, outRate, kProcessBlock);
-    rs.oneshot(kProcessBlock,
-               in.data(), static_cast<int>(in.size()),
-               out.data(), static_cast<int>(out.size()));
+    rs.clear();
     return out;
 }
 
@@ -219,18 +273,21 @@ bool renderNam(const fs::path& path,const std::vector<float>& stimulus44100,int 
         renderedInput.resize(n70,0.0f);
         std::vector<float> renderedTarget(n70,0.0f);
 
-        dsp->Reset(rate,blockSize);
-        std::vector<NAM_SAMPLE> ib(static_cast<std::size_t>(blockSize),NAM_SAMPLE{}),ob(static_cast<std::size_t>(blockSize),NAM_SAMPLE{});
+        (void)blockSize; // independent/offical path is fixed at 1024 samples.
+        constexpr int kOfficialNamBlock=1024;
+        dsp->Reset(rate,kOfficialNamBlock);
+        std::vector<NAM_SAMPLE> ib(kOfficialNamBlock,NAM_SAMPLE{}),ob(kOfficialNamBlock,NAM_SAMPLE{});
         NAM_SAMPLE* ip[1]={ib.data()}; NAM_SAMPLE* op[1]={ob.data()};
-        const float targetScaleF=static_cast<float>(targetScale);
-        for(std::size_t pos=0;pos<n70;pos+=static_cast<std::size_t>(blockSize)){
-            const int n=static_cast<int>(std::min<std::size_t>(static_cast<std::size_t>(blockSize),n70-pos));
-            for(int i=0;i<n;++i)ib[static_cast<std::size_t>(i)]=static_cast<NAM_SAMPLE>(renderedInput[pos+static_cast<std::size_t>(i)]);
-            // Zero the unused part of the fixed 1024-sample work block.  It is
-            // not processed when n<blockSize, but keeping it deterministic also
-            // mirrors the official renderer's zero-initialized work area.
-            for(int i=n;i<blockSize;++i)ib[static_cast<std::size_t>(i)]=NAM_SAMPLE{};
-            dsp->process(ip,op,n);
+        (void)targetScale; // retained in the public config only for ABI/source compatibility.
+        constexpr float targetScaleF=0.31f; // GP-200.exe getConvertNormalWav literal scale.
+        for(std::size_t pos=0;pos<n70;pos+=kOfficialNamBlock){
+            const int n=static_cast<int>(std::min<std::size_t>(kOfficialNamBlock,n70-pos));
+            for(int i=0;i<n;++i) ib[static_cast<std::size_t>(i)]=static_cast<NAM_SAMPLE>(renderedInput[pos+static_cast<std::size_t>(i)]);
+            for(int i=n;i<kOfficialNamBlock;++i) ib[static_cast<std::size_t>(i)]=NAM_SAMPLE{};
+            // GP-200.exe always invokes the NAM virtual process routine with
+            // 0x400, including the final partial source block.  It copies only
+            // the valid n output samples back afterwards.
+            dsp->process(ip,op,kOfficialNamBlock);
             for(int i=0;i<n;++i){
                 const float y=static_cast<float>(ob[static_cast<std::size_t>(i)]);
                 renderedTarget[pos+static_cast<std::size_t>(i)]=y*targetScaleF;
@@ -300,88 +357,160 @@ struct PK {float pp=.1f,pn=.1f,kp=1,kn=1;};
 // 0.5*P, then the seed is searched with the official multipliers
 // 0.80, 0.85, ... 1.20. Positive K is selected first, then negative K.
 PK fitPk(const std::vector<float>& in,const std::vector<float>& out,double sr){
-    // 0x558c30 keeps the measurement vectors as float32.  Window length is
-    // obtained by promoting the trainer sample-rate float to double, multiplying
-    // by 0.1, then rounding back to float; window boundaries are float products
-    // truncated to integer sample indices.
+    // Literal port of GP-200.exe 0x558c30.  The caller passes the first
+    // 5*Fs samples.  The routine builds three N-window vectors:
+    //   xAbs  = max(abs(input))
+    //   yPos  = max(output, 0)
+    //   yNeg  = min(output, 0)
+    // and then a 2*N signed (x,y) dataset ordered as negative/reversed first,
+    // positive/forward second.  That ordering is observable because the K
+    // search error accumulator is float32.
     const float fs=static_cast<float>(sr);
     const float winF=static_cast<float>(static_cast<double>(fs)*0.1);
-    const std::size_t end=std::min(in.size(),std::min(out.size(),
-        static_cast<std::size_t>(std::max(0.0,std::floor(5.0*static_cast<double>(fs))))));
-    const int windows=(winF>0.0f)?static_cast<int>(std::floor(static_cast<double>(static_cast<float>(end)/winF))):0;
-    struct M{float x,yp,yn;}; std::vector<M> m; m.reserve(std::max(0,windows));
+    if(!(winF>0.0f)) return PK{};
+
+    // Caller at 0x55a0xx computes cvttss2si(float(Fs) * 5.0f) and passes
+    // that exact length to 0x558c30; the trainer vectors themselves are longer.
+    const int literalLength=static_cast<int>(fs*5.0f); // MULSS + CVTTSS2SI
+    const int passedLength=std::max(0,std::min({static_cast<int>(in.size()),
+                                                static_cast<int>(out.size()),
+                                                literalLength}));
+    const float lengthF=static_cast<float>(passedLength);
+    const float quotient=lengthF/winF;
+    const int windows=static_cast<int>(static_cast<float>(std::floor(static_cast<double>(quotient))));
+    if(windows<=0) return PK{};
+
+    std::vector<float> xAbs(static_cast<std::size_t>(windows),0.0f);
+    std::vector<float> yPos(static_cast<std::size_t>(windows),0.0f);
+    std::vector<float> yNeg(static_cast<std::size_t>(windows),0.0f);
+    float pp=0.0f,pn=0.0f;
+
     for(int wi=0;wi<windows;++wi){
-        const int bi=static_cast<int>(static_cast<float>(wi)*winF);
-        const int ei=static_cast<int>(static_cast<float>(wi+1)*winF);
-        const std::size_t b=std::min<std::size_t>(end,std::max(0,bi));
-        const std::size_t e=std::min<std::size_t>(end,std::max(0,ei));
-        float x=0.0f,yp=0.0f,yn=0.0f;
-        for(std::size_t i=b;i<e;++i){
-            x=std::max(x,std::fabs(in[i]));
-            yp=std::max(yp,out[i]);
-            yn=std::max(yn,-out[i]);
+        const float fEnd=static_cast<float>(wi+1)*winF;
+        const float fBegin=static_cast<float>(wi)*winF;
+        const int endI=static_cast<int>(fEnd);      // cvttss2si
+        const int beginI=static_cast<int>(fBegin);  // cvttss2si
+        const int b=std::max(0,std::min(beginI,passedLength));
+        const int e=std::max(0,std::min(endI,passedLength));
+        float xa=0.0f,yp=0.0f,yn=0.0f;
+        for(int i=b;i<e;++i){
+            const float ax=std::fabs(in[static_cast<std::size_t>(i)]); // 0x4223a0
+            if(ax>xa) xa=ax;
+            const float y=out[static_cast<std::size_t>(i)];
+            if(y>yp) yp=y;
+            if(yn>y) yn=y;
         }
-        m.push_back({x,std::max(0.0f,yp),std::max(0.0f,yn)});
+        const std::size_t w=static_cast<std::size_t>(wi);
+        xAbs[w]=xa; yPos[w]=yp; yNeg[w]=yn;
+        pp=std::max(pp,yp);
+        const float negMag=flipFloatSignBit(yn); // XOR sign bit exactly as 0x558d9c
+        pn=std::max(pn,negMag);
     }
-    PK r{}; if(m.empty())return r;
-    float pp=0.0f,pn=0.0f;for(const auto&v:m){pp=std::max(pp,v.yp);pn=std::max(pn,v.yn);}
-    if(!(pp>0.0f))pp=std::numeric_limits<float>::min();
-    if(!(pn>0.0f))pn=std::numeric_limits<float>::min();
-    r.pp=pp;r.pn=pn;
 
-    auto crossingCount=[&](bool pos,float P){
-        const double threshold=static_cast<double>(P)*0.5;
-        int count=0;
-        for(std::size_t i=0;i<m.size();++i){
-            const float y=pos?m[i].yp:m[i].yn;
-            if(static_cast<double>(y)>=threshold){count=static_cast<int>(i)+1;break;}
-        }
-        return count;
-    };
-    auto seedK=[&](bool pos,float P){
-        int count=crossingCount(pos,P);
-        if(count<=0)count=static_cast<int>(m.size());
-        double sxy=0.0,sxx=0.0;
-        for(int i=0;i<count;++i){
-            const double x=static_cast<double>(m[static_cast<std::size_t>(i)].x);
-            const double y=static_cast<double>(pos?m[static_cast<std::size_t>(i)].yp:m[static_cast<std::size_t>(i)].yn);
-            sxy+=x*y;sxx+=x*x;
-        }
-        const float slope=static_cast<float>(sxx>0.0?sxy/sxx:0.0);
-        return slope/P; // divss in the official routine
-    };
-    const float kp0=seedK(true,pp),kn0=seedK(false,pn);
+    // 0x558de6..0x558e96: explicit signed point arrays.  Do not collapse this
+    // into two branch errors per window: the official SSE walks these 2*N
+    // points in this exact order and accumulates in float32.
+    const std::size_t N=static_cast<std::size_t>(windows);
+    std::vector<float> signedX(2*N),signedY(2*N);
+    for(std::size_t i=0;i<N;++i){
+        const std::size_t rev=N-1-i;
+        signedX[i]=flipFloatSignBit(xAbs[rev]);
+        signedY[i]=yNeg[rev];
+        signedX[N+i]=xAbs[i];
+        signedY[N+i]=yPos[i];
+    }
 
-    auto sse=[&](float kp,float kn){
+    // First sample crossing +/-P/2, expressed exactly as the EXE's double
+    // comparisons.  The count is one-past the crossing and is used by the
+    // through-origin double regression.
+    int posCount=0;
+    const double posHalf=static_cast<double>(pp)*0.5;
+    for(int i=0;i<windows;++i){
+        if(static_cast<double>(yPos[static_cast<std::size_t>(i)])>=posHalf){posCount=i+1;break;}
+    }
+    int negCount=0;
+    const double negHalf=static_cast<double>(pn)*-0.5;
+    for(int i=0;i<windows;++i){
+        if(negHalf>=static_cast<double>(yNeg[static_cast<std::size_t>(i)])){negCount=i+1;break;}
+    }
+
+    // 0x558f24..0x559181.  The compiler unrolls four samples, but the double
+    // dependency chain remains sample-order sequential, so these scalar loops
+    // preserve the exact product/add order.
+    double posXY=0.0,posXX=0.0;
+    for(int i=0;i<posCount;++i){
+        const double x=static_cast<double>(xAbs[static_cast<std::size_t>(i)]);
+        const double y=static_cast<double>(yPos[static_cast<std::size_t>(i)]);
+        posXY += y*x;
+        posXX += x*x;
+    }
+    double negXY=0.0,negXX=0.0;
+    for(int i=0;i<negCount;++i){
+        const double x=static_cast<double>(xAbs[static_cast<std::size_t>(i)]);
+        const double y=static_cast<double>(yNeg[static_cast<std::size_t>(i)]);
+        negXY -= y*x;
+        negXX += x*x;
+    }
+    const float posSlope=static_cast<float>(posXY/posXX);
+    const float negSlope=static_cast<float>(negXY/negXX);
+    const float kp0=posSlope/pp;
+    const float kn0=negSlope/pn;
+
+    auto signedSse=[&](float kp,float kn)->float{
         float err=0.0f;
-        for(const auto&v:m){
-            // The official loop evaluates the two signed transfer points using
-            // float multiplies/subtracts around the precise exp helper and keeps
-            // the squared-error accumulator in float32.
-            const float ep=preciseExpF(-(kp*v.x));
-            const float predP=pp*(1.0f-ep);
-            const float dp=v.yp-predP; err+=dp*dp;
-            const float en=preciseExpF(-(kn*v.x));
-            const float predN=pn*(1.0f-en);
-            const float dn=v.yn-predN; err+=dn*dn;
+        for(std::size_t i=0;i<signedX.size();++i){
+            const float x=signedX[i];
+            float pred;
+            if(x>0.0f){
+                const float z=x*kp;
+                const float nz=flipFloatSignBit(z);
+                const float ex=preciseExpF(nz);
+                const float oneMinus=1.0f-ex;
+                pred=oneMinus*pp;
+            }else{
+                const float z=x*kn;
+                const float ex=preciseExpF(z);
+                const float exMinus=ex-1.0f;
+                pred=exMinus*pn;
+            }
+            const float d=signedY[i]-pred;
+            const float sq=d*d;
+            err+=sq;
         }
         return err;
     };
 
-    float bestKp=kp0,bestErr=std::numeric_limits<float>::max();
+    // Search positive K first.  Candidate multiplier is generated by
+    // float<-double(float+0.05), compared as double against 1.2, and ties
+    // select the later candidate (bestErr >= err).
     float mul=0.800000011920929f;
+    float bestMulP=1.0f;
+    float bestErr=std::numeric_limits<float>::max();
     while(static_cast<double>(mul)<=1.2){
-        const float cand=mul*kp0;const float e=sse(cand,kn0);
-        if(e<=bestErr){bestErr=e;bestKp=cand;}
+        const float cand=mul*kp0;
+        const float e=signedSse(cand,kn0);
+        if(!(bestErr<e)){bestErr=e;bestMulP=mul;}
         mul=static_cast<float>(static_cast<double>(mul)+0.05);
     }
-    float bestKn=kn0;bestErr=std::numeric_limits<float>::max();mul=0.800000011920929f;
+    const float bestKp=bestMulP*kp0;
+
+    // Then search negative K with the selected positive K held fixed.
+    mul=0.800000011920929f;
+    float bestMulN=1.0f;
+    bestErr=std::numeric_limits<float>::max();
     while(static_cast<double>(mul)<=1.2){
-        const float cand=mul*kn0;const float e=sse(bestKp,cand);
-        if(e<=bestErr){bestErr=e;bestKn=cand;}
+        const float cand=mul*kn0;
+        const float e=signedSse(bestKp,cand);
+        if(!(bestErr<e)){bestErr=e;bestMulN=mul;}
         mul=static_cast<float>(static_cast<double>(mul)+0.05);
     }
-    r.kp=bestKp;r.kn=bestKn;return r;
+
+    PK r{};
+    r.pp=pp;
+    r.pn=pn;
+    r.kp=bestKp;
+    r.kn=bestMulN*kn0;
+    return r;
 }
 // Trainer biquad numerical path from GP-200.exe (0x557900 et al.).
 // The official trainer uses direct-form II state in double, scales the input
@@ -462,52 +591,89 @@ inline float officialCos128(std::size_t idx) { return officialSin128((idx + 32u)
 // permutation. Direction 1 is inverse in the EXE; inverse divides every
 // component by exactly 128 (0.0078125f).
 void fft128Official(std::array<ComplexF,128>& a, bool inverse) {
-    constexpr std::size_t N=128;
-    for(std::size_t i=1,j=0;i<N;++i){
-        std::size_t bit=N>>1;
-        for(;j&bit;bit>>=1)j^=bit;
-        j^=bit;
-        if(i<j)std::swap(a[i],a[j]);
+    constexpr int N=128;
+    // 0x55b9ed..0x55ba31: use the constructor-generated permutation table.
+    // For N=128 it is exactly the conventional 7-bit reversal permutation;
+    // swaps are performed only when i < perm[i].
+    for(int i=0;i<N-1;++i){
+        unsigned x=static_cast<unsigned>(i), r=0;
+        for(int b=0;b<7;++b){r=(r<<1)|(x&1u);x>>=1;}
+        const int j=static_cast<int>(r);
+        if(i<j)std::swap(a[static_cast<std::size_t>(i)],a[static_cast<std::size_t>(j)]);
     }
-    for(std::size_t len=2;len<=N;len<<=1){
-        const std::size_t half=len>>1;
-        const std::size_t tableStep=N/len;
-        for(std::size_t base=0;base<N;base+=len){
-            // j==0 is a separate no-twiddle butterfly in 0x55ba60.
-            {
-                const float ar=a[base].re, ai=a[base].im;
-                const float br=a[base+half].re, bi=a[base+half].im;
-                a[base].re=ar+br; a[base].im=ai+bi;
-                a[base+half].re=ar-br; a[base+half].im=ai-bi;
-            }
-            for(std::size_t j=1;j<half;++j){
-                const std::size_t ti=j*tableStep;
-                const float c=officialCos128(ti);
-                const float s0=officialSin128(ti);
-                const float sn=inverse?s0:-s0;
-                const float br=a[base+j+half].re;
-                const float bi=a[base+j+half].im;
-                // Keep the SSE scalar operation order from 0x55bb80: two
-                // multiplies then sub/add for each complex component.
-                const float p0=bi*c;
-                const float p1=br*sn;
-                const float vi=p0+p1;
-                const float p2=bi*sn;
-                const float p3=br*c;
-                const float vr=p3-p2;
-                const float ur=a[base+j].re, ui=a[base+j].im;
-                a[base+j].re=ur+vr;
-                a[base+j].im=ui+vi;
-                a[base+j+half].re=ur-vr;
-                a[base+j+half].im=ui-vi;
+
+    // Object field +0x08 is the number of stages (7).  The EXE starts
+    // groupLength=2 / half=1 and doubles both after every stage.
+    int groupLength=2;
+    int half=1;
+    for(int stage=0;stage<7;++stage){
+        const int m=N/groupLength;
+
+        // 0x55ba60..0x55bac4: j=0 has its own no-twiddle loop.  Preserve
+        // subtraction-before-addition and the stores used by the scalar SSE.
+        for(int base=0;base<N;base+=groupLength){
+            const int hi=base+half;
+            const float highRe=a[static_cast<std::size_t>(hi)].re;
+            const float lowRe =a[static_cast<std::size_t>(base)].re;
+            const float highIm=a[static_cast<std::size_t>(hi)].im;
+            const float lowIm =a[static_cast<std::size_t>(base)].im;
+            const float outHighRe=lowRe-highRe;
+            const float outHighIm=lowIm-highIm;
+            const float outLowRe=highRe+lowRe;
+            const float outLowIm=lowIm+highIm;
+            a[static_cast<std::size_t>(hi)].re=outHighRe;
+            a[static_cast<std::size_t>(hi)].im=outHighIm;
+            a[static_cast<std::size_t>(base)].re=outLowRe;
+            a[static_cast<std::size_t>(base)].im=outLowIm;
+        }
+
+        // 0x55bad3..0x55bc27.  Twiddle real is read from the sine table at
+        // (N/4 - j*m) mod N.  Twiddle imag is sine(j*m), and its sign is
+        // flipped unless direction==1.  direction==1 is the inverse path.
+        for(int j=1;j<half;++j){
+            const int ti=j*m;
+            const int wrIndex=(N/4-ti)%N < 0 ? ((N/4-ti)%N+N) : ((N/4-ti)%N);
+            const float wr=officialSin128(static_cast<std::size_t>(wrIndex));
+            float wi=officialSin128(static_cast<std::size_t>(ti%N));
+            if(!inverse) wi=flipFloatSignBit(wi);
+
+            for(int base=j;base<N;base+=groupLength){
+                const int hi=base+half;
+                const float highRe=a[static_cast<std::size_t>(hi)].re;
+                const float highIm=a[static_cast<std::size_t>(hi)].im;
+
+                // 0x55bb80..0x55bbe5 exact scalar operation order.
+                float vr=highRe*wr;
+                const float t0=highIm*wi;
+                vr=vr-t0;
+                float vi=highRe*wi;
+                const float t1=highIm*wr;
+                vi=vi+t1;
+
+                const float lowRe=a[static_cast<std::size_t>(base)].re;
+                const float lowIm=a[static_cast<std::size_t>(base)].im;
+                const float outHighRe=lowRe-vr;
+                const float outLowRe =lowRe+vr;
+                const float outHighIm=lowIm-vi;
+                const float outLowIm =lowIm+vi;
+                a[static_cast<std::size_t>(hi)].re=outHighRe;
+                a[static_cast<std::size_t>(base)].re=outLowRe;
+                a[static_cast<std::size_t>(hi)].im=outHighIm;
+                a[static_cast<std::size_t>(base)].im=outLowIm;
             }
         }
+
+        half+=half;
+        groupLength+=groupLength;
     }
+
+    // 0x55bc4b..0x55be23: direction==1 divides every real and imaginary
+    // component by float(N), using DIVSS/DIVPS.  Do not replace with *1/128.
     if(inverse){
-        for(auto&v:a){v.re*=0.0078125f;v.im*=0.0078125f;}
+        const float divisor=static_cast<float>(N);
+        for(auto&v:a){v.re/=divisor;v.im/=divisor;}
     }
 }
-
 inline ComplexF mulOfficial(ComplexF a, ComplexF b){
     const float p0=a.re*b.re;
     const float p1=a.im*b.im;
@@ -634,17 +800,27 @@ void renderModel(const Model& m,const std::vector<float>& in,std::vector<float>&
 
 std::vector<float> sliceSignal(const std::vector<float>&x,std::size_t b,std::size_t e){b=std::min(b,x.size());e=std::min(e,x.size());if(e<=b)return {};return std::vector<float>(x.begin()+static_cast<std::ptrdiff_t>(b),x.begin()+static_cast<std::ptrdiff_t>(e));}
 
+// GP-200.exe uses float Fs * float seconds and cvttss2si (truncate toward zero)
+// for all trainer segment boundaries.
+std::size_t officialTimeIndex(double sr,float seconds){
+    const float fs=static_cast<float>(sr);
+    const float x=fs*seconds;
+    if(!(x>0.0f)) return 0;
+    return static_cast<std::size_t>(static_cast<int>(x));
+}
+
 std::vector<float> hammingF(std::size_t n){
     std::vector<float>w(n,1.0f);if(n<=1)return w;
     // GP-200.exe: float phase arithmetic, precise cosine helper, then the
-    // Hamming multiply/subtract in double before one final float rounding.
+    // Hamming multiply/subtract remain single-precision (mulss/subss).
     const float twoPi=6.2831854820251465f;
     const float denom=static_cast<float>(n-1);
     for(std::size_t i=0;i<n;++i){
         const float ph=(static_cast<float>(i)*twoPi)/denom;
         const float c=preciseCosF(ph);
-        const double wd=0.54-static_cast<double>(c)*0.46;
-        w[i]=static_cast<float>(wd);
+        // 0x55586e..0x555885: both constants and both arithmetic
+        // operations are single precision (mulss/subss).
+        w[i]=0.5400000214576721f-c*0.46000000834465027f;
     }
     return w;
 }
@@ -668,47 +844,86 @@ void fftF(std::vector<std::complex<float>>& a,bool inv);
 // 0x423180 wraps Takuya Ooura's double FFT4G rdft().  GP-200.exe first
 // converts the folded float frame to double, calls rdft(N,+1), then rounds the
 // packed positive-frequency result back to separate float real/imag arrays.
-void oouraRfftOfficial(const std::vector<float>& in,std::array<float,kBins>& re,std::array<float,kBins>& im){
-    std::array<double,kFft> a{};
-    for(std::size_t i=0;i<kFft;++i)a[i]=static_cast<double>(i<in.size()?in[i]:0.0f);
-    // FFT4G requires ip length >= 2+sqrt(N/4) and w length >= N/2.
+struct OouraRfft2048Official {
+    // GP-200.exe 0x423180 owns one FFT4G work object and reuses its ip/w
+    // tables for every frame (and for target/model transforms).  Preserve
+    // that lifetime exactly instead of rebuilding the tables per call.
     std::array<int,64> ip{};
     std::array<double,kFft/2> w{};
-    ip[0]=0;
-    lsx_rdft(static_cast<int>(kFft),+1,a.data(),ip.data(),w.data());
-    re.fill(0.0f);im.fill(0.0f);
-    re[0]=static_cast<float>(a[0]);
-    im[0]=0.0f;
-    for(std::size_t k=1;k<kFft/2;++k){
-        re[k]=static_cast<float>(a[2*k]);
-        im[k]=static_cast<float>(-a[2*k+1]);
+    OouraRfft2048Official(){ ip.fill(0); w.fill(0.0); ip[0]=0; }
+
+    void run(const std::vector<float>& in,std::array<float,kBins>& re,std::array<float,kBins>& im){
+        std::array<double,kFft> a{};
+        for(std::size_t i=0;i<kFft;++i)a[i]=static_cast<double>(i<in.size()?in[i]:0.0f);
+        lsx_rdft(static_cast<int>(kFft),+1,a.data(),ip.data(),w.data());
+        re.fill(0.0f);im.fill(0.0f);
+        re[0]=static_cast<float>(a[0]);
+        im[0]=0.0f;
+        for(std::size_t k=1;k<kFft/2;++k){
+            re[k]=static_cast<float>(a[2*k]);
+            im[k]=static_cast<float>(-a[2*k+1]);
+        }
+        re[kFft/2]=static_cast<float>(a[1]);
+        im[kFft/2]=0.0f;
     }
-    re[kFft/2]=static_cast<float>(a[1]);
-    im[kFft/2]=0.0f;
-}
+};
 
 // 0x5557c0: ceil(0.125*Fs) Hamming frames, 50% overlap, mean removal,
 // modulo-2048 folding, Ooura RDFT, and float32 Sxx/Sxy accumulation.
 std::vector<float> ratioSpectrumF(const std::vector<float>& model,const std::vector<float>& target,double sr){
-    const std::size_t L=std::max<std::size_t>(1,static_cast<std::size_t>(std::ceil(0.125*sr)));
-    const std::size_t hop=std::max<std::size_t>(1,L/2); const auto wv=hammingF(L);
-    const std::size_t end=std::min(model.size(),target.size());
-    if(end<L)return std::vector<float>(kBins,1.0f);
-    std::vector<float>sxx(kBins,0.0f),sxyRe(kBins,0.0f),sxyIm(kBins,0.0f);std::size_t frames=0;
-    for(std::size_t p=0;p+L<=end;p+=hop){
-        float mx=0.0f,my=0.0f;for(std::size_t i=0;i<L;++i){mx+=model[p+i];my+=target[p+i];}mx/=static_cast<float>(L);my/=static_cast<float>(L);
-        std::vector<float> xf(kFft,0.0f),yf(kFft,0.0f);
-        for(std::size_t i=0;i<L;++i){const std::size_t j=i&(kFft-1);xf[j]+=(model[p+i]-mx)*wv[i];yf[j]+=(target[p+i]-my)*wv[i];}
-        std::array<float,kBins> xr{},xi{},yr{},yi{};
-        oouraRfftOfficial(xf,xr,xi);oouraRfftOfficial(yf,yr,yi);++frames;
-        for(std::size_t k=0;k<kBins;++k){
-            const float p0=xr[k]*xr[k],p1=xi[k]*xi[k];sxx[k]+=p0+p1;
-            const float p2=xr[k]*yr[k],p3=xi[k]*yi[k];sxyRe[k]+=p2+p3;
-            const float p4=xr[k]*yi[k],p5=xi[k]*yr[k];sxyIm[k]+=p4-p5;
+    const float fs=static_cast<float>(sr);
+    // 0x5538xx: float Fs * 0.125f -> double + 0.5 -> cvttsd2si.
+    const int Li=static_cast<int>(static_cast<double>(fs*0.125f)+0.5);
+    const std::size_t L=static_cast<std::size_t>(std::max(1,Li));
+    const std::size_t hop=std::max<std::size_t>(1,L/2);
+    const auto wv=hammingF(L);
+    const std::size_t total=std::min(model.size(),target.size());
+    if(total<L)return std::vector<float>(kBins,1.0f);
+
+    std::vector<float>sxx(kBins,0.0f),sxyRe(kBins,0.0f),sxyIm(kBins,0.0f);
+    OouraRfft2048Official rdft;
+    std::size_t frames=0,startPos=0;
+    const std::size_t finalStart=total-L;
+    for(;;){
+        // 0x5557c0 clamps every scheduled start to total-L, ensuring the
+        // final window is always anchored exactly at the end of the segment.
+        const std::size_t p=std::min(startPos,finalStart);
+        std::vector<float> xframe(L),yframe(L);
+        float mx=0.0f,my=0.0f;
+        for(std::size_t i=0;i<L;++i){
+            // Literal scale boundary: cvtss2sd -> mulsd 1000.0 -> cvtsd2ss.
+            const float xv=static_cast<float>(static_cast<double>(model[p+i])*1000.0);
+            const float yv=static_cast<float>(static_cast<double>(target[p+i])*1000.0);
+            xframe[i]=xv; yframe[i]=yv;
+            mx+=xv; my+=yv;
         }
+        mx/=static_cast<float>(L); my/=static_cast<float>(L);
+        std::vector<float> xf(kFft,0.0f),yf(kFft,0.0f);
+        for(std::size_t i=0;i<L;++i){
+            const std::size_t j=i&(kFft-1);
+            const float x0=xframe[i]-mx;
+            const float y0=yframe[i]-my;
+            xf[j]+=x0*wv[i];
+            yf[j]+=y0*wv[i];
+        }
+        std::array<float,kBins> xr{},xi{},yr{},yi{};
+        rdft.run(xf,xr,xi); rdft.run(yf,yr,yi); ++frames;
+        for(std::size_t k=0;k<kBins;++k){
+            const float p0=xr[k]*xr[k],p1=xi[k]*xi[k]; sxx[k]+=p0+p1;
+            const float p2=xr[k]*yr[k],p3=xi[k]*yi[k]; sxyRe[k]+=p2+p3;
+            const float p4=xr[k]*yi[k],p5=xi[k]*yr[k]; sxyIm[k]+=p4-p5;
+        }
+        if(p==finalStart)break;
+        startPos+=hop;
     }
     if(!frames)return std::vector<float>(kBins,1.0f);
-    std::vector<float>r(kBins,1.0f);for(std::size_t k=0;k<kBins;++k){const float q0=sxyRe[k]*sxyRe[k],q1=sxyIm[k]*sxyIm[k];const float mag=preciseSqrtF(q0+q1);r[k]=mag/(sxx[k]+static_cast<float>(kEps));}return r;
+    std::vector<float>r(kBins,1.0f);
+    for(std::size_t k=0;k<kBins;++k){
+        const float q0=sxyRe[k]*sxyRe[k],q1=sxyIm[k]*sxyIm[k];
+        const float mag=preciseSqrtF(q0+q1);
+        r[k]=mag/(sxx[k]+static_cast<float>(kEps));
+    }
+    return r;
 }
 
 std::vector<double> ratioSpectrum(const std::vector<float>& model,const std::vector<float>& target,double sr){const auto r=ratioSpectrumF(model,target,sr);return std::vector<double>(r.begin(),r.end());}
@@ -1000,10 +1215,26 @@ std::vector<float> minimumPhaseF(const std::vector<float>&positive,std::size_t t
     for(std::size_t i=0;i<posN;++i)m[i]=positive[i];
     for(std::size_t i=1;i+1<posN;++i)m[fullN-i]=m[i];
 
+    // 0x554b24..0x554bb0: maximum is computed from abs(input).  The floor
+    // is maxAbs * pow(10.0,-5.0), with the pow/multiply in double and one
+    // final conversion to float.  Values whose ABS is below the floor are
+    // replaced by +floor; otherwise the ORIGINAL signed value is preserved.
     float mx=0.0f;for(float v:m)mx=std::max(mx,std::fabs(v));
-    const float floor=mx*1.0e-5f;
+    const float floor=static_cast<float>(static_cast<double>(mx)*std::pow(10.0,-5.0));
+    std::vector<float> logMag(fullN);
+    for(std::size_t i=0;i<fullN;++i){
+        float v=m[i];
+        if(std::fabs(v)<floor)v=floor;
+        logMag[i]=preciseLogF(v+std::numeric_limits<float>::epsilon());
+    }
+
+    // 0x554af0 is invoked by 0x554420 with inputCount == outputCount ==
+    // fullN.  The interpolation/reversal branch at 0x554beb..0x554cd6 is
+    // therefore skipped (JE 0x554cc4); the log-magnitude array is copied
+    // unchanged into the DFT work buffer.
+
     std::vector<ComplexF> logSpec(fullN);
-    for(std::size_t i=0;i<fullN;++i){const float v=std::max(floor,std::fabs(m[i]));logSpec[i]={preciseLogF(v+static_cast<float>(kEps)),0.0f};}
+    for(std::size_t i=0;i<fullN;++i)logSpec[i]={logMag[i],0.0f};
     const auto trig=makeDirectTrigOfficial(fullN);
     auto cep=directDftOfficial(logSpec,true,trig);
     auto causal=lifterCepstrumOfficial(cep);
@@ -1087,8 +1318,8 @@ void regularizeInitialCurve(std::vector<double>&v,const std::vector<double>&refe
 
 struct FactorState{std::vector<float>a,b;};
 FactorState initialFactorState(const Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr){
-    const std::size_t lb=static_cast<std::size_t>(std::llround(6.0*sr)),le=static_cast<std::size_t>(std::llround(21.0*sr));
-    const std::size_t sb=static_cast<std::size_t>(std::llround(23.0*sr)),se=static_cast<std::size_t>(std::llround(28.0*sr));
+    const std::size_t lb=officialTimeIndex(sr,6.0f),le=officialTimeIndex(sr,21.0f);
+    const std::size_t sb=officialTimeIndex(sr,23.0f),se=officialTimeIndex(sr,28.0f);
     auto lowIn=sliceSignal(input,lb,le),lowTarget=sliceSignal(target,lb,le);std::vector<float>lowPred;renderCoreNoFir(m,lowIn,lowPred);auto lowSpec=ratioSpectrumF(lowPred,lowTarget,sr);
     auto sweepIn=sliceSignal(input,sb,se),sweepTarget=sliceSignal(target,sb,se);sweepIn=applyInitialConditioningFir(sweepIn,sr);std::vector<float>sweepPred;renderCoreNoFir(m,sweepIn,sweepPred);auto sweepSpec=ratioSpectrumF(sweepPred,sweepTarget,sr);
     const std::size_t n=sweepSpec.size();
@@ -1102,7 +1333,7 @@ FactorState initialFactorState(const Model&m,const std::vector<float>&input,cons
 
 struct Phase{double t0,t1;int iterations;const wchar_t*name;};
 void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,const std::vector<float>&target,double sr,const Phase&ph,int&globalIter,const StatusCallback&status){
-    const auto freq=fftFrequencyGridF(sr),weights=frequencyWeightsF(sr);const std::size_t b=static_cast<std::size_t>(std::llround(ph.t0*sr)),e=static_cast<std::size_t>(std::llround(ph.t1*sr));const auto phaseIn=sliceSignal(input,b,e),phaseTarget=sliceSignal(target,b,e);
+    const auto freq=fftFrequencyGridF(sr),weights=frequencyWeightsF(sr);const std::size_t b=officialTimeIndex(sr,static_cast<float>(ph.t0)),e=officialTimeIndex(sr,static_cast<float>(ph.t1));const auto phaseIn=sliceSignal(input,b,e),phaseTarget=sliceSignal(target,b,e);
     float step=1.0f,bestLoss=100.0f;Model bestM=m;FactorState bestState=state;std::vector<float>corr(kBins,1.0f),bestCorr=corr;
     for(int it=0;it<ph.iterations;++it){
         ++globalIter;report(status,L"Independent: A/B fit "+std::to_wstring(globalIter)+L"/10 ("+ph.name+L")...");
@@ -1110,6 +1341,10 @@ void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,cons
         // is prepared by the caller as 1.0 above ~80 Hz-index onset and a
         // 1.0 -> 0.5 ramp through the remainder of the spectrum.
         std::vector<float>stepped(kBins);for(std::size_t k=0;k<kBins;++k){const float base=corr[k];const float exponent=weights[k]*step;stepped[k]=std::clamp(precisePowF(base,exponent),0.2f,5.0f);}
+        // 0x55751f: step is decayed immediately after pow/clamp and BEFORE
+        // the two conditioning passes. A rollback may subsequently halve
+        // this already-decayed value.
+        step*=0.8999999761581421f;
         // Confirmed at 0x557532..0x557563: the correction traverses 0x554f00
         // twice, back-to-back, before either factor state is updated.
         const auto conditioned1=conditionMagnitudeF(freq,stepped,kBins);
@@ -1123,7 +1358,6 @@ void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,cons
         if(loss<bestLoss){bestLoss=loss;bestM=candidate;bestState=trial;bestCorr=residual;m=candidate;state=trial;corr=residual;}
         else if(loss>1.2f*bestLoss){m=bestM;state=bestState;corr=bestCorr;step*=0.5f;}
         else{m=candidate;state=trial;corr=residual;}
-        step*=0.8999999761581421f;
     }
     m=bestM;state=bestState;
 }
@@ -1136,8 +1370,13 @@ void fitAB(Model&m,const std::vector<float>&input,const std::vector<float>&targe
 std::vector<float> convolveTruncate(const std::vector<float>&a,const std::vector<float>&b,std::size_t n){std::vector<float>o(n,0.0f);for(std::size_t i=0;i<a.size();++i)for(std::size_t j=0;j<b.size()&&i+j<n;++j)o[i+j]+=a[i]*b[j];return o;}
 
 std::vector<float> finalTailCorrection(const std::vector<float>&model,const std::vector<float>&target,double sr){
-    const std::size_t L=std::max<std::size_t>(1,static_cast<std::size_t>(std::ceil(0.1*sr)));const std::size_t end=std::min(model.size(),target.size());if(end<L)return std::vector<float>(256,1.0f);
-    std::vector<float>xm(L,0.0f),yt(L,0.0f);for(std::size_t i=0;i<end;++i){const std::size_t j=i%L;xm[j]+=model[i];yt[j]+=target[i];}
+    const float fs0=static_cast<float>(sr);
+    // 0x5566xx: cvtss2sd(float(Fs)) * 0.1(double), ceil(), then int.
+    const std::size_t L=std::max<std::size_t>(1,static_cast<std::size_t>(std::ceil(static_cast<double>(fs0)*0.1)));const std::size_t end=std::min(model.size(),target.size());if(end<L)return std::vector<float>(256,1.0f);
+    std::vector<float>xm(L,0.0f),yt(L,0.0f);
+    // 0x553f90: fold only complete L-sample blocks. Any remainder is ignored.
+    const std::size_t blocks=end/L;
+    for(std::size_t b=0;b<blocks;++b)for(std::size_t i=0;i<L;++i){const std::size_t n=b*L+i;xm[i]+=model[n];yt[i]+=target[n];}
     float mm=0.0f,tm=0.0f;for(std::size_t i=0;i<L;++i){mm+=xm[i];tm+=yt[i];}mm/=static_cast<float>(L);tm/=static_cast<float>(L);const auto win=hammingF(L);for(std::size_t i=0;i<L;++i){xm[i]=(xm[i]-mm)*win[i];yt[i]=(yt[i]-tm)*win[i];}
     const std::size_t posN=L/2+1;std::vector<float>freq(posN),modelMag(posN),targetMag(posN);
     // GP-200.exe final-B path builds the complete length-L DFT for each
@@ -1155,8 +1394,10 @@ std::vector<float> finalTailCorrection(const std::vector<float>&model,const std:
         const float tr=targetDft[k].re,ti=targetDft[k].im;
         modelMag[k]=preciseSqrtF(mr*mr+mi*mi);
         targetMag[k]=preciseSqrtF(tr*tr+ti*ti);
-        freq[k]=(static_cast<float>(k)*fs)/Lf;
     }
+    // 0x5571cd: fresh 0..Nyquist frequency grid is produced by 0x4225b0
+    // (incremental float linspace), not by k*Fs/L.
+    freq=linspaceF(0.0f,fs*0.5f,posN);
 
     // Critical ordering from 0x556670: condition target magnitude and model
     // magnitude independently with 0x554f00 BEFORE computing their ratio.
@@ -1168,7 +1409,7 @@ std::vector<float> finalTailCorrection(const std::vector<float>&model,const std:
 }
 
 void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status){
-    report(status,L"Independent: final Block B tail refinement...");const std::size_t b=static_cast<std::size_t>(std::llround(50.0*sr)),e=static_cast<std::size_t>(std::llround(70.0*sr));const auto tailIn=sliceSignal(input,b,e),tailTarget=sliceSignal(target,b,e);std::vector<float>pred;renderModel(m,tailIn,pred,true);
+    report(status,L"Independent: final Block B tail refinement...");const std::size_t b=officialTimeIndex(sr,50.0f),e=officialTimeIndex(sr,70.0f);const auto tailIn=sliceSignal(input,b,e),tailTarget=sliceSignal(target,b,e);std::vector<float>pred;renderModel(m,tailIn,pred,true);
     auto corrMag=finalTailCorrection(pred,tailTarget,sr);auto corr=minimumPhaseF(corrMag,256);m.B=convolveTruncate(m.B,corr,kB);
     float sum=0.0f;for(float v:m.B)sum+=v;const float mean=sum/static_cast<float>(m.B.size());for(auto&v:m.B)v-=mean;
     renderModel(m,tailIn,pred,true);float et=0.0f,ep=0.0f;for(std::size_t i=0;i<std::min(pred.size(),tailTarget.size());++i){et+=tailTarget[i]*tailTarget[i];ep+=pred[i]*pred[i];}if(ep>1.0e-30f){const float g=preciseSqrtF(et)/preciseSqrtF(ep);for(auto&v:m.B)v*=g;}
@@ -1213,9 +1454,9 @@ std::vector<float> resampleFirOfficial(const std::vector<float>& h,double sr,std
     rs.clear();
     return out;
 }
-bool serialize2048(const fs::path&path,const Model&m,double trainerRate,std::string&error){std::vector<std::uint8_t>d(kCloBytes,0);std::memcpy(d.data(),"VTSI",4);put32(d,0x04,0x2288);put32(d,0x14,0x2200);putDouble(d,0x18,1);putDouble(d,0x20,0);putDouble(d,0x28,0);putDouble(d,0x30,0);putDouble(d,0x38,0);
+bool serialize2048(const fs::path&path,const Model&m,double trainerRate,std::string&error){std::vector<std::uint8_t>d(kCloBytes,0);std::memcpy(d.data(),"VTSI",4);put32(d,0x04,0x2288);put32(d,0x14,0x2200);putDouble(d,0x18,m.pre.b0);putDouble(d,0x20,m.pre.b1);putDouble(d,0x28,m.pre.b2);putDouble(d,0x30,m.pre.a1);putDouble(d,0x38,m.pre.a2);
     putDouble(d,0x40,m.post.b0);putDouble(d,0x48,m.post.b1);putDouble(d,0x50,m.post.b2);putDouble(d,0x58,m.post.a1);putDouble(d,0x60,m.post.a2);putFloat(d,0x68,m.pk.pp);putFloat(d,0x6c,m.pk.pn);putFloat(d,0x70,m.pk.kp);putFloat(d,0x74,m.pk.kn);put32(d,0x78,0);put32(d,0x7c,128);put32(d,0x80,128);put32(d,0x84,2048);
-    auto A44=resampleFirOfficial(m.A,trainerRate,128);auto Bscaled=m.B;for(auto&v:Bscaled)v*=4.0f;auto B44=resampleFirOfficial(Bscaled,trainerRate,2048);for(std::size_t i=0;i<A44.size();++i)putFloat(d,0x88+4*i,A44[i]);for(std::size_t i=0;i<B44.size();++i)putFloat(d,0x88+4*(128+i),B44[i]);const auto crc=crc16Modbus(d.data()+0x0c,d.size()-0x0c);d[8]=static_cast<std::uint8_t>(crc>>8);d[9]=static_cast<std::uint8_t>(crc);return writeFileBytes(path,d.data(),d.size(),error);}
+    auto A44=resampleFirOfficial(m.A,trainerRate,128);auto Bscaled=m.B;for(auto&v:Bscaled)v*=4.0f;auto B44=resampleFirOfficial(Bscaled,trainerRate,2048);for(std::size_t i=0;i<A44.size();++i)putFloat(d,0x88+4*i,A44[i]);for(std::size_t i=0;i<B44.size();++i)putFloat(d,0x88+4*(128+i),B44[i]);const auto crc=crc16Official(d.data()+0x0c,d.size()-0x0c);d[8]=static_cast<std::uint8_t>(crc);d[9]=static_cast<std::uint8_t>(crc>>8);return writeFileBytes(path,d.data(),d.size(),error);}
 
 fs::path uniqueOutput(const fs::path&dir,const std::wstring&stem,const wchar_t*suffix){fs::path p=dir/(stem+suffix);int i=2;while(fs::exists(p))p=dir/(stem+L"_"+std::to_wstring(i++)+suffix);return p;}
 

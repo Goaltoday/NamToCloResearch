@@ -73,3 +73,7 @@ The old tab can be built without the native trainer with:
 ```powershell
 cmake -S . -B build -A x64 -DNTC_ENABLE_INDEPENDENT_TRAINER=OFF
 ```
+
+## GP-200.exe conversion audit
+
+The independent trainer's closed executable audit is documented in [`FINAL8_EXE_AUDIT.md`](FINAL8_EXE_AUDIT.md). The implementation changes are summarized in [`FINAL8_FULL_AUDIT_CHANGELOG.md`](FINAL8_FULL_AUDIT_CHANGELOG.md), and the intentionally documented external-runtime provenance boundaries are in [`FINAL8_AUDIT_LIMITS.md`](FINAL8_AUDIT_LIMITS.md).
