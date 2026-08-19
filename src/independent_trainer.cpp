@@ -163,18 +163,10 @@ const std::array<float,50>& initialFirForRate(double sr) {
     return kInitialFir48000;
 }
 
-std::vector<float> applyInitialConditioningFir(const std::vector<float>& in, double sr) {
-    const auto& h = initialFirForRate(sr);
-    std::vector<float> out(in.size(), 0.0f);
-    for (std::size_t n = 0; n < in.size(); ++n) {
-        float acc = 0.0f;
-        const std::size_t kmax = std::min<std::size_t>(h.size() - 1, n);
-        for (std::size_t k = 0; k <= kmax; ++k)
-            acc += h[k] * in[n - k];
-        out[n] = acc;
-    }
-    return out;
-}
+// Implemented after FirPlan: the official trainer routes this 50-tap
+// conditioning filter through the same 64/128 partitioned FIR engine used for
+// A/B (0x553aa0 -> 0x55b2e0/0x55b460), not a separate direct convolution.
+std::vector<float> applyInitialConditioningFir(const std::vector<float>& in, double sr);
 
 std::optional<std::size_t> objectEnd(const std::string& s,std::size_t start){
     if(start>=s.size()||s[start]!='{')return std::nullopt;int depth=0;bool str=false,esc=false;
@@ -485,7 +477,31 @@ struct FirPlan{
     }
 };
 
+std::vector<float> applyInitialConditioningFir(const std::vector<float>& in, double sr) {
+    const auto& table = initialFirForRate(sr);
+    const std::vector<float> h(table.begin(), table.end());
+    FirPlan fp(h);
+    std::vector<float> out;
+    fp.run(in, out);
+    return out;
+}
+
 struct Model{std::vector<float>A,B;PK pk;Biquad post;};
+
+// 0x5589d0 / initial 0x5580e0 paths: PRE (identity for this NAM route),
+// nonlinear 4x core, then POST.  Crucially, no identity A/B FFT convolvers are
+// inserted in these two reference renders in the official trainer.
+void renderCoreNoFir(const Model& m,const std::vector<float>& in,std::vector<float>& out){
+    Biquad post=m.post;
+    Poly u1({.045728147029876709f,.3325011134147644f,.66320204734802246f,.93385583162307739f},{.16808754205703735f,.50448572635650635f,.80378085374832153f});
+    Poly u2({.054230779409408569f,.39879697561264038f,.86291784048080444f},{.19969958066940308f,.62109684944152832f});
+    Poly d1({.070765949785709381f,.51316756010055542f},{.25785309076309204f,.81731736660003662f});
+    Poly d2({.054217524826526642f,.38308733701705933f,.74872094392776489f},{.19679796695709229f,.57313638925552368f,.91429370641708374f});
+    out.resize(in.size());
+    auto shape=[&](float x){if(x>0.0f){const float e=preciseExpF(-(m.pk.kp*x));return m.pk.pp*(1.0f-e);}const float e=preciseExpF(m.pk.kn*x);return m.pk.pn*(e-1.0f);};
+    for(std::size_t i=0;i<in.size();++i){float e,o,q0,q1;u1.up(in[i],e,o);u2.up(e,q0,q1);q0=shape(q0);q1=shape(q1);const float z0=d1.down(q0,q1);u2.up(o,q0,q1);q0=shape(q0);q1=shape(q1);const float z1=d1.down(q0,q1);out[i]=post.p(d2.down(z0,z1));}
+}
+
 void renderModel(const Model& m,const std::vector<float>& in,std::vector<float>& out,bool includeB=true){
     FirPlan ap(m.A);std::vector<float>a;ap.run(in,a);Biquad post=m.post;
     Poly u1({.045728147029876709f,.3325011134147644f,.66320204734802246f,.93385583162307739f},{.16808754205703735f,.50448572635650635f,.80378085374832153f});
@@ -697,8 +713,8 @@ struct FactorState{std::vector<float>a,b;};
 FactorState initialFactorState(const Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr){
     const std::size_t lb=static_cast<std::size_t>(std::llround(6.0*sr)),le=static_cast<std::size_t>(std::llround(21.0*sr));
     const std::size_t sb=static_cast<std::size_t>(std::llround(23.0*sr)),se=static_cast<std::size_t>(std::llround(28.0*sr));
-    auto lowIn=sliceSignal(input,lb,le),lowTarget=sliceSignal(target,lb,le);std::vector<float>lowPred;renderModel(m,lowIn,lowPred,true);auto lowSpec=ratioSpectrumF(lowPred,lowTarget,sr);
-    auto sweepIn=sliceSignal(input,sb,se),sweepTarget=sliceSignal(target,sb,se);sweepIn=applyInitialConditioningFir(sweepIn,sr);std::vector<float>sweepPred;renderModel(m,sweepIn,sweepPred,true);auto sweepSpec=ratioSpectrumF(sweepPred,sweepTarget,sr);
+    auto lowIn=sliceSignal(input,lb,le),lowTarget=sliceSignal(target,lb,le);std::vector<float>lowPred;renderCoreNoFir(m,lowIn,lowPred);auto lowSpec=ratioSpectrumF(lowPred,lowTarget,sr);
+    auto sweepIn=sliceSignal(input,sb,se),sweepTarget=sliceSignal(target,sb,se);sweepIn=applyInitialConditioningFir(sweepIn,sr);std::vector<float>sweepPred;renderCoreNoFir(m,sweepIn,sweepPred);auto sweepSpec=ratioSpectrumF(sweepPred,sweepTarget,sr);
     const std::size_t n=sweepSpec.size();sweepSpec=gaussianSmoothExactF(sweepSpec,std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<float>(n)*0.001f)));sweepSpec=gaussianSmoothExactF(sweepSpec,std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<float>(n)*0.005f)));regularizeInitialCurveF(sweepSpec,lowSpec);
     FactorState st;st.a.resize(kBins,1.0f);st.b=sweepSpec;for(std::size_t k=0;k<kBins;++k){const double num=static_cast<double>(lowSpec[k])*1000000.0;const double den=static_cast<double>(sweepSpec[k])*1000000.0+kEps;st.a[k]=static_cast<float>(num/den);}return st;
 }
@@ -763,18 +779,48 @@ void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&tar
     renderModel(m,tailIn,pred,true);float et=0.0f,ep=0.0f;for(std::size_t i=0;i<std::min(pred.size(),tailTarget.size());++i){et+=tailTarget[i]*tailTarget[i];ep+=pred[i]*pred[i];}if(ep>1.0e-30f){const float g=preciseSqrtF(et)/preciseSqrtF(ep);for(auto&v:m.B)v*=g;}
 }
 
-std::vector<float> resampleFirFixed(const std::vector<float>&h,double sr,std::size_t outLen){
+// Exact FIR serialization SRC reconstructed from GP-200.exe 0x5a70a0.
+// This path is intentionally separate from the long-stimulus SRC.  The
+// official converter converts the whole FIR float vector to double, constructs
+// CDSPResampler24 with MaxInLen == FIR input length, calls process() once with
+// the whole FIR, then repeatedly feeds an equally long all-zero double block
+// until the truncated target count is available.
+std::vector<float> resampleFirOfficial(const std::vector<float>& h,double sr,std::size_t outLen){
+    if(h.empty())return std::vector<float>(outLen,0.0f);
     if(std::abs(sr-44100.0)<1e-9){auto r=h;r.resize(outLen,0.0f);return r;}
-    auto r=resampleR8Brain24(h,sr,44100.0);
-    // The official FIR wrapper's effective coefficient count is truncated,
-    // not rounded.  For A128 at 48 kHz this yields 117 non-zero samples,
-    // matching the official golden CLO (NATIVE7 produced 118).
-    const std::size_t effective=std::min(outLen,static_cast<std::size_t>(std::floor(static_cast<double>(h.size())*44100.0/sr)));
-    if(r.size()>effective)r.resize(effective);r.resize(outLen,0.0f);return r;
+    if(h.size()>static_cast<std::size_t>(std::numeric_limits<int>::max()))return std::vector<float>(outLen,0.0f);
+
+    // 0x5a728c..0x5a72a3: conversion uses float arithmetic and truncation.
+    const float inCountF=static_cast<float>(static_cast<int>(h.size()));
+    const float srcF=static_cast<float>(sr), dstF=44100.0f;
+    const int targetCount=std::max(0,static_cast<int>(inCountF*dstF/srcF));
+    const std::size_t wanted=std::min<std::size_t>(outLen,static_cast<std::size_t>(targetCount));
+    std::vector<float> out(outLen,0.0f);
+    if(wanted==0)return out;
+
+    const int blockLen=static_cast<int>(h.size());
+    std::vector<double> block(h.size());
+    for(std::size_t i=0;i<h.size();++i)block[i]=static_cast<double>(h[i]);
+    r8b::CDSPResampler24 rs(static_cast<double>(srcF),static_cast<double>(dstF),blockLen);
+
+    std::size_t outPos=0;
+    bool first=true;
+    while(outPos<wanted){
+        if(!first)std::fill(block.begin(),block.end(),0.0);
+        first=false;
+        double* produced=nullptr;
+        const int count=rs.process(block.data(),blockLen,produced);
+        if(count<0||produced==nullptr)break;
+        const std::size_t take=std::min<std::size_t>(static_cast<std::size_t>(count),wanted-outPos);
+        for(std::size_t i=0;i<take;++i)out[outPos+i]=static_cast<float>(produced[i]);
+        outPos+=take;
+    }
+    rs.clear();
+    return out;
 }
 bool serialize2048(const fs::path&path,const Model&m,double trainerRate,std::string&error){std::vector<std::uint8_t>d(kCloBytes,0);std::memcpy(d.data(),"VTSI",4);put32(d,0x04,0x2288);put32(d,0x14,0x2200);putDouble(d,0x18,1);putDouble(d,0x20,0);putDouble(d,0x28,0);putDouble(d,0x30,0);putDouble(d,0x38,0);
     putDouble(d,0x40,m.post.b0);putDouble(d,0x48,m.post.b1);putDouble(d,0x50,m.post.b2);putDouble(d,0x58,m.post.a1);putDouble(d,0x60,m.post.a2);putFloat(d,0x68,m.pk.pp);putFloat(d,0x6c,m.pk.pn);putFloat(d,0x70,m.pk.kp);putFloat(d,0x74,m.pk.kn);put32(d,0x78,0);put32(d,0x7c,128);put32(d,0x80,128);put32(d,0x84,2048);
-    auto A44=resampleFirFixed(m.A,trainerRate,128),B44=resampleFirFixed(m.B,trainerRate,2048);for(auto&v:B44)v*=4.0f;for(std::size_t i=0;i<A44.size();++i)putFloat(d,0x88+4*i,A44[i]);for(std::size_t i=0;i<B44.size();++i)putFloat(d,0x88+4*(128+i),B44[i]);const auto crc=crc16Modbus(d.data()+0x0c,d.size()-0x0c);d[8]=static_cast<std::uint8_t>(crc>>8);d[9]=static_cast<std::uint8_t>(crc);return writeFileBytes(path,d.data(),d.size(),error);}
+    auto A44=resampleFirOfficial(m.A,trainerRate,128);auto Bscaled=m.B;for(auto&v:Bscaled)v*=4.0f;auto B44=resampleFirOfficial(Bscaled,trainerRate,2048);for(std::size_t i=0;i<A44.size();++i)putFloat(d,0x88+4*i,A44[i]);for(std::size_t i=0;i<B44.size();++i)putFloat(d,0x88+4*(128+i),B44[i]);const auto crc=crc16Modbus(d.data()+0x0c,d.size()-0x0c);d[8]=static_cast<std::uint8_t>(crc>>8);d[9]=static_cast<std::uint8_t>(crc);return writeFileBytes(path,d.data(),d.size(),error);}
 
 fs::path uniqueOutput(const fs::path&dir,const std::wstring&stem,const wchar_t*suffix){fs::path p=dir/(stem+suffix);int i=2;while(fs::exists(p))p=dir/(stem+L"_"+std::to_wstring(i++)+suffix);return p;}
 
