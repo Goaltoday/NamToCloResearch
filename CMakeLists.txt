@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(NamToClo VERSION 2.7.0.11 LANGUAGES CXX RC)
+project(NamToClo VERSION 2.7.0.12 LANGUAGES C CXX RC)
 
 if(NOT WIN32)
     message(FATAL_ERROR "NAM to CLO targets Windows x64.")
@@ -12,6 +12,7 @@ option(NTC_ENABLE_INDEPENDENT_TRAINER "Build the independent NAM -> CLO trainer 
 set(NAM_CORE_SOURCE_DIR "" CACHE PATH "Optional local NeuralAmpModelerCore source tree (avoids network FetchContent)")
 set(R8BRAIN_SOURCE_DIR "" CACHE PATH "Optional local r8brain-free-src source tree (avoids network FetchContent)")
 set(NTC_R8BRAIN_REF "version-3.7" CACHE STRING "Pinned r8brain revision used by the independent trainer")
+set(NTC_OOURA_SOURCE_DIR "" CACHE PATH "Optional local SoXR 0.1.3 source tree used only for its Ooura fft4g.c")
 
 add_executable(NamToClo WIN32
     src/gui.cpp
@@ -85,6 +86,32 @@ if(NTC_ENABLE_INDEPENDENT_TRAINER)
             "Provide -DR8BRAIN_SOURCE_DIR=<path> or allow FetchContent network access.")
     endif()
 
+    # GP-200.exe's 2048-point spectral estimator resolves to Takuya
+    # Ooura's double-precision FFT4G rdft/makewt/makect/bitrv2/cftfsub/rftfsub
+    # routine family.  Use the Ooura-derived fft4g.c preserved in SoXR 0.1.3
+    # (pinned commit) as source, but do not link or use the SoXR resampler.
+    if(NTC_OOURA_SOURCE_DIR)
+        set(_ntc_ooura_dir "${NTC_OOURA_SOURCE_DIR}")
+    else()
+        include(FetchContent)
+        FetchContent_Declare(
+            ntc_ooura_src
+            GIT_REPOSITORY https://github.com/chirlu/soxr.git
+            GIT_TAG 945b592b70470e29f917f4de89b4281fbbd540c0
+            GIT_SHALLOW TRUE
+        )
+        FetchContent_GetProperties(ntc_ooura_src)
+        if(NOT ntc_ooura_src_POPULATED)
+            FetchContent_Populate(ntc_ooura_src)
+        endif()
+        set(_ntc_ooura_dir "${ntc_ooura_src_SOURCE_DIR}")
+    endif()
+    if(NOT EXISTS "${_ntc_ooura_dir}/src/fft4g.c")
+        message(FATAL_ERROR
+            "Independent trainer requested but Ooura fft4g.c was not found. "
+            "Provide -DNTC_OOURA_SOURCE_DIR=<SoXR-0.1.3-tree> or allow FetchContent network access.")
+    endif()
+
     file(GLOB_RECURSE NTC_NAMCORE_SOURCES CONFIGURE_DEPENDS
         "${_ntc_namcore_dir}/NAM/*.cpp"
     )
@@ -112,13 +139,14 @@ if(NTC_ENABLE_INDEPENDENT_TRAINER)
     target_sources(NamToClo PRIVATE
         src/independent_trainer.cpp
         src/independent_trainer.hpp
+        "${_ntc_ooura_dir}/src/fft4g.c"
     )
     # r8brain releases before v7 are not fully header-only; the historical
     # template-era branch used by the official converter ships r8bbase.cpp.
     if(EXISTS "${_ntc_r8brain_dir}/r8bbase.cpp")
         target_sources(NamToClo PRIVATE "${_ntc_r8brain_dir}/r8bbase.cpp")
     endif()
-    target_include_directories(NamToClo PRIVATE "${_ntc_r8brain_dir}")
+    target_include_directories(NamToClo PRIVATE "${_ntc_r8brain_dir}" "${_ntc_ooura_dir}/src")
     target_link_libraries(NamToClo PRIVATE ntc_namcore)
     target_compile_definitions(NamToClo PRIVATE NTC_HAS_INDEPENDENT_TRAINER=1)
 
