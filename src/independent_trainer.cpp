@@ -86,62 +86,33 @@ bool readPcm16Mono(const fs::path& path, std::vector<float>& x, std::uint32_t& s
 // The official GP-200.exe RTTI contains CDSPResampler24 together with the
 // pre-v4 templated r8brain type CDSPResampler<CDSPFracInterpolator<24,673>>.
 // The project therefore pins the latest pre-v4 release (version-3.7) instead
-// of following current r8brain master.  Use process() rather than oneshot():
-// process(double*, int, double*&) is the stable primitive shared by that old
-// generation and it lets us reproduce one-shot flushing without depending on
-// a revision-specific oneshot() signature.
+// of following current r8brain master. The historical oneshot() overload
+// requires a mutable float* input; resampleR8Brain24() supplies a working copy
+// so MSVC does not instantiate Tin=const float.
 std::vector<float> resampleR8Brain24(const std::vector<float>& in, double inRate, double outRate) {
     if (in.empty() || std::abs(inRate - outRate) < 1e-9) return in;
 
+    // r8brain's pre-v4 oneshot() overload takes a mutable float* input even
+    // though it only uses the samples as source data. Passing in.data() from a
+    // const std::vector therefore makes MSVC instantiate Tin=const float and
+    // fails in getOneshotBuf(float*). Keep the public input const and make the
+    // mutable working copy required by the historical API.
+    std::vector<float> mutableInput(in.begin(), in.end());
+
     const std::size_t outN = static_cast<std::size_t>(
-        std::llround(static_cast<double>(in.size()) * outRate / inRate));
+        std::llround(static_cast<double>(mutableInput.size()) * outRate / inRate));
     std::vector<float> out(outN, 0.0f);
     if (outN == 0) return out;
 
-    // MaxInLen changes allocation/blocking, not the transfer function.  Keep a
-    // bounded block so the 70 s stimulus does not force very large temporary
-    // buffers in the historical 32-bit-era r8brain implementation.
-    constexpr int kProcessBlock = 16384;
-    r8b::CDSPResampler24 rs(inRate, outRate, kProcessBlock);
-    std::vector<double> work(static_cast<std::size_t>(kProcessBlock), 0.0);
-
-    std::size_t inPos = 0;
-    std::size_t outPos = 0;
-    std::size_t flushBlocks = 0;
-    bool flushing = false;
-    while (outPos < outN) {
-        int n = 0;
-        if (!flushing && inPos < in.size()) {
-            n = static_cast<int>(std::min<std::size_t>(kProcessBlock, in.size() - inPos));
-            for (int i = 0; i < n; ++i)
-                work[static_cast<std::size_t>(i)] = static_cast<double>(in[inPos + static_cast<std::size_t>(i)]);
-            inPos += static_cast<std::size_t>(n);
-            if (inPos == in.size()) flushing = true;
-        } else {
-            // Historical oneshot() drains the latency/tail by repeatedly
-            // feeding MaxInLen zeros until the requested output length exists.
-            n = kProcessBlock;
-            std::fill(work.begin(), work.end(), 0.0);
-            flushing = true;
-            ++flushBlocks;
-        }
-
-        double* produced = nullptr;
-        const int count = rs.process(work.data(), n, produced);
-        if (count < 0 || produced == nullptr)
-            break;
-        const std::size_t take = std::min<std::size_t>(
-            static_cast<std::size_t>(count), outN - outPos);
-        for (std::size_t i = 0; i < take; ++i)
-            out[outPos + i] = static_cast<float>(produced[i]);
-        outPos += take;
-
-        // A linear-phase r8brain stream needs only a small finite drain.  This
-        // guard prevents an infinite loop if an incompatible local source tree
-        // is supplied through R8BRAIN_SOURCE_DIR.
-        if (flushing && flushBlocks > 256)
-            break;
-    }
+    // oneshot() reproduces r8brain's own latency/tail draining and avoids the
+    // hand-written process()/zero-flush loop used by the previous FINAL tree.
+    // MaxInLen only controls the internal allocation limit for this call.
+    const int maxInLen = static_cast<int>(mutableInput.size());
+    r8b::CDSPResampler24 rs(inRate, outRate, maxInLen);
+    rs.oneshot(mutableInput.data(),
+               static_cast<int>(mutableInput.size()),
+               out.data(),
+               static_cast<int>(out.size()));
     rs.clear();
     return out;
 }
