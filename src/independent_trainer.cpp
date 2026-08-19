@@ -85,35 +85,30 @@ bool readPcm16Mono(const fs::path& path, std::vector<float>& x, std::uint32_t& s
 
 // The official GP-200.exe RTTI contains CDSPResampler24 together with the
 // pre-v4 templated r8brain type CDSPResampler<CDSPFracInterpolator<24,673>>.
-// The project therefore pins the latest pre-v4 release (version-3.7) instead
-// of following current r8brain master. The historical oneshot() overload
-// requires a mutable float* input; resampleR8Brain24() supplies a working copy
-// so MSVC does not instantiate Tin=const float.
+// The project pins r8brain version-3.7. In that API oneshot() has the exact
+// signature:
+//   oneshot(MaxInLen, const Tin* ip, int iplen, Tout* op, int oplen)
+// Use the same bounded MaxInLen for construction and for oneshot(); r8brain
+// performs the internal blocking and zero flushing required to produce the
+// requested output length.
 std::vector<float> resampleR8Brain24(const std::vector<float>& in, double inRate, double outRate) {
     if (in.empty() || std::abs(inRate - outRate) < 1e-9) return in;
 
-    // r8brain's pre-v4 oneshot() overload takes a mutable float* input even
-    // though it only uses the samples as source data. Passing in.data() from a
-    // const std::vector therefore makes MSVC instantiate Tin=const float and
-    // fails in getOneshotBuf(float*). Keep the public input const and make the
-    // mutable working copy required by the historical API.
-    std::vector<float> mutableInput(in.begin(), in.end());
-
     const std::size_t outN = static_cast<std::size_t>(
-        std::llround(static_cast<double>(mutableInput.size()) * outRate / inRate));
+        std::llround(static_cast<double>(in.size()) * outRate / inRate));
     std::vector<float> out(outN, 0.0f);
     if (outN == 0) return out;
 
-    // oneshot() reproduces r8brain's own latency/tail draining and avoids the
-    // hand-written process()/zero-flush loop used by the previous FINAL tree.
-    // MaxInLen only controls the internal allocation limit for this call.
-    const int maxInLen = static_cast<int>(mutableInput.size());
-    r8b::CDSPResampler24 rs(inRate, outRate, maxInLen);
-    rs.oneshot(mutableInput.data(),
-               static_cast<int>(mutableInput.size()),
-               out.data(),
-               static_cast<int>(out.size()));
-    rs.clear();
+    constexpr int kProcessBlock = 16384;
+    if (in.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        out.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return {};
+    }
+
+    r8b::CDSPResampler24 rs(inRate, outRate, kProcessBlock);
+    rs.oneshot(kProcessBlock,
+               in.data(), static_cast<int>(in.size()),
+               out.data(), static_cast<int>(out.size()));
     return out;
 }
 
