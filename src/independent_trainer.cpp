@@ -1228,10 +1228,22 @@ std::vector<float> minimumPhaseF(const std::vector<float>&positive,std::size_t t
         logMag[i]=preciseLogF(v+std::numeric_limits<float>::epsilon());
     }
 
-    // 0x554af0 is invoked by 0x554420 with inputCount == outputCount ==
-    // fullN.  The interpolation/reversal branch at 0x554beb..0x554cd6 is
-    // therefore skipped (JE 0x554cc4); the log-magnitude array is copied
-    // unchanged into the DFT work buffer.
+    // HTUSBTools.dll 0x180097960 (the same trainer used by the original
+    // HTUSBTools route) confirms a subtle operation that the previous EXE
+    // audit misclassified.  When inputCount == outputCount, interpolation is
+    // skipped at 0x180097a65..0x180097b6d, BUT the following half-buffer
+    // reversal at 0x180097ae7..0x180097b62 is still executed unconditionally.
+    // It overwrites only indices [0, fullN/2) with samples read from the
+    // mirrored end of the log-magnitude vector:
+    //
+    //     logMag[i] = logMag[fullN - 1 - i]
+    //
+    // The source half and destination half do not overlap, so the reads use
+    // the original mirrored values.  This is deliberately NOT replaced by a
+    // mathematically cleaner symmetric-spectrum shortcut: it is the literal
+    // conversion performed by the proprietary trainer.
+    for(std::size_t i=0;i<fullN/2u;++i)
+        logMag[i]=logMag[fullN-1u-i];
 
     std::vector<ComplexF> logSpec(fullN);
     for(std::size_t i=0;i<fullN;++i)logSpec[i]={logMag[i],0.0f};
