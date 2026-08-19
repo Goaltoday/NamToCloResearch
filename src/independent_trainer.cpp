@@ -649,7 +649,18 @@ std::vector<float> hammingF(std::size_t n){
     return w;
 }
 std::vector<double> fftFrequencyGrid(double sr){std::vector<double>f(kBins);for(std::size_t k=0;k<kBins;++k)f[k]=static_cast<double>(k)*(sr*0.5)/static_cast<double>(kBins-1);return f;}
-std::vector<float> fftFrequencyGridF(double sr){std::vector<float>f(kBins);const float ny=static_cast<float>(sr*0.5);for(std::size_t k=0;k<kBins;++k)f[k]=static_cast<float>(k)*ny/static_cast<float>(kBins-1);return f;}
+std::vector<float> fftFrequencyGridF(double sr){
+    // Trainer ctor 0x5539a8 calls 0x4225b0 for the N/2+1 frequency grid.
+    const float fs=static_cast<float>(sr);
+    const float ny=fs*0.5f;
+    std::vector<float> f(kBins);
+    if(kBins==1){f[0]=ny;return f;}
+    f[0]=0.0f;
+    const float delta=ny/static_cast<float>(kBins-1);
+    for(std::size_t i=1;i<kBins;++i)f[i]=f[i-1]+delta;
+    f[kBins-1]=ny;
+    return f;
+}
 std::vector<double> linspace(double a,double b,std::size_t n){std::vector<double>v(n);if(!n)return v;if(n==1){v[0]=a;return v;}for(std::size_t i=0;i<n;++i)v[i]=a+(b-a)*static_cast<double>(i)/static_cast<double>(n-1);v.front()=a;v.back()=b;return v;}
 
 void fftF(std::vector<std::complex<float>>& a,bool inv);
@@ -702,122 +713,222 @@ std::vector<float> ratioSpectrumF(const std::vector<float>& model,const std::vec
 
 std::vector<double> ratioSpectrum(const std::vector<float>& model,const std::vector<float>& target,double sr){const auto r=ratioSpectrumF(model,target,sr);return std::vector<double>(r.begin(),r.end());}
 
-float hzToMelF(float hz){float x=std::max(0.0f,hz);x/=700.0f;x+=1.0f;return preciseLog10F(x)*2595.0f;}
-float melToHzF(float mel){const float e=mel/2595.0f;return (precisePowF(10.0f,e)-1.0f)*700.0f;}
-double hzToMel(double hz){return static_cast<double>(hzToMelF(static_cast<float>(hz)));}double melToHz(double mel){return static_cast<double>(melToHzF(static_cast<float>(mel)));}
-float interpLinearF(const std::vector<float>&x,const std::vector<float>&y,float q){if(x.empty()||y.empty())return 0.0f;if(q<=x.front())return y.front();if(q>=x.back())return y.back();const auto it=std::lower_bound(x.begin(),x.end(),q);const std::size_t b=static_cast<std::size_t>(it-x.begin()),a=b-1;const float dx=x[b]-x[a];if(std::abs(dx)<1e-30f)return y[a];const float t=(q-x[a])/dx;return y[a]+(y[b]-y[a])*t;}
-double interpLinear(const std::vector<double>&x,const std::vector<double>&y,double q){if(x.empty()||y.empty())return 0.0;if(q<=x.front())return y.front();if(q>=x.back())return y.back();const auto it=std::lower_bound(x.begin(),x.end(),q);const std::size_t b=static_cast<std::size_t>(it-x.begin()),a=b-1;const double dx=x[b]-x[a];if(std::abs(dx)<1e-30)return y[a];const double t=(q-x[a])/dx;return y[a]+(y[b]-y[a])*t;}
-std::vector<float> linspaceF(float a,float b,std::size_t n){std::vector<float>v(n);if(!n)return v;if(n==1){v[0]=a;return v;}const float den=static_cast<float>(n-1);for(std::size_t i=0;i<n;++i)v[i]=a+(b-a)*(static_cast<float>(i)/den);v.front()=a;v.back()=b;return v;}
-
-// Exact 0x555460 Gaussian path. GP-200.exe constructs and normalizes
-// the kernel in double precision, reverses it, allocates N+1 entries for an
-// even N (the extra entry remains zero), and accumulates float samples times
-// double weights in double precision. Border samples are renormalized using
-// only the weights that actually participate in the convolution.
-std::vector<double> gaussianKernelExactD(std::size_t n){
-    n=std::max<std::size_t>(1,n);
-    const std::size_t storage=(n&1u)?n:n+1;
-    std::vector<double> raw(n),g(storage,0.0);
-    const double step=5.0/static_cast<double>(n);
-    const double center=std::ceil(static_cast<double>(n)*0.5);
-    double sum=0.0;
-    for(std::size_t i=0;i<n;++i){
-        const double x=(static_cast<double>(i+1)-center)*step;
-        raw[i]=std::exp(-0.5*x*x);
-        sum+=raw[i];
-    }
-    if(sum!=0.0)for(auto&v:raw)v/=sum;
-    for(std::size_t i=0;i<n;++i)g[i]=raw[n-1-i];
-    return g;
+float hzToMelF(float hz){
+    // 0x554f00 helpers: all scalar arithmetic is float up to the precise
+    // double libm wrapper, whose result is rounded back to float.
+    float x=hz/700.0f;
+    x+=1.0f;
+    const float l=preciseLog10F(x);
+    return l*2595.0f;
 }
-std::vector<float> gaussianSmoothExactF(const std::vector<float>&v,std::size_t n){
-    if(v.empty())return {};
-    const auto g=gaussianKernelExactD(n);
-    const long center=static_cast<long>(g.size()/2);
-    std::vector<float>o(v.size());
-    for(std::size_t i=0;i<v.size();++i){
-        double s=0.0,w=0.0;
-        for(std::size_t k=0;k<g.size();++k){
-            const long j=static_cast<long>(i)+static_cast<long>(k)-center;
-            if(j<0||j>=static_cast<long>(v.size())||g[k]==0.0)continue;
-            s+=static_cast<double>(v[static_cast<std::size_t>(j)])*g[k];
-            w+=g[k];
-        }
-        o[i]=w>0.0?static_cast<float>(s/w):v[i];
+float melToHzF(float mel){
+    const float e=mel/2595.0f;
+    const float p=precisePowF(10.0f,e);
+    return (p-1.0f)*700.0f;
+}
+double hzToMel(double hz){return static_cast<double>(hzToMelF(static_cast<float>(hz)));}
+double melToHz(double mel){return static_cast<double>(melToHzF(static_cast<float>(mel)));}
+
+// 0x4225b0.  This is intentionally incremental rather than evaluating the
+// closed-form expression for every point: every addss rounds before the next
+// point, and the final endpoint is overwritten with b exactly.
+std::vector<float> linspaceF(float a,float b,std::size_t n){
+    std::vector<float> v(n);
+    if(!n)return v;
+    if(n==1){v[0]=b;return v;} // The official helper overwrites the sole slot at exit.
+    v[0]=a;
+    const float delta=(b-a)/static_cast<float>(n-1);
+    for(std::size_t i=1;i<n;++i){
+        const float prev=v[i-1];
+        v[i]=prev+delta;
     }
-    return o;
+    v[n-1]=b;
+    return v;
+}
+
+// 0x553c60.  The EXE precomputes a slope/intercept for every source point
+// (the final pair is copied from N-2), then scans the complete source-X array
+// for every query and chooses the closest non-negative (q-x) distance.
+// This is deliberately not std::lower_bound nor y0+(y1-y0)*t: the float
+// operation order is observable inside the ten optimization iterations.
+std::vector<float> interpolateOfficialF(const std::vector<float>&srcX,
+                                        const std::vector<float>&srcY,
+                                        const std::vector<float>&queryX){
+    const std::size_t n=std::min(srcX.size(),srcY.size());
+    std::vector<float> out(queryX.size(),std::numeric_limits<float>::max());
+    if(n<2)return out;
+    std::vector<float> slope(n),intercept(n);
+    for(std::size_t i=0;i+1<n;++i){
+        const float dy=srcY[i+1]-srcY[i];
+        const float dx=srcX[i+1]-srcX[i];
+        slope[i]=dy/dx;
+        const float prod=slope[i]*srcX[i];
+        intercept[i]=srcY[i]-prod;
+    }
+    slope[n-1]=slope[n-2];
+    intercept[n-1]=intercept[n-2];
+    for(std::size_t qn=0;qn<queryX.size();++qn){
+        const float q=queryX[qn];
+        float best=std::numeric_limits<float>::max();
+        int bestIndex=-1;
+        for(std::size_t i=0;i<n;++i){
+            const float diff=q-srcX[i];
+            if(diff>=0.0f && diff<best){best=diff;bestIndex=static_cast<int>(i);}
+        }
+        if(bestIndex>=0){
+            const std::size_t i=static_cast<std::size_t>(bestIndex);
+            const float prod=slope[i]*q;
+            out[qn]=prod+intercept[i];
+        }
+    }
+    return out;
+}
+float interpOfficialF(const std::vector<float>&srcX,const std::vector<float>&srcY,float q){
+    const std::vector<float> queries{q};
+    return interpolateOfficialF(srcX,srcY,queries)[0];
+}
+
+// Retained only for non-trainer utility code.  Trainer reconstruction below
+// uses 0x553c60 exactly via interpolateOfficialF().
+float interpLinearF(const std::vector<float>&x,const std::vector<float>&y,float q){
+    if(x.empty()||y.empty())return 0.0f;
+    if(q<=x.front())return y.front();if(q>=x.back())return y.back();
+    const auto it=std::lower_bound(x.begin(),x.end(),q);
+    const std::size_t b=static_cast<std::size_t>(it-x.begin()),a=b-1;
+    const float dx=x[b]-x[a];if(std::abs(dx)<1e-30f)return y[a];
+    const float t=(q-x[a])/dx;return y[a]+(y[b]-y[a])*t;
+}
+double interpLinear(const std::vector<double>&x,const std::vector<double>&y,double q){if(x.empty()||y.empty())return 0.0;if(q<=x.front())return y.front();if(q>=x.back())return y.back();const auto it=std::lower_bound(x.begin(),x.end(),q);const std::size_t b=static_cast<std::size_t>(it-x.begin()),a=b-1;const double dx=x[b]-x[a];if(std::abs(dx)<1e-30)return y[a];const double t=(q-x[a])/dx;return y[a]+(y[b]-y[a])*t;}
+
+// 0x555460, reproduced literally.  Kernel construction and accumulation are
+// double.  The raw kernel is normalized to a sum of 1,000,000; an even input
+// kernel length allocates one additional zero coefficient.  Interior points
+// are multiplied by 1e-6 after convolution, whereas edge points divide by
+// the sum of only the coefficients that were actually used.
+std::vector<double> gaussianKernelOfficialD(std::size_t kernelN){
+    if(kernelN==0)return {};
+    std::vector<double> raw(kernelN);
+    const double step=5.0/static_cast<double>(kernelN);
+    const double center=std::ceil(static_cast<double>(kernelN)*0.5);
+    double rawSum=0.0;
+    for(std::size_t i=0;i<kernelN;++i){
+        const double x=(static_cast<double>(i+1)-center)*step;
+        const double a=-0.5*x;
+        const double exponent=a*x;
+        raw[i]=std::exp(exponent);
+        rawSum+=raw[i];
+    }
+    const double scale=1000000.0/rawSum;
+    const std::size_t storage=(kernelN&1u)?kernelN:kernelN+1;
+    std::vector<double> kernel(storage,0.0);
+    for(std::size_t i=0;i<kernelN;++i)
+        kernel[i]=raw[kernelN-1-i]*scale;
+    return kernel;
+}
+std::vector<float> gaussianSmoothExactF(const std::vector<float>&v,std::size_t kernelN){
+    if(v.empty())return {};
+    if(kernelN==0)return v; // No production call in the reconstructed trainer reaches N=0.
+    const auto kernel=gaussianKernelOfficialD(kernelN);
+    const int storage=static_cast<int>(kernel.size());
+    const int center=static_cast<int>(std::ceil(static_cast<double>(storage)*0.5));
+    const int left=center-1;
+    const int right=storage-center;
+    std::vector<float> out(v.size());
+    for(int b=0;b<static_cast<int>(v.size());++b){
+        const bool interior=(b>=left) && (b+right<static_cast<int>(v.size()));
+        double sum=0.0;
+        if(interior){
+            for(int off=-left;off<=right;++off){
+                const float sample=v[static_cast<std::size_t>(b+off)];
+                const double weight=kernel[static_cast<std::size_t>(left+off)];
+                sum+=static_cast<double>(sample)*weight;
+            }
+            sum*=1.0e-6;
+        }else{
+            double usedWeight=0.0;
+            const int lo=std::max(-left,-b);
+            const int hi=std::min(right,static_cast<int>(v.size())-b-1);
+            for(int off=lo;off<=hi;++off){
+                const double weight=kernel[static_cast<std::size_t>(left+off)];
+                usedWeight+=weight;
+                sum+=static_cast<double>(v[static_cast<std::size_t>(b+off)])*weight;
+            }
+            sum/=usedWeight;
+        }
+        out[static_cast<std::size_t>(b)]=static_cast<float>(sum);
+    }
+    return out;
 }
 std::vector<double> gaussianSmoothExact(const std::vector<double>&v,std::size_t n){
-    std::vector<float>x(v.size());
-    for(std::size_t i=0;i<v.size();++i)x[i]=static_cast<float>(v[i]);
-    const auto y=gaussianSmoothExactF(x,n);
-    return std::vector<double>(y.begin(),y.end());
+    std::vector<float>x(v.size());for(std::size_t i=0;i<v.size();++i)x[i]=static_cast<float>(v[i]);
+    const auto y=gaussianSmoothExactF(x,n);return std::vector<double>(y.begin(),y.end());
 }
 
 struct ConditionedMagnitude{std::vector<double>freq,mag;};
 struct ConditionedMagnitudeF{std::vector<float>freq,mag;};
-// 0x554f00, exact operation order recovered from GP-200.exe.
-//
-// Official order:
-//   1. source magnitudes -> dB on the ORIGINAL source-frequency grid;
-//   2. Gaussian #1 on that original grid (floor(N1 * 0.002));
-//   3. interpolate original Hz -> N1 points uniformly spaced in Mel;
-//   4. Gaussian #2 on that Mel-spaced N1 curve (2 * floor(N1/N2));
-//   5. if N1 != N2, interpolate N1-Mel -> N2-Mel;
-//   6. interpolate N2-Mel -> N2 points linearly spaced in Hz;
-//   7. dB -> magnitude.
+// 0x554f00, literal data flow and helper sequence.
 ConditionedMagnitudeF conditionMagnitudeF(const std::vector<float>&srcFreq,const std::vector<float>&srcMag,std::size_t destCount){
     const std::size_t n=std::min(srcFreq.size(),srcMag.size());
-    ConditionedMagnitudeF out;
-    if(!n||!destCount)return out;
-
-    const float f0=srcFreq.front(),f1=srcFreq[n-1];
+    ConditionedMagnitudeF out;if(!n||!destCount)return out;
+    const float f0=srcFreq[0],f1=srcFreq[n-1];
     std::vector<float> sf(srcFreq.begin(),srcFreq.begin()+static_cast<std::ptrdiff_t>(n));
-    std::vector<float> db(n);
-    for(std::size_t i=0;i<n;++i)
-        db[i]=20.0f*preciseLog10F(std::max(1.0e-20f,srcMag[i]));
 
-    const std::size_t k1=std::max<std::size_t>(
-        1,static_cast<std::size_t>(static_cast<double>(n)*0.002));
-    db=gaussianSmoothExactF(db,k1);
+    // Source and destination Mel grids are made by 0x4225b0, then converted
+    // back to Hz. Endpoints of the destination-Mel Hz grid are overwritten by
+    // the exact source endpoints in the EXE.
+    const float mel0=hzToMelF(f0),mel1=hzToMelF(f1);
+    const auto srcMel=linspaceF(mel0,mel1,n);
+    std::vector<float> srcMelHz(n);
+    for(std::size_t i=0;i<n;++i)srcMelHz[i]=melToHzF(srcMel[i]);
+    srcMelHz.front()=f0;srcMelHz.back()=f1;
 
-    const auto mel1=linspaceF(hzToMelF(f0),hzToMelF(f1),n);
-    std::vector<float> melHz1(n);
-    for(std::size_t i=0;i<n;++i)melHz1[i]=melToHzF(mel1[i]);
-    melHz1.front()=f0; melHz1.back()=f1;
-
-    std::vector<float> melDb1(n);
-    for(std::size_t i=0;i<n;++i)melDb1[i]=interpLinearF(sf,db,melHz1[i]);
-
-    const std::size_t k2=std::max<std::size_t>(1,2*(n/destCount));
-    melDb1=gaussianSmoothExactF(melDb1,k2);
-
-    const auto mel2=linspaceF(hzToMelF(f0),hzToMelF(f1),destCount);
-    std::vector<float> melHz2(destCount),melDb2(destCount);
-    for(std::size_t i=0;i<destCount;++i)melHz2[i]=melToHzF(mel2[i]);
-    melHz2.front()=f0; melHz2.back()=f1;
-
-    if(n==destCount){
-        melDb2=melDb1;
-    }else{
-        for(std::size_t i=0;i<destCount;++i)
-            melDb2[i]=interpLinearF(melHz1,melDb1,melHz2[i]);
-    }
+    const auto dstMel=linspaceF(mel0,mel1,destCount);
+    std::vector<float> dstMelHz(destCount);
+    for(std::size_t i=0;i<destCount;++i)dstMelHz[i]=melToHzF(dstMel[i]);
+    dstMelHz.front()=f0;dstMelHz.back()=f1;
 
     out.freq=linspaceF(f0,f1,destCount);
+
+    std::vector<float> db(n);
+    for(std::size_t i=0;i<n;++i){
+        const float l=preciseLog10F(srcMag[i]);
+        db[i]=20.0f*l;
+    }
+
+    const std::size_t k1=static_cast<std::size_t>(static_cast<int>(static_cast<double>(n)*0.002));
+    db=gaussianSmoothExactF(db,k1);
+    auto melDb1=interpolateOfficialF(sf,db,srcMelHz);
+
+    const std::size_t k2=static_cast<std::size_t>(2*static_cast<int>(n/destCount));
+    melDb1=gaussianSmoothExactF(melDb1,k2);
+
+    std::vector<float> melDb2;
+    if(n==destCount)melDb2=melDb1;
+    else melDb2=interpolateOfficialF(srcMelHz,melDb1,dstMelHz);
+
+    const auto linearDb=interpolateOfficialF(dstMelHz,melDb2,out.freq);
     out.mag.resize(destCount);
     for(std::size_t i=0;i<destCount;++i){
-        const float d=interpLinearF(melHz2,melDb2,out.freq[i]);
-        out.mag[i]=precisePowF(10.0f,d*0.05f);
+        const float exponent=linearDb[i]*0.05f;
+        out.mag[i]=precisePowF(10.0f,exponent);
     }
     return out;
 }
 ConditionedMagnitude conditionMagnitude(const std::vector<double>&srcFreq,const std::vector<double>&srcMag,std::size_t destCount){const std::size_t n=std::min(srcFreq.size(),srcMag.size());std::vector<float>f(n),m(n);for(std::size_t i=0;i<n;++i){f[i]=static_cast<float>(srcFreq[i]);m[i]=static_cast<float>(srcMag[i]);}auto cf=conditionMagnitudeF(f,m,destCount);ConditionedMagnitude o;o.freq.assign(cf.freq.begin(),cf.freq.end());o.mag.assign(cf.mag.begin(),cf.mag.end());return o;}
 
 void lowSmoothASequentialF(std::vector<float>&m,double sr){
-    if(m.size()<2)return;const std::size_t n=m.size();const float fs=static_cast<float>(sr);const std::size_t lim=std::min<std::size_t>(n-1,static_cast<std::size_t>(std::floor(static_cast<double>((2.0f/fs)*60.0f*static_cast<float>(n)))));
-    m[0]=preciseSqrtF(std::max(1.0e-30f,m[0]*preciseSqrtF(std::max(1.0e-30f,m[0]*m[1]))));
-    for(std::size_t i=1;i<lim&&i+1<n;++i)m[i]=preciseSqrtF(std::max(1.0e-30f,m[i]*preciseSqrtF(std::max(1.0e-30f,m[i-1]*m[i+1]))));
+    if(m.size()<2)return;
+    const std::size_t n=m.size();const float fs=static_cast<float>(sr);
+    const float invNy=2.0f/fs;
+    const float raw=(invNy*60.0f)*static_cast<float>(n);
+    // 0x4223c0 is the imported CRT floor() wrapper (IAT 0x76f750), followed
+    // by cvttss2si in 0x553f10/0x557842.
+    const int limI=static_cast<int>(std::floor(static_cast<double>(raw)));
+    if(limI<=1)return;
+    const std::size_t lim=std::min<std::size_t>(n-1,static_cast<std::size_t>(limI));
+    m[0]=preciseSqrtF(m[0]*preciseSqrtF(m[0]*m[1]));
+    for(std::size_t i=1;i<lim&&i+1<n;++i)
+        m[i]=preciseSqrtF(m[i]*preciseSqrtF(m[i-1]*m[i+1]));
 }
 void lowSmoothASequential(std::vector<double>&m,double sr){std::vector<float>x(m.begin(),m.end());lowSmoothASequentialF(x,sr);m.assign(x.begin(),x.end());}
 
@@ -919,25 +1030,59 @@ std::vector<float> minimumPhase(const std::vector<double>&positive,std::size_t t
 std::vector<float> frequencyWeightsF(double sr){
     std::vector<float>w(kBins,1.0f);
     const float fs=static_cast<float>(sr);
-    const float raw=(2.0f/fs)*80.0f*static_cast<float>(kBins);
-    const int idx=static_cast<int>(std::floor(static_cast<double>(raw)));
-    const std::size_t start=idx>0?std::min<std::size_t>(kBins-1,static_cast<std::size_t>(idx-1)):0;
+    const float invNy=2.0f/fs;
+    const float raw=(invNy*80.0f)*static_cast<float>(kBins);
+    // 0x4223c0 == floor(), then the result is used as a one-based boundary.
+    const int boundary=static_cast<int>(std::floor(static_cast<double>(raw)));
+    const std::size_t start=boundary>0?std::min<std::size_t>(kBins-1,static_cast<std::size_t>(boundary-1)):0;
     const std::size_t count=kBins-start;
-    if(count==1){w[start]=1.0f;return w;}
-    const float delta=(0.5f-1.0f)/static_cast<float>(count-1);
-    for(std::size_t i=0;i<count;++i)w[start+i]=1.0f+delta*static_cast<float>(i);
-    w[start]=1.0f; w.back()=0.5f;
+    const auto tail=linspaceF(1.0f,0.5f,count); // literal 0x4225b0
+    std::copy(tail.begin(),tail.end(),w.begin()+static_cast<std::ptrdiff_t>(start));
     return w;
 }
 
 float lossFromRatioF(const std::vector<float>&r,double sr){
-    const auto srcF=fftFrequencyGridF(sr);const float m0=hzToMelF(80.0f),m1=hzToMelF(10000.0f);float sum=0.0f;
-    for(std::size_t i=0;i<512;++i){const float mel=m0+(m1-m0)*static_cast<float>(i)/511.0f;float f=melToHzF(mel);if(i==0)f=80.0f;if(i==511)f=10000.0f;const float v=interpLinearF(srcF,r,f);sum+=std::fabs(preciseLogF(v+static_cast<float>(kEps)));}
-    return sum*(1.0f/512.0f);
+    const auto srcF=fftFrequencyGridF(sr);
+    // Constructor 0x5596d3..0x559790: 512-point incremental Mel linspace,
+    // interior Mel->Hz conversion, exact endpoint overwrites 80 and 10000.
+    const float mel80=preciseLog10F(1.0f+80.0f/700.0f)*2595.0f;
+    const float mel10k=preciseLog10F(1.0f+10000.0f/700.0f)*2595.0f;
+    const auto melGrid=linspaceF(mel80,mel10k,512);
+    std::vector<float> query(512);
+    query[0]=80.0f;
+    for(std::size_t i=1;i+1<query.size();++i)query[i]=melToHzF(melGrid[i]);
+    query.back()=10000.0f;
+    const auto values=interpolateOfficialF(srcF,r,query); // 0x553c60
+    float sum=0.0f;
+    for(float v:values){
+        const float withEps=v+static_cast<float>(kEps);
+        const float l=preciseLogF(withEps);
+        sum+=std::fabs(l);
+    }
+    return sum*0.001953125f; // exact 1/512 constant at 0x21fe604
 }
+
 double lossFromRatio(const std::vector<double>&r,double sr){std::vector<float>x(r.begin(),r.end());return static_cast<double>(lossFromRatioF(x,sr));}
 
-void regularizeInitialCurveF(std::vector<float>&v,const std::vector<float>&reference){if(v.empty()||reference.empty())return;const float mx=*std::max_element(reference.begin(),reference.end());const float f=std::max(1.0e-30f,0.001f*mx);for(auto&x:v)if(x<2.0f*f)x=f+(x*x)/(4.0f*f);}
+void regularizeInitialCurveF(std::vector<float>&v,const std::vector<float>&reference){
+    if(v.empty()||reference.empty())return;
+    // 0x5585a5..0x5586xx: maxss reduction starts at +0.0f; the 0.001
+    // multiply is performed in double and rounded once to float.
+    float mx=0.0f;
+    for(float x:reference)mx=std::max(mx,x);
+    const float f=static_cast<float>(static_cast<double>(mx)*0.001);
+    const float twice=f+f;
+    const float twiceSq=twice*twice;
+    const float numerator=twice-f; // == f, but reproduces the EXE operation order.
+    const float inv4f=numerator/twiceSq;
+    for(auto&x:v){
+        if(x<twice){
+            const float xx=x*x;
+            const float q=xx*inv4f;
+            x=q+f;
+        }
+    }
+}
 void regularizeInitialCurve(std::vector<double>&v,const std::vector<double>&reference){std::vector<float>x(v.begin(),v.end()),r(reference.begin(),reference.end());regularizeInitialCurveF(x,r);v.assign(x.begin(),x.end());}
 
 struct FactorState{std::vector<float>a,b;};
@@ -946,7 +1091,12 @@ FactorState initialFactorState(const Model&m,const std::vector<float>&input,cons
     const std::size_t sb=static_cast<std::size_t>(std::llround(23.0*sr)),se=static_cast<std::size_t>(std::llround(28.0*sr));
     auto lowIn=sliceSignal(input,lb,le),lowTarget=sliceSignal(target,lb,le);std::vector<float>lowPred;renderCoreNoFir(m,lowIn,lowPred);auto lowSpec=ratioSpectrumF(lowPred,lowTarget,sr);
     auto sweepIn=sliceSignal(input,sb,se),sweepTarget=sliceSignal(target,sb,se);sweepIn=applyInitialConditioningFir(sweepIn,sr);std::vector<float>sweepPred;renderCoreNoFir(m,sweepIn,sweepPred);auto sweepSpec=ratioSpectrumF(sweepPred,sweepTarget,sr);
-    const std::size_t n=sweepSpec.size();sweepSpec=gaussianSmoothExactF(sweepSpec,std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<float>(n)*0.001f)));sweepSpec=gaussianSmoothExactF(sweepSpec,std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<float>(n)*0.005f)));regularizeInitialCurveF(sweepSpec,lowSpec);
+    const std::size_t n=sweepSpec.size();
+    const std::size_t k001=static_cast<std::size_t>(static_cast<int>(static_cast<double>(n)*0.001));
+    const std::size_t k005=static_cast<std::size_t>(static_cast<int>(static_cast<double>(n)*0.005));
+    sweepSpec=gaussianSmoothExactF(sweepSpec,k001);
+    sweepSpec=gaussianSmoothExactF(sweepSpec,k005);
+    regularizeInitialCurveF(sweepSpec,lowSpec);
     FactorState st;st.a.resize(kBins,1.0f);st.b=sweepSpec;for(std::size_t k=0;k<kBins;++k){const double num=static_cast<double>(lowSpec[k])*1000000.0;const double den=static_cast<double>(sweepSpec[k])*1000000.0+kEps;st.a[k]=static_cast<float>(num/den);}return st;
 }
 
@@ -959,7 +1109,7 @@ void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,cons
         // 0x5574e0: exponent = frequencyWeight[k] * step.  The weight vector
         // is prepared by the caller as 1.0 above ~80 Hz-index onset and a
         // 1.0 -> 0.5 ramp through the remainder of the spectrum.
-        std::vector<float>stepped(kBins);for(std::size_t k=0;k<kBins;++k){const float base=std::max(1.0e-30f,corr[k]);const float exponent=weights[k]*step;stepped[k]=std::clamp(precisePowF(base,exponent),0.2f,5.0f);}
+        std::vector<float>stepped(kBins);for(std::size_t k=0;k<kBins;++k){const float base=corr[k];const float exponent=weights[k]*step;stepped[k]=std::clamp(precisePowF(base,exponent),0.2f,5.0f);}
         // Confirmed at 0x557532..0x557563: the correction traverses 0x554f00
         // twice, back-to-back, before either factor state is updated.
         const auto conditioned1=conditionMagnitudeF(freq,stepped,kBins);
