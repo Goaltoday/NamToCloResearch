@@ -1,6 +1,22 @@
-# NAM to CLO v2.7.0-NATIVE9
+# NAM to CLO v2.7.0-FINAL
 
 This build keeps the existing **Current / HTUSBTools** path untouched and updates the parallel **Independent / Native** backend with the complete trainer flow reconstructed from the GP-200 v1.8 converter analysis.
+
+## v2.7.0-FINAL — completed official-converter reconstruction pass
+
+This pass closes the two trainer-loader details that were still unresolved after NATIVE9: the exact `Fs*70 + 600` buffer semantics and the exact float32 target detrend/latency preprocessing used by `GP-200.exe`.
+
+Confirmed from the official executable and implemented here:
+
+- Only the first **70.000 s** of the selected 44.1 kHz stimulus are sent through sample-rate conversion and through NAM inference.
+- The trainer then allocates **`Fs*70 + 600` float samples** for both input and target, copies the 70-second data, and leaves the final **600 samples as literal zeros**. The 600 guard samples are therefore **not resampled and not processed by the NAM**.
+- The NAM target is scaled by the official **0.31f** factor before the 600 zero guard is appended.
+- Target preprocessing first removes the mean with float32 accumulation, then performs a second float32 linear regression over **x = 1..N** and subtracts `slope*x + intercept`.
+- Latency search begins at `6 * int(Fs)`, tests exactly 600 samples against `fabs(sample) > 0.01`, and returns **600** if no crossing is found.
+- Target alignment remains equivalent to the official pointer-offset method because the 600-sample guard is now in the correct post-render location.
+- The prior NATIVE10 reverse-engineering corrections remain: float/double boundaries, official POST recurrence, exact conditioning order, Gaussian behavior, minimum-phase boundaries, partitioned 64/128 FIR engine, official optimizer phases/loss/rollback, final B correction, r8brain `CDSPResampler24`, and GP-200 B1024 serialization.
+
+The legacy HTUSBTools tab and the existing independent Stimulus Profile / Tail selection architecture are unchanged.
 
 ## NATIVE9 official-optimizer fidelity pass
 
@@ -12,7 +28,7 @@ The native path does not load `GP-200.exe`, `HTUSBTools.dll` or an Ampero/Valeto
 
 The implemented baseline is:
 
-1. Build the selected 50 s Stimulus Profile + selected 20 s Tail + 600 trailing zero samples.
+1. Build the selected 50 s Stimulus Profile + selected 20 s Tail. The shared StimulusBuilder may also carry its legacy 600-sample guard for the HTUSBTools path; the Native backend explicitly removes that pre-SRC guard.
 2. Render the NAM at its declared rate (48 kHz fallback), in 1024-sample blocks, then apply target scale `0.31`.
 3. Remove DC/linear trend and align from the 6 s impulse marker.
 4. Estimate `Ppos/Pneg/Kpos/Kneg` from 100 ms measurements in 0-5 s. P comes from extrema; K is seeded from the <=0.5*P slope and searched with the official 0.80..1.20 multipliers.
@@ -50,7 +66,7 @@ cmake --preset windows-x64
 cmake --build build --config Release --parallel
 ```
 
-By default CMake fetches NeuralAmpModelerCore v0.5.4 and r8brain-free-src. Local source trees can be supplied with `NAM_CORE_SOURCE_DIR` and `R8BRAIN_SOURCE_DIR`.
+By default CMake fetches NeuralAmpModelerCore v0.5.4 and **r8brain-free-src `version-3.7`**. The r8brain pin is deliberate: `GP-200.exe` contains RTTI for the old template-era `CDSPResampler<CDSPFracInterpolator<24,673>>`, while r8brain 4.0 replaced that template architecture. Local source trees can be supplied with `NAM_CORE_SOURCE_DIR` and `R8BRAIN_SOURCE_DIR`; for equivalence testing the local r8brain tree should match the pinned template-era branch.
 
 The old tab can be built without the native trainer with:
 

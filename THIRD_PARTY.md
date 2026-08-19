@@ -24,4 +24,4 @@ The source code dynamically loads `HTUSBTools.dll` only when the existing conver
 
 ## r8brain-free-src
 
-The independent trainer uses the header-only `r8b::CDSPResampler24` sample-rate converter from r8brain-free-src (MIT). It is compiled into the executable and is not a runtime DLL dependency. Credit: Sample rate converter designed by Aleksey Vaneev of Voxengo.
+The independent trainer uses `r8b::CDSPResampler24` from r8brain-free-src (MIT), pinned to the historical `version-3.7` template-era branch because the official GP-200 converter contains RTTI for `CDSPResampler<CDSPFracInterpolator<24,673>>`. Releases before r8brain 4.0 use this templated architecture; 4.0 replaced it with runtime-calculated interpolation parameters. The source is compiled into the executable (including `r8bbase.cpp` when present) and is not a runtime DLL dependency. Credit: Sample rate converter designed by Aleksey Vaneev of Voxengo.

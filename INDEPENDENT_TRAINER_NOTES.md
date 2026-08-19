@@ -41,3 +41,16 @@ Where the disassembly uses `movss/addss/mulss/divss`, NATIVE8 keeps float32 stat
 ## NATIVE9 optimizer corrections
 
 Direct disassembly of `0x557380` shows two consecutive calls to `0x554f00` on the per-iteration correction before the factor arrays are touched. NATIVE9 reproduces both calls. The same block updates the factor arrays with SIMD float operations (`mulps/mulss` for the post-nonlinearity factor and `divps/divss` for the pre-nonlinearity factor), so NATIVE9 keeps these working arrays, the correction, frequency weights, step and loss in float32 rather than double.
+
+
+## NATIVE10-FINAL loader/preprocessing closure
+
+Static analysis of `GP-200.exe` functions around `0x55A860`, `0x55AAF0` and `0x559D80` resolves the final loader ambiguity:
+
+1. The WAV presented to the trainer must contain at least 70 s at the trainer sample rate.
+2. Input and target buffers are allocated as `float(Fs) * 70.0f + 600.0f` samples and zero-filled.
+3. Exactly the first `Fs*70` source samples are copied; the trailing 600 remain zero.
+4. Therefore the guard is appended after any source SRC and, for the target, after NAM inference / 0.31 scaling.
+5. Target detrending is two-stage float32: mean removal, then an ordinary least-squares line using x=1..N and float accumulators.
+6. Latency is searched over `[6*int(Fs), 6*int(Fs)+600)`, with a double comparison to 0.01 after fabs; no hit resolves to latency=600.
+7. The official trainer accesses target segments at nominal offset + latency. The implementation's global left alignment is mathematically equivalent because the buffer now contains the same 600-sample zero guard.

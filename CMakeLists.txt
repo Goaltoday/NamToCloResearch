@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(NamToClo VERSION 2.7.0.8 LANGUAGES CXX RC)
+project(NamToClo VERSION 2.7.0.11 LANGUAGES CXX RC)
 
 if(NOT WIN32)
     message(FATAL_ERROR "NAM to CLO targets Windows x64.")
@@ -11,6 +11,7 @@ endif()
 option(NTC_ENABLE_INDEPENDENT_TRAINER "Build the independent NAM -> CLO trainer tab" ON)
 set(NAM_CORE_SOURCE_DIR "" CACHE PATH "Optional local NeuralAmpModelerCore source tree (avoids network FetchContent)")
 set(R8BRAIN_SOURCE_DIR "" CACHE PATH "Optional local r8brain-free-src source tree (avoids network FetchContent)")
+set(NTC_R8BRAIN_REF "version-3.7" CACHE STRING "Pinned r8brain revision used by the independent trainer")
 
 add_executable(NamToClo WIN32
     src/gui.cpp
@@ -69,7 +70,7 @@ if(NTC_ENABLE_INDEPENDENT_TRAINER)
         FetchContent_Declare(
             ntc_r8brain_src
             GIT_REPOSITORY https://github.com/avaneev/r8brain-free-src.git
-            GIT_TAG master
+            GIT_TAG ${NTC_R8BRAIN_REF}
             GIT_SHALLOW TRUE
         )
         FetchContent_GetProperties(ntc_r8brain_src)
@@ -112,6 +113,11 @@ if(NTC_ENABLE_INDEPENDENT_TRAINER)
         src/independent_trainer.cpp
         src/independent_trainer.hpp
     )
+    # r8brain releases before v7 are not fully header-only; the historical
+    # template-era branch used by the official converter ships r8bbase.cpp.
+    if(EXISTS "${_ntc_r8brain_dir}/r8bbase.cpp")
+        target_sources(NamToClo PRIVATE "${_ntc_r8brain_dir}/r8bbase.cpp")
+    endif()
     target_include_directories(NamToClo PRIVATE "${_ntc_r8brain_dir}")
     target_link_libraries(NamToClo PRIVATE ntc_namcore)
     target_compile_definitions(NamToClo PRIVATE NTC_HAS_INDEPENDENT_TRAINER=1)
@@ -131,16 +137,18 @@ if(NTC_ENABLE_INDEPENDENT_TRAINER)
     endif()
     if(EXISTS "${_ntc_r8brain_dir}/LICENSE")
         install(FILES "${_ntc_r8brain_dir}/LICENSE" DESTINATION . RENAME R8BRAIN_LICENSE.txt)
+    elseif(EXISTS "${_ntc_r8brain_dir}/License.txt")
+        install(FILES "${_ntc_r8brain_dir}/License.txt" DESTINATION . RENAME R8BRAIN_LICENSE.txt)
     endif()
 else()
     target_compile_definitions(NamToClo PRIVATE NTC_HAS_INDEPENDENT_TRAINER=0)
 endif()
 
 if(MSVC)
-    target_compile_options(NamToClo PRIVATE /W4 /permissive- /EHsc /utf-8)
+    target_compile_options(NamToClo PRIVATE /W4 /permissive- /EHsc /utf-8 /fp:precise)
     set_property(TARGET NamToClo PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     if(TARGET ntc_namcore)
-        target_compile_options(ntc_namcore PRIVATE /W3 /permissive- /EHsc /utf-8)
+        target_compile_options(ntc_namcore PRIVATE /W3 /permissive- /EHsc /utf-8 /fp:precise)
         set_property(TARGET ntc_namcore PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
 endif()
