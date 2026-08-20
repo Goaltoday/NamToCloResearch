@@ -2371,6 +2371,110 @@ bool writePhase4Imd(const fs::path&modelPath,const Model&clo,const fs::path&path
     for(const auto&c:cases){f<<c.db;for(double hz:probe){const double na=goertzelAmplitude(nam,c.start,c.count,hz,44100.0),ca=goertzelAmplitude(co,c.start,c.count,hz,44100.0);const double nd=db20(na),cd=db20(ca);f<<','<<nd<<','<<cd<<','<<(cd-nd);}f<<'\n';}return static_cast<bool>(f);
 }
 
+
+// -----------------------------------------------------------------------------
+// Experimental phase 4B: P/K fit using harmonic + THD-vs-level + IMD targets
+// -----------------------------------------------------------------------------
+// Starts from the accepted Phase-2 P/K CLO. A128, B1024, PRE and POST remain
+// byte-identical to Phase 2. The new objective adds the two behaviours that the
+// Phase-4 diagnostic showed were not captured by single-tone H2-H8 alone:
+//  (1) THD as a function of input level at 250 Hz
+//  (2) relative two-tone IMD products for 220+330 Hz.
+// All weights and search bounds below are experimental trainer choices.
+
+struct Phase4BMetrics{
+    double evenMaeDb=0.0,oddMaeDb=0.0,h1DriftDb=0.0,thdCurveMaeDb=0.0,imdMaeDb=0.0,score=0.0;
+};
+
+Phase4BMetrics evaluatePhase4BCandidate(const Model&candidate,
+                                         const std::vector<float>&harmInput,const std::vector<HarmonicCase>&harmCases,
+                                         const std::vector<HarmonicSet>&namH,const std::vector<HarmonicSet>&baseH,
+                                         const std::vector<float>&levelInput,const std::vector<LevelDiagCase>&levelCases,
+                                         const std::vector<HarmonicSet>&namLevelH,
+                                         const std::vector<float>&imdInput,const std::vector<ImdCase>&imdCases,
+                                         const std::vector<std::array<double,7>>&namImd){
+    Phase4BMetrics m;
+    std::vector<float>out;renderModel(candidate,harmInput,out,true);
+    constexpr std::array<int,4> evenH={2,4,6,8};
+    constexpr std::array<double,4> evenW={1.0,1.0,0.5,0.25};
+    constexpr std::array<int,3> oddH={3,5,7};
+    constexpr std::array<double,3> oddW={1.0,0.75,0.5};
+    double es=0.0,ew=0.0,os=0.0,ow=0.0,h1=0.0;
+    for(std::size_t i=0;i<harmCases.size();++i){
+        const auto ch=measureHarmonics(out,harmCases[i]);
+        h1+=std::fabs(ch.fundamentalDbfs-baseH[i].fundamentalDbfs);
+        for(std::size_t j=0;j<evenH.size();++j){const auto hi=static_cast<std::size_t>(evenH[j]-1);const double nd=ratioDb(namH[i].amp[hi],namH[i].amp[0]),cd=ratioDb(ch.amp[hi],ch.amp[0]);es+=evenW[j]*std::fabs(cd-nd);ew+=evenW[j];}
+        for(std::size_t j=0;j<oddH.size();++j){const auto hi=static_cast<std::size_t>(oddH[j]-1);const double nd=ratioDb(namH[i].amp[hi],namH[i].amp[0]),cd=ratioDb(ch.amp[hi],ch.amp[0]);os+=oddW[j]*std::fabs(cd-nd);ow+=oddW[j];}
+    }
+    m.evenMaeDb=ew>0.0?es/ew:0.0;m.oddMaeDb=ow>0.0?os/ow:0.0;m.h1DriftDb=harmCases.empty()?0.0:h1/static_cast<double>(harmCases.size());
+
+    std::vector<float>levelOut;renderModel(candidate,levelInput,levelOut,true);double thd=0.0;
+    for(std::size_t i=0;i<levelCases.size();++i){HarmonicCase hc{250.0f,levelCases[i].db,levelCases[i].start,levelCases[i].count};const auto ch=measureHarmonics(levelOut,hc);thd+=std::fabs(ch.thdDbc-namLevelH[i].thdDbc);}
+    m.thdCurveMaeDb=levelCases.empty()?0.0:thd/static_cast<double>(levelCases.size());
+
+    std::vector<float>imdOut;renderModel(candidate,imdInput,imdOut,true);
+    constexpr std::array<double,7> probe={110.0,220.0,330.0,440.0,550.0,660.0,770.0};
+    constexpr std::array<int,5> products={0,3,4,5,6}; // exclude the two fundamentals 220/330
+    double imd=0.0;std::size_t imdN=0;
+    for(std::size_t i=0;i<imdCases.size();++i){
+        std::array<double,7> ca{};for(std::size_t j=0;j<probe.size();++j)ca[j]=goertzelAmplitude(imdOut,imdCases[i].start,imdCases[i].count,probe[j],44100.0);
+        const double nref=std::sqrt(namImd[i][1]*namImd[i][1]+namImd[i][2]*namImd[i][2]);
+        const double cref=std::sqrt(ca[1]*ca[1]+ca[2]*ca[2]);
+        for(int idx:products){const auto j=static_cast<std::size_t>(idx);const double nd=ratioDb(namImd[i][j],nref),cd=ratioDb(ca[j],cref);imd+=std::fabs(cd-nd);++imdN;}
+    }
+    m.imdMaeDb=imdN?imd/static_cast<double>(imdN):0.0;
+    // Dynamic/IMD terms now dominate. Harmonic parity remains present but can no
+    // longer win by itself. These weights are experimental, not hardware facts.
+    m.score=0.25*m.evenMaeDb+0.25*m.oddMaeDb+1.00*m.thdCurveMaeDb+0.75*m.imdMaeDb+0.10*m.h1DriftDb;
+    return m;
+}
+
+bool optimizePkDynamicImdExperimental(const fs::path&modelPath,const fs::path&phase2Clo,const fs::path&outClo,
+                                      const fs::path&summaryPath,const fs::path&harmonicPath,
+                                      std::string&error,const StatusCallback&status){
+    Model base;if(!loadGp200ModelForAnalysis(phase2Clo,base,error))return false;
+
+    std::vector<HarmonicCase>harmCases;const auto harmInput=buildPkOptimizationMatrix(harmCases);
+    std::vector<float>namHOut;if(!renderNamTarget44100(modelPath,harmInput,namHOut,error,status))return false;
+    std::vector<float>baseHOut;renderModel(base,harmInput,baseHOut,true);
+    std::vector<HarmonicSet>namH,baseH;for(const auto&c:harmCases){namH.push_back(measureHarmonics(namHOut,c));baseH.push_back(measureHarmonics(baseHOut,c));}
+
+    std::vector<LevelDiagCase>levelCases;const auto levelInput=buildPhase4LevelCurve(levelCases);
+    std::vector<float>namLevel;if(!renderNamTarget44100(modelPath,levelInput,namLevel,error,status))return false;
+    std::vector<HarmonicSet>namLevelH;for(const auto&c:levelCases){HarmonicCase hc{250.0f,c.db,c.start,c.count};namLevelH.push_back(measureHarmonics(namLevel,hc));}
+
+    std::vector<ImdCase>imdCases;const auto imdInput=buildPhase4Imd(imdCases);
+    std::vector<float>namImdOut;if(!renderNamTarget44100(modelPath,imdInput,namImdOut,error,status))return false;
+    constexpr std::array<double,7> probe={110.0,220.0,330.0,440.0,550.0,660.0,770.0};
+    std::vector<std::array<double,7>>namImd;for(const auto&c:imdCases){std::array<double,7>a{};for(std::size_t j=0;j<probe.size();++j)a[j]=goertzelAmplitude(namImdOut,c.start,c.count,probe[j],44100.0);namImd.push_back(a);}
+
+    const auto baseMetrics=evaluatePhase4BCandidate(base,harmInput,harmCases,namH,baseH,levelInput,levelCases,namLevelH,imdInput,imdCases,namImd);
+    const std::array<double,4> p0={std::log(std::max(1.0e-9f,base.pk.pp)),std::log(std::max(1.0e-9f,base.pk.pn)),std::log(std::max(1.0e-9f,base.pk.kp)),std::log(std::max(1.0e-9f,base.pk.kn))};
+    std::array<double,4>bestQ=p0;Model bestModel=base;Phase4BMetrics best=baseMetrics;
+    constexpr double maxLog=0.6931471805599453; // 0.5x .. 2x around Phase 2
+    constexpr std::array<double,5>steps={0.22314355131420976,0.11332868530700327,0.058268908123975824,0.029558802241544398,0.014888612493750559};
+    const std::array<std::array<int,4>,6>axes={{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1},{1,-1,0,0},{0,0,1,-1}}};
+    std::ofstream log(summaryPath,std::ios::binary|std::ios::trunc);if(!log){error="Phase 4B: cannot create summary CSV.";return false;}
+    log<<"# Experimental Phase 4B P/K Dynamic + IMD fit\n# Frozen: Phase-2 A128/B1024/PRE/POST. Search only P+/P-/K+/K-.\n# Objective weights: 0.25 even + 0.25 odd + 1.00 THD curve + 0.75 IMD + 0.10 H1 drift. Experimental weights.\n# Constraints: odd <= Phase2+1 dB; H1 drift <=1.5 dB. P/K limited to 0.5x..2x Phase2.\n";
+    log<<"stage,trial,pp,pn,kp,kn,even_mae_db,odd_mae_db,h1_drift_db,thd_curve_mae_db,imd_mae_db,score,accepted\n"<<std::fixed<<std::setprecision(9);
+    auto row=[&](const char*stage,int trial,const Model&m,const Phase4BMetrics&v,bool a){log<<stage<<','<<trial<<','<<m.pk.pp<<','<<m.pk.pn<<','<<m.pk.kp<<','<<m.pk.kn<<','<<v.evenMaeDb<<','<<v.oddMaeDb<<','<<v.h1DriftDb<<','<<v.thdCurveMaeDb<<','<<v.imdMaeDb<<','<<v.score<<','<<(a?1:0)<<'\n';};
+    row("baseline",0,base,baseMetrics,true);int trial=0;
+    for(std::size_t si=0;si<steps.size();++si){bool improved=true;int rounds=0;while(improved&&rounds<3){improved=false;++rounds;auto roundBest=best;auto roundQ=bestQ;auto roundModel=bestModel;
+        for(const auto&axis:axes)for(int sign:{-1,1}){auto tq=bestQ;for(std::size_t j=0;j<4;++j)tq[j]=std::clamp(tq[j]+static_cast<double>(sign*axis[j])*steps[si],p0[j]-maxLog,p0[j]+maxLog);Model cand=base;cand.pk.pp=static_cast<float>(std::exp(tq[0]));cand.pk.pn=static_cast<float>(std::exp(tq[1]));cand.pk.kp=static_cast<float>(std::exp(tq[2]));cand.pk.kn=static_cast<float>(std::exp(tq[3]));const auto met=evaluatePhase4BCandidate(cand,harmInput,harmCases,namH,baseH,levelInput,levelCases,namLevelH,imdInput,imdCases,namImd);const bool constraints=met.oddMaeDb<=baseMetrics.oddMaeDb+1.0&&met.h1DriftDb<=1.5;const bool accept=constraints&&met.score+1.0e-9<roundBest.score;++trial;row(std::to_string(si).c_str(),trial,cand,met,accept);if(accept){roundBest=met;roundQ=tq;roundModel=cand;improved=true;}}
+        if(improved){best=roundBest;bestQ=roundQ;bestModel=roundModel;}}
+        std::wostringstream os;os<<std::fixed<<std::setprecision(3)<<L"Experimental phase 4B stage "<<(si+1)<<L"/"<<steps.size()<<L": THD "<<best.thdCurveMaeDb<<L" dB, IMD "<<best.imdMaeDb<<L" dB, even "<<best.evenMaeDb<<L" dB.";report(status,os.str());}
+    row("best",trial+1,bestModel,best,true);if(!log){error="Phase 4B: failed writing summary.";return false;}
+    if(!writeGp200PkVariant(phase2Clo,outClo,bestModel.pk,error))return false;
+    Model serialized;if(!loadGp200ModelForAnalysis(outClo,serialized,error))return false;
+    const auto near=[](float a,float b){const double da=std::fabs(static_cast<double>(a)-b),sc=std::max({1.0,std::fabs(static_cast<double>(a)),std::fabs(static_cast<double>(b))});return da<=1e-6*sc;};
+    if(!near(serialized.pk.pp,bestModel.pk.pp)||!near(serialized.pk.pn,bestModel.pk.pn)||!near(serialized.pk.kp,bestModel.pk.kp)||!near(serialized.pk.kn,bestModel.pk.kn)){error="Phase 4B: serialized P/K verification failed.";return false;}
+
+    std::vector<HarmonicCase>fullCases;const auto fullInput=buildHarmonicMatrix(fullCases);std::vector<float>fullNam;if(!renderNamTarget44100(modelPath,fullInput,fullNam,error,status))return false;std::vector<float>fullClo;renderModel(bestModel,fullInput,fullClo,true);
+    std::ofstream det(harmonicPath,std::ios::binary|std::ios::trunc);if(!det){error="Phase 4B: cannot create harmonic CSV.";return false;}det<<"# Experimental Phase 4B selected P/K harmonic validation\n# pp="<<bestModel.pk.pp<<" pn="<<bestModel.pk.pn<<" kp="<<bestModel.pk.kp<<" kn="<<bestModel.pk.kn<<"\nfrequency_hz,input_dbfs,nam_h1_dbfs,clo_h1_dbfs,h1_delta_db";for(int h=2;h<=8;++h)det<<",nam_h"<<h<<"_dbc,clo_h"<<h<<"_dbc,h"<<h<<"_delta_db";det<<",nam_even_dbc,clo_even_dbc,even_delta_db,nam_odd_dbc,clo_odd_dbc,odd_delta_db,nam_thd_dbc,clo_thd_dbc,thd_delta_db\n"<<std::fixed<<std::setprecision(6);
+    for(std::size_t i=0;i<fullCases.size();++i){const auto nh=measureHarmonics(fullNam,fullCases[i]),ch=measureHarmonics(fullClo,fullCases[i]);det<<fullCases[i].frequencyHz<<','<<fullCases[i].inputDbfs<<','<<nh.fundamentalDbfs<<','<<ch.fundamentalDbfs<<','<<(ch.fundamentalDbfs-nh.fundamentalDbfs);for(int h=2;h<=8;++h){const auto hi=static_cast<std::size_t>(h-1);const double nd=ratioDb(nh.amp[hi],nh.amp[0]),cd=ratioDb(ch.amp[hi],ch.amp[0]);det<<','<<nd<<','<<cd<<','<<(cd-nd);}det<<','<<nh.evenDbc<<','<<ch.evenDbc<<','<<(ch.evenDbc-nh.evenDbc)<<','<<nh.oddDbc<<','<<ch.oddDbc<<','<<(ch.oddDbc-nh.oddDbc)<<','<<nh.thdDbc<<','<<ch.thdDbc<<','<<(ch.thdDbc-nh.thdDbc)<<'\n';}
+    report(status,L"Experimental phase 4B CLO: "+outClo.filename().wstring());return static_cast<bool>(det);
+}
+
 bool findOptionalDi(const fs::path&inputNam,fs::path&di){
     const auto dir=inputNam.parent_path();const auto stem=inputNam.stem().wstring();
     const std::array<fs::path,4> c={dir/(stem+L"_DI.wav"),dir/(stem+L"_di.wav"),dir/L"DI.wav",dir/L"di.wav"};std::error_code ec;for(const auto&p:c)if(fs::exists(p,ec)&&!ec){di=p;return true;}return false;
@@ -2433,16 +2537,18 @@ ConversionResult convertNamToBothIndependent(const fs::path& inputNam,const fs::
         if(!runPhase4Diagnostic(inputNam,modelPath,phase3Start,outputDirectory,phase4Error,status))
             report(status,L"Experimental phase 4 diagnostic WARNING: "+std::wstring(phase4Error.begin(),phase4Error.end()));
     }
-    const fs::path phase3Clo=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE3B_DRIVE_GUARDED_A_PK_GP200_1024.clo");
-    const fs::path phase3Summary=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE3B_DRIVE_GUARDED_A_PK_SUMMARY.csv");
-    const fs::path phase3Detail=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE3B_DRIVE_GUARDED_A_PK_HARMONICS.csv");
-    std::string phase3Error;
-    if(optimizeAPkExperimental(modelPath,phase3Start,phase3Clo,phase3Summary,phase3Detail,phase3Error,status)){
-        r.gp2001024=phase3Clo;
-        report(status,L"Experimental phase 3B CLO: "+phase3Clo.filename().wstring());
-        report(status,L"Experimental phase 3B summary: "+phase3Summary.filename().wstring());
+    // Phase 4B deliberately starts again from Phase 2. Phase 3/3B are not run
+    // here because listening tests showed reduced perceived gain despite their
+    // harmonic-score improvements.
+    const fs::path phase4bClo=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE4B_PK_DYNAMIC_IMD_GP200_1024.clo");
+    const fs::path phase4bSummary=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE4B_PK_DYNAMIC_IMD_SUMMARY.csv");
+    const fs::path phase4bDetail=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE4B_PK_DYNAMIC_IMD_HARMONICS.csv");
+    std::string phase4bError;
+    if(optimizePkDynamicImdExperimental(modelPath,phase3Start,phase4bClo,phase4bSummary,phase4bDetail,phase4bError,status)){
+        r.gp2001024=phase4bClo;
+        report(status,L"Experimental phase 4B summary: "+phase4bSummary.filename().wstring());
     }else{
-        report(status,L"Experimental phase 3B WARNING: "+std::wstring(phase3Error.begin(),phase3Error.end())+L" Falling back to Phase 2/NATIVE15 result.");
+        report(status,L"Experimental phase 4B WARNING: "+std::wstring(phase4bError.begin(),phase4bError.end())+L" Falling back to Phase 2/NATIVE15 result.");
         r.gp2001024=phase3Start;
     }
     if(trainer.generateHarmonicReport){
