@@ -136,7 +136,7 @@ if(NTC_ENABLE_INDEPENDENT_TRAINER)
         "${_ntc_namcore_dir}/Dependencies/AudioDSPTools"
     )
     target_compile_definitions(ntc_namcore PRIVATE
-        WIN32_LEAN_AND_MEAN NOMINMAX NAM_ENABLE_A2_FAST
+        WIN32_LEAN_AND_MEAN NOMINMAX NAM_ENABLE_A2_FAST NAM_SAMPLE_FLOAT
     )
 
     target_sources(NamToClo PRIVATE
@@ -152,7 +152,7 @@ if(NTC_ENABLE_INDEPENDENT_TRAINER)
     endif()
     target_include_directories(NamToClo PRIVATE "${_ntc_r8brain_dir}")
     target_link_libraries(NamToClo PRIVATE ntc_namcore)
-    target_compile_definitions(NamToClo PRIVATE NTC_HAS_INDEPENDENT_TRAINER=1)
+    target_compile_definitions(NamToClo PRIVATE NTC_HAS_INDEPENDENT_TRAINER=1 NAM_SAMPLE_FLOAT)
 
     # Preserve license notices when distributing a statically linked build.
     if(EXISTS "${_ntc_namcore_dir}/LICENSE")

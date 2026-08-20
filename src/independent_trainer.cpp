@@ -36,16 +36,16 @@ constexpr std::size_t kFft = 2048;
 constexpr std::size_t kBins = kFft / 2 + 1;
 constexpr std::size_t kCloBytes = 0x2288;
 
-// GP-200.exe uses the MSVC "precise" double libm entry points for several
-// float helpers: the float operand is promoted to double, libm is evaluated,
-// then the result is rounded back to float. Keep those explicit boundaries.
-inline float preciseLog10F(float x){return static_cast<float>(std::log10(static_cast<double>(x)));}
-inline float preciseLogF(float x){return static_cast<float>(std::log(static_cast<double>(x)));}
-inline float preciseExpF(float x){return static_cast<float>(std::exp(static_cast<double>(x)));}
-inline float precisePowF(float a,float b){return static_cast<float>(std::pow(static_cast<double>(a),static_cast<double>(b)));}
-inline float preciseSinF(float x){return static_cast<float>(std::sin(static_cast<double>(x)));}
-inline float preciseCosF(float x){return static_cast<float>(std::cos(static_cast<double>(x)));}
-inline float preciseSqrtF(float x){return static_cast<float>(std::sqrt(static_cast<double>(x)));}
+// HTUSBTools.dll imports the single-precision CRT entry points for these
+// trainer operations (log10f/logf/expf/powf/sinf/cosf/sqrtf).  Keep the
+// arguments and return values in float instead of promoting through double.
+inline float preciseLog10F(float x){return ::log10f(x);}
+inline float preciseLogF(float x){return ::logf(x);}
+inline float preciseExpF(float x){return ::expf(x);}
+inline float precisePowF(float a,float b){return ::powf(a,b);}
+inline float preciseSinF(float x){return ::sinf(x);}
+inline float preciseCosF(float x){return ::cosf(x);}
+inline float preciseSqrtF(float x){return ::sqrtf(x);}
 inline float flipFloatSignBit(float x){
     std::uint32_t u{};std::memcpy(&u,&x,sizeof(u));u^=0x80000000u;std::memcpy(&x,&u,sizeof(u));return x;
 }
@@ -134,12 +134,8 @@ bool readPcm16Mono(const fs::path& path, std::vector<float>& x, std::uint32_t& s
 
 // The official GP-200.exe RTTI contains CDSPResampler24 together with the
 // pre-v4 templated r8brain type CDSPResampler<CDSPFracInterpolator<24,673>>.
-// The project pins r8brain version-3.7.  Do not use oneshot() here.  The DLL's
-// effective CDSPResampler24 parameters are ReqTransBand=2.0 and ReqAtten=180.15.
-// In r8brain 3.7 CDSPResampler24 exposes a 4-argument constructor and hardcodes
-// 180.15 dB when it delegates to CDSPResampler, so the correct call passes 2.0
-// as the fourth argument; a fifth attenuation argument does not exist.
-// The audited converter path constructs CDSPResampler24 with MaxInLen equal to the
+// The project pins r8brain version-3.7.  Do not use oneshot() here: the
+// audited converter path constructs CDSPResampler24 with MaxInLen equal to the
 // complete input length, calls process() on the whole double buffer once, then
 // feeds equal-size zero buffers until the requested output count is produced.
 // GP-200.exe 0x5a70a0.  The converter uses the same whole-buffer
@@ -159,26 +155,25 @@ std::vector<float> resampleR8Brain24(const std::vector<float>& in, double inRate
     if(targetCount==0) return out;
     std::vector<double> block(in.size());
     for(std::size_t i=0;i<in.size();++i) block[i]=static_cast<double>(in[i]);
-    r8b::CDSPResampler24 rs(static_cast<double>(srcF), static_cast<double>(dstF), inCount, 2.0);
-    // HTUSBTools.dll 0x180008ef4..0x180009018.  The wrapper keeps the
-    // previous returned count as the DESTINATION start index.  When the next
-    // process() call returns currentCount it copies exactly
-    // currentCount-previousCount samples, but the SOURCE pointer starts again
-    // at produced[0].  The complete input block is zeroed after the first pass.
-    // This is intentionally not a conventional append(count) loop.
-    std::size_t previousCount=0; bool first=true;
-    while(previousCount<out.size()){
+    // r8brain 3.7 CDSPResampler24's 4-argument source constructor has
+    // ReqTransBand=2.0 by default and internally uses the 180.15 dB design
+    // used by the converter.  HTUSBTools' wrapper treats process()'s returned
+    // count as a cumulative count: it copies current-previous samples from the
+    // beginning of the returned buffer to destination[previous].
+    r8b::CDSPResampler24 rs(static_cast<double>(srcF),static_cast<double>(dstF),inCount,2.0);
+    std::size_t previous=0; bool first=true;
+    while(previous<out.size()){
         if(!first) std::fill(block.begin(),block.end(),0.0);
         first=false;
         double* produced=nullptr;
         const int count=rs.process(block.data(),inCount,produced);
         if(count<0 || produced==nullptr) break;
-        const std::size_t currentCount=std::min<std::size_t>(static_cast<std::size_t>(count),out.size());
-        if(currentCount>previousCount){
-            const std::size_t n=currentCount-previousCount;
-            for(std::size_t i=0;i<n;++i) out[previousCount+i]=static_cast<float>(produced[i]);
+        const std::size_t current=static_cast<std::size_t>(count);
+        if(current>previous){
+            const std::size_t take=std::min<std::size_t>(current-previous,out.size()-previous);
+            for(std::size_t i=0;i<take;++i) out[previous+i]=static_cast<float>(produced[i]);
         }
-        previousCount=currentCount;
+        previous=current;
     }
     rs.clear();
     return out;
@@ -284,7 +279,7 @@ bool renderNam(const fs::path& path,const std::vector<float>& stimulus44100,int 
         renderedInput.resize(n70,0.0f);
         std::vector<float> renderedTarget(n70,0.0f);
 
-        (void)blockSize; // independent/offical path is fixed at 1024 samples.
+        (void)blockSize; // official NAM Reset max block is fixed at 1024 samples.
         constexpr int kOfficialNamBlock=1024;
         dsp->Reset(rate,kOfficialNamBlock);
         std::vector<NAM_SAMPLE> ib(kOfficialNamBlock,NAM_SAMPLE{}),ob(kOfficialNamBlock,NAM_SAMPLE{});
@@ -294,11 +289,11 @@ bool renderNam(const fs::path& path,const std::vector<float>& stimulus44100,int 
         for(std::size_t pos=0;pos<n70;pos+=kOfficialNamBlock){
             const int n=static_cast<int>(std::min<std::size_t>(kOfficialNamBlock,n70-pos));
             for(int i=0;i<n;++i) ib[static_cast<std::size_t>(i)]=static_cast<NAM_SAMPLE>(renderedInput[pos+static_cast<std::size_t>(i)]);
-            for(int i=n;i<kOfficialNamBlock;++i) ib[static_cast<std::size_t>(i)]=NAM_SAMPLE{};
-            // GP-200.exe always invokes the NAM virtual process routine with
-            // 0x400, including the final partial source block.  It copies only
-            // the valid n output samples back afterwards.
-            dsp->process(ip,op,kOfficialNamBlock);
+            // HTUSBTools/GP-200 wrapper resets the NAM with max block 0x400,
+            // but each process call receives min(1024, remaining).  Therefore
+            // the final partial block is processed at its true length; it is
+            // not padded and processed as a full 1024-frame block.
+            dsp->process(ip,op,n);
             for(int i=0;i<n;++i){
                 const float y=static_cast<float>(ob[static_cast<std::size_t>(i)]);
                 renderedTarget[pos+static_cast<std::size_t>(i)]=y*targetScaleF;
@@ -836,10 +831,10 @@ std::vector<float> hammingF(std::size_t n){
     return w;
 }
 
-// HTUSBTools.dll 0x18009ad86..0x18009aee0 uses a different Hamming
-// arithmetic boundary specifically in the final Block-B routine.  Phase and
-// cos() are float, but cos is promoted to double and the 0.54/0.46 multiply
-// and subtract are performed in double before converting the weight to float.
+// The final Block-B routine has a different arithmetic boundary for its
+// Hamming weights: phase/cosine remain float, then cos is promoted and the
+// 0.54/0.46 multiply/subtract is performed in double before the final float
+// conversion (HTUSBTools.dll 0x18009ad86..0x18009aee0).
 std::vector<float> hammingFinalBOfficial(std::size_t n){
     std::vector<float>w(n,1.0f);if(n<=1)return w;
     const float twoPi=6.2831854820251465f;
@@ -847,21 +842,16 @@ std::vector<float> hammingFinalBOfficial(std::size_t n){
     for(std::size_t i=0;i<n;++i){
         const float ph=(static_cast<float>(i)*twoPi)/denom;
         const float c=preciseCosF(ph);
-        const double wd=0.54-static_cast<double>(c)*0.46;
-        w[i]=static_cast<float>(wd);
+        w[i]=static_cast<float>(0.54-static_cast<double>(c)*0.46);
     }
     return w;
 }
 
-// Scalar add order used by the final-B DLL loops: groups of four are still
-// accumulated into the same scalar register in sample order, followed by the
-// remainder.  Keeping this helper separate avoids compiler/vector-library
-// reductions changing the rounding boundary.
 float sumFloatFinalBOfficial(const std::vector<float>&x){
-    float s=0.0f;std::size_t i=0;
-    for(;i+4<=x.size();i+=4){s+=x[i];s+=x[i+1];s+=x[i+2];s+=x[i+3];}
-    for(;i<x.size();++i)s+=x[i];
-    return s;
+    float sum=0.0f;std::size_t i=0;
+    for(;i+4<=x.size();i+=4){sum+=x[i];sum+=x[i+1];sum+=x[i+2];sum+=x[i+3];}
+    for(;i<x.size();++i)sum+=x[i];
+    return sum;
 }
 
 void energiesFinalBOfficial(const std::vector<float>&target,const std::vector<float>&model,float&et,float&em){
@@ -925,7 +915,7 @@ std::vector<float> ratioSpectrumF(const std::vector<float>& model,const std::vec
     // 0x5538xx: float Fs * 0.125f -> double + 0.5 -> cvttsd2si.
     const int Li=static_cast<int>(static_cast<double>(fs*0.125f)+0.5);
     const std::size_t L=static_cast<std::size_t>(std::max(1,Li));
-    const std::size_t hop=std::max<std::size_t>(1,L/2);
+    const std::size_t hop=std::max<std::size_t>(1,L-L/2);
     const auto wv=hammingF(L);
     const std::size_t total=std::min(model.size(),target.size());
     if(total<L)return std::vector<float>(kBins,1.0f);
@@ -1384,33 +1374,113 @@ FactorState initialFactorState(const Model&m,const std::vector<float>&input,cons
 
 struct Phase{double t0,t1;int iterations;const wchar_t*name;};
 void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,const std::vector<float>&target,double sr,const Phase&ph,int&globalIter,const StatusCallback&status){
-    const auto freq=fftFrequencyGridF(sr),weights=frequencyWeightsF(sr);const std::size_t b=officialTimeIndex(sr,static_cast<float>(ph.t0)),e=officialTimeIndex(sr,static_cast<float>(ph.t1));const auto phaseIn=sliceSignal(input,b,e),phaseTarget=sliceSignal(target,b,e);
-    float step=1.0f,bestLoss=100.0f;Model bestM=m;FactorState bestState=state;std::vector<float>corr(kBins,1.0f),bestCorr=corr;
+    const auto freq=fftFrequencyGridF(sr),weights=frequencyWeightsF(sr);
+    const std::size_t b=officialTimeIndex(sr,static_cast<float>(ph.t0)),e=officialTimeIndex(sr,static_cast<float>(ph.t1));
+    const auto phaseIn=sliceSignal(input,b,e),phaseTarget=sliceSignal(target,b,e);
+
+    // HTUSBTools.dll 0x18009b890.  S0/corr starts at all-ones for each phase.
+    // state.a is the persistent A magnitude state and state.b is the persistent
+    // accumulated B factor (initialized by 0x18009cd30 to sweepSpec).
+    float step=1.0f,bestLoss=100.0f;
+    Model bestM=m;
+    FactorState bestState=state;
+    std::vector<float>corr(kBins,1.0f),bestCorr=corr;
+
     for(int it=0;it<ph.iterations;++it){
-        ++globalIter;report(status,L"Independent: A/B fit "+std::to_wstring(globalIter)+L"/10 ("+ph.name+L")...");
-        // 0x5574e0: exponent = frequencyWeight[k] * step.  The weight vector
-        // is prepared by the caller as 1.0 above ~80 Hz-index onset and a
-        // 1.0 -> 0.5 ramp through the remainder of the spectrum.
-        std::vector<float>stepped(kBins);for(std::size_t k=0;k<kBins;++k){const float base=corr[k];const float exponent=weights[k]*step;stepped[k]=std::clamp(precisePowF(base,exponent),0.2f,5.0f);}
-        // 0x55751f: step is decayed immediately after pow/clamp and BEFORE
-        // the two conditioning passes. A rollback may subsequently halve
-        // this already-decayed value.
+        ++globalIter;
+        report(status,L"Independent: A/B fit "+std::to_wstring(globalIter)+L"/10 ("+ph.name+L")...");
+
+        // 0x18009bae0..0x18009bb1c: S0 = clamp(powf(S0,weight*step),0.2,5).
+        std::vector<float>stepped(kBins);
+        for(std::size_t k=0;k<kBins;++k){
+            const float exponent=weights[k]*step;
+            stepped[k]=std::clamp(precisePowF(corr[k],exponent),0.2f,5.0f);
+        }
+        // 0x18009bb3e: decay before conditioning; rollback may halve this
+        // already-decayed value later.
         step*=0.8999999761581421f;
-        // Confirmed at 0x557532..0x557563: the correction traverses 0x554f00
-        // twice, back-to-back, before either factor state is updated.
+
+        // 0x18009bb59 / 0x18009bb78: two consecutive conditionMagnitude passes.
         const auto conditioned1=conditionMagnitudeF(freq,stepped,kBins);
         const auto conditioned2=conditionMagnitudeF(conditioned1.freq,conditioned1.mag,kBins);
         const auto& conditioned=conditioned2.mag;
-        FactorState trial=state;for(std::size_t k=0;k<kBins;++k){trial.b[k]*=conditioned[k];trial.a[k]/=conditioned[k];}lowSmoothASequentialF(trial.a,sr);
-        Model candidate=m;const auto amag=conditionMagnitudeF(freq,trial.a,kA);candidate.A=minimumPhaseF(amag.mag,kA);
-        std::vector<float>pre;renderModel(candidate,phaseIn,pre,false);auto fresh=ratioSpectrumF(pre,phaseTarget,sr);std::vector<float>rb(kBins);for(std::size_t k=0;k<kBins;++k){const double num=static_cast<double>(fresh[k])*1000000.0;const double den=static_cast<double>(trial.b[k])*1000000.0+kEps;rb[k]=static_cast<float>(num/den);}
-        auto bmag=conditionMagnitudeF(freq,rb,kBins);candidate.B=minimumPhaseF(bmag.mag,kB);
-        std::vector<float>final;renderModel(candidate,phaseIn,final,true);auto residual=ratioSpectrumF(final,phaseTarget,sr);const float loss=lossFromRatioF(residual,sr);
-        if(loss<bestLoss){bestLoss=loss;bestM=candidate;bestState=trial;bestCorr=residual;m=candidate;state=trial;corr=residual;}
-        else if(loss>1.2f*bestLoss){m=bestM;state=bestState;corr=bestCorr;step*=0.5f;}
-        else{m=candidate;state=trial;corr=residual;}
+
+        // 0x18009bbe0..0x18009be50:
+        //   accumulated Bfactor *= conditioned
+        //   Astate              /= conditioned
+        FactorState trial=state;
+        for(std::size_t k=0;k<kBins;++k){
+            trial.b[k]*=conditioned[k];
+            trial.a[k]/=conditioned[k];
+        }
+        lowSmoothASequentialF(trial.a,sr);
+
+        // A state -> condition to A length -> minimum phase -> physical FIR A.
+        Model candidate=m;
+        const auto amag=conditionMagnitudeF(freq,trial.a,kA);
+        candidate.A=minimumPhaseF(amag.mag,kA);
+
+        // Render A only and estimate the still-required transfer (fresh/S5).
+        std::vector<float>pre;
+        renderModel(candidate,phaseIn,pre,false);
+        const auto fresh=ratioSpectrumF(pre,phaseTarget,sr);
+
+        // 0x18009c773..0x18009c996: S2 = fresh / accumulated Bfactor.
+        std::vector<float>rb(kBins);
+        for(std::size_t k=0;k<kBins;++k){
+            const double num=static_cast<double>(fresh[k])*1000000.0;
+            const double den=static_cast<double>(trial.b[k])*1000000.0+kEps;
+            rb[k]=static_cast<float>(num/den);
+        }
+
+        // 0x18009c9a5..0x18009c9bd: conditioned(fresh/Bfactor) becomes S0,
+        // i.e. the correction curve carried into the NEXT iteration.
+        const auto nextConditioned=conditionMagnitudeF(freq,rb,kBins);
+        const std::vector<float>nextCorr=nextConditioned.mag;
+
+        // Critical distinction closed from the complete register trace:
+        // 0x18009c9c2..0x18009c9dc passes rdi=S5 (the RAW fresh estimator)
+        // directly to minimumPhase.  The conditioned rb/S0 is NOT the current
+        // B FIR; it is only the next iteration's correction curve.
+        candidate.B=minimumPhaseF(fresh,kB);
+
+        // Full A+nonlinearity+B render.  The second estimator is used only for
+        // the loss calculation; its residual is not fed back as S0.
+        std::vector<float>final;
+        renderModel(candidate,phaseIn,final,true);
+        const auto residual=ratioSpectrumF(final,phaseTarget,sr);
+        const float loss=lossFromRatioF(residual,sr);
+
+        if(loss<bestLoss){
+            // 0x18009caef..0x18009cb74 snapshots S0, FIR A/B, Astate and
+            // Bfactor.  Since the live DLL buffers have already been updated,
+            // keep the corresponding candidate/trial snapshots here.
+            bestLoss=loss;
+            bestM=candidate;
+            bestState=trial;
+            bestCorr=nextCorr;
+            m=candidate;
+            state=trial;
+            corr=nextCorr;
+        }else if(loss>1.2f*bestLoss){
+            // 0x18009cb7e..0x18009cc24: restore best S0/FIR A/FIR B/Astate/
+            // Bfactor and halve the already-decayed step.
+            m=bestM;
+            state=bestState;
+            corr=bestCorr;
+            step*=0.5f;
+        }else{
+            // Worse but within 1.2x: retain the live state and continue with
+            // the newly conditioned fresh/Bfactor correction.
+            m=candidate;
+            state=trial;
+            corr=nextCorr;
+        }
     }
-    m=bestM;state=bestState;
+
+    // 0x18009cca1..0x18009ccff: every phase exits on its best snapshot.
+    m=bestM;
+    state=bestState;
 }
 
 void fitAB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status){
@@ -1428,11 +1498,8 @@ std::vector<float> finalTailCorrection(const std::vector<float>&model,const std:
     // 0x553f90: fold only complete L-sample blocks. Any remainder is ignored.
     const std::size_t blocks=end/L;
     for(std::size_t b=0;b<blocks;++b)for(std::size_t i=0;i<L;++i){const std::size_t n=b*L+i;xm[i]+=model[n];yt[i]+=target[n];}
-    // 0x18009aaa..0x18009ad02: each folded vector is mean-removed with
-    // float accumulation.  0x18009ad86..0x18009aee0 then applies the
-    // final-B-specific Hamming arithmetic (double 0.54/0.46 boundary).
-    float mm=sumFloatFinalBOfficial(xm)/static_cast<float>(L);
-    float tm=sumFloatFinalBOfficial(yt)/static_cast<float>(L);
+    const float mm=sumFloatFinalBOfficial(xm)/static_cast<float>(L);
+    const float tm=sumFloatFinalBOfficial(yt)/static_cast<float>(L);
     const auto win=hammingFinalBOfficial(L);
     for(std::size_t i=0;i<L;++i){xm[i]=(xm[i]-mm)*win[i];yt[i]=(yt[i]-tm)*win[i];}
     const std::size_t posN=L/2+1;std::vector<float>freq(posN),modelMag(posN),targetMag(posN);
@@ -1461,8 +1528,6 @@ std::vector<float> finalTailCorrection(const std::vector<float>&model,const std:
     const auto ct=conditionMagnitudeF(freq,targetMag,posN);
     const auto cm=conditionMagnitudeF(freq,modelMag,posN);
     std::vector<float>ratio(posN,1.0f);for(std::size_t k=0;k<posN;++k){const double num=static_cast<double>(ct.mag[k])*1000000.0;const double den=static_cast<double>(cm.mag[k])*1000000.0+kEps;ratio[k]=std::clamp(static_cast<float>(num/den),0.1f,10.0f);}
-    // 0x18009b561..0x18009b575 converts posN to double, multiplies by
-    // the routine's double 0.1 and truncates to int.
     const std::size_t smoothN=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<int>(static_cast<double>(posN)*0.1)));
     ratio=gaussianSmoothExactF(ratio,smoothN);for(auto&v:ratio)v=std::clamp(v,0.1f,10.0f);
     const auto final=conditionMagnitudeF(freq,ratio,256);return final.mag;
@@ -1473,26 +1538,22 @@ void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&tar
     const std::size_t b=officialTimeIndex(sr,50.0f),e=officialTimeIndex(sr,70.0f);
     const auto tailIn=sliceSignal(input,b,e),tailTarget=sliceSignal(target,b,e);
 
-    // HTUSBTools.dll 0x18009a673..0x18009a9ff computes PRE -> A -> NL4x ->
-    // POST once and keeps that pre-B signal alive.  The original B is then
-    // rendered from that buffer.  After 0x180096c20 changes B, 0x18009b62b
-    // runs only FIR B again over the SAME preserved pre-B signal for the
-    // energy normalization; the upstream nonlinear path is not rerun.
+    // 0x18009a673..0x18009a9ff: compute PRE -> A -> NL4x -> POST once and
+    // preserve that pre-B signal.  After B is corrected, the DLL reruns only
+    // FIR B over this same preserved signal for the energy normalization.
     std::vector<float>preB;
     renderModel(m,tailIn,preB,false);
     std::vector<float>pred;
-    { FirPlan bp(m.B); bp.run(preB,pred); }
+    {FirPlan bp(m.B);bp.run(preB,pred);}
 
     auto corrMag=finalTailCorrection(pred,tailTarget,sr);
     auto corr=minimumPhaseF(corrMag,256);
     m.B=convolveTruncate(m.B,corr,kB);
 
-    // 0x180096e02..0x180096f30 removes the corrected B mean in float.
     const float mean=sumFloatFinalBOfficial(m.B)/static_cast<float>(m.B.size());
     for(auto&v:m.B)v-=mean;
 
-    // Literal 0x18009b62b path: corrected B only, fed by preserved preB.
-    { FirPlan bp(m.B); bp.run(preB,pred); }
+    {FirPlan bp(m.B);bp.run(preB,pred);}
     float et=0.0f,ep=0.0f;
     energiesFinalBOfficial(tailTarget,pred,et,ep);
     if(ep>1.0e-30f){
@@ -1523,24 +1584,22 @@ std::vector<float> resampleFirOfficial(const std::vector<float>& h,double sr,std
     const int blockLen=static_cast<int>(h.size());
     std::vector<double> block(h.size());
     for(std::size_t i=0;i<h.size();++i)block[i]=static_cast<double>(h[i]);
-    r8b::CDSPResampler24 rs(static_cast<double>(srcF), static_cast<double>(dstF), blockLen, 2.0);
+    r8b::CDSPResampler24 rs(static_cast<double>(srcF),static_cast<double>(dstF),blockLen,2.0);
 
-    std::size_t previousCount=0;
+    std::size_t previous=0;
     bool first=true;
-    while(previousCount<wanted){
+    while(previous<wanted){
         if(!first)std::fill(block.begin(),block.end(),0.0);
         first=false;
         double* produced=nullptr;
         const int count=rs.process(block.data(),blockLen,produced);
         if(count<0||produced==nullptr)break;
-        const std::size_t currentCount=std::min<std::size_t>(static_cast<std::size_t>(count),wanted);
-        // HTUSBTools.dll 0x180008fb1..0x18000900b: destination starts at
-        // previousCount, while the source offset is reset to produced[0].
-        if(currentCount>previousCount){
-            const std::size_t n=currentCount-previousCount;
-            for(std::size_t i=0;i<n;++i)out[previousCount+i]=static_cast<float>(produced[i]);
+        const std::size_t current=static_cast<std::size_t>(count);
+        if(current>previous){
+            const std::size_t take=std::min<std::size_t>(current-previous,wanted-previous);
+            for(std::size_t i=0;i<take;++i)out[previous+i]=static_cast<float>(produced[i]);
         }
-        previousCount=currentCount;
+        previous=current;
     }
     rs.clear();
     return out;
