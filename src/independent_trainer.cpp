@@ -2061,18 +2061,20 @@ bool optimizePkExperimental(const fs::path&modelPath,const fs::path&baselineClo,
 
 
 // -----------------------------------------------------------------------------
-// Experimental phase 3: joint A128 spectral-shape + P/K optimization
+// Experimental phase 3B: drive-guarded joint A128 spectral-shape + P/K search
 // -----------------------------------------------------------------------------
-// Phase 2 proved that P/K asymmetry can recover a large part of the NAM's even
-// harmonic structure. Phase 3 keeps B1024/PRE/POST frozen and adds a low-
-// dimensional, hardware-safe search over A128. A is not edited tap-by-tap:
-// eight log-frequency control gains shape the magnitude of the Phase-2 A, then
-// the normal 128-tap minimum-phase reconstruction produces a valid GP-200 A.
-// P/K is optimized in the same loop so frequency-dependent drive and waveshaper
-// asymmetry can cooperate. Every candidate is still exactly A128+P/K+B1024.
+// Phase 3 proved that A can improve the harmonic match, but listening tests
+// exposed an unwanted reduction of effective gain/distortion because the search
+// could lower A broadly before the waveshaper. Phase 3B therefore restarts from
+// the Phase-2 P/K model and keeps the *actual 4x pre-waveshaper RMS drive* within
+// +/-0.5 dB of Phase 2. It also adds an absolute-harmonic term (H2..H8 in dBFS)
+// after one fixed output-convention trim derived from the Phase-2 baseline.
+// B1024, PRE and POST remain frozen. Every candidate is still a normal GP-200
+// A128/P/K/B1024 model.
 
 struct Phase3Metrics{
-    double evenMaeDb=0.0,oddMaeDb=0.0,h1DriftDb=0.0,score=0.0,areg=0.0;
+    double evenMaeDb=0.0,oddMaeDb=0.0,h1DriftDb=0.0,absoluteHarmonicMaeDb=0.0;
+    double driveDeltaDb=0.0,score=0.0,areg=0.0;
 };
 
 std::vector<float> aPositiveMagnitude128(const std::vector<float>&a){
@@ -2112,17 +2114,39 @@ std::vector<float> makePhase3A(const std::vector<float>&baseMag,const std::array
     return minimumPhaseF(m,128);
 }
 
+// RMS of the four oversampled samples immediately before the P/K waveshaper.
+// This is the quantity that determines nonlinear excitation, rather than the
+// average dB of the eight A controls.
+double preWaveshaperRms(const Model&m,const std::vector<float>&in){
+    if(in.empty())return 0.0;
+    Biquad preBq=m.pre;
+    std::vector<float>preIn(in.size());
+    for(std::size_t i=0;i<in.size();++i)preIn[i]=preBq.p(in[i]);
+    FirPlan ap(m.A);std::vector<float>a;ap.run(preIn,a);
+    Poly u1({.045728147029876709f,.3325011134147644f,.66320204734802246f,.93385583162307739f},{.16808754205703735f,.50448572635650635f,.80378085374832153f});
+    Poly u2({.054230779409408569f,.39879697561264038f,.86291784048080444f},{.19969958066940308f,.62109684944152832f});
+    long double sum=0.0L;std::uint64_t n=0;
+    for(float v:a){
+        float e,o,q0,q1;u1.up(v,e,o);u2.up(e,q0,q1);
+        sum+=static_cast<long double>(q0)*q0+static_cast<long double>(q1)*q1;n+=2;
+        u2.up(o,q0,q1);sum+=static_cast<long double>(q0)*q0+static_cast<long double>(q1)*q1;n+=2;
+    }
+    return n?std::sqrt(static_cast<double>(sum/static_cast<long double>(n))):0.0;
+}
+
 Phase3Metrics evaluatePhase3Candidate(const Model&candidate,const std::vector<float>&testInput,
                                       const std::vector<HarmonicCase>&cases,
                                       const std::vector<HarmonicSet>&namH,
                                       const std::vector<HarmonicSet>&referenceH,
-                                      const std::array<double,8>&gainDb){
+                                      const std::array<double,8>&gainDb,
+                                      double referenceDriveRms,double fixedOutputTrimDb){
     std::vector<float>out;renderModel(candidate,testInput,out,true);
-    Phase3Metrics m;double evenSum=0.0,evenW=0.0,oddSum=0.0,oddW=0.0,h1=0.0;
+    Phase3Metrics m;double evenSum=0.0,evenW=0.0,oddSum=0.0,oddW=0.0,h1=0.0,absHarm=0.0,absW=0.0;
     constexpr std::array<double,4> evenWeight={1.0,1.0,0.5,0.25};
     constexpr std::array<int,4> evenH={2,4,6,8};
     constexpr std::array<double,3> oddWeight={1.0,0.75,0.5};
     constexpr std::array<int,3> oddH={3,5,7};
+    constexpr std::array<double,7> absWeight={1.0,1.0,0.75,0.75,0.5,0.5,0.35};
     for(std::size_t i=0;i<cases.size();++i){
         const auto ch=measureHarmonics(out,cases[i]);
         h1+=std::fabs(ch.fundamentalDbfs-referenceH[i].fundamentalDbfs);
@@ -2138,20 +2162,32 @@ Phase3Metrics evaluatePhase3Candidate(const Model&candidate,const std::vector<fl
             const double cd=ratioDb(ch.amp[hi],ch.amp[0]);
             oddSum+=oddWeight[j]*std::fabs(cd-nd);oddW+=oddWeight[j];
         }
+        // Absolute H2..H8 level after one fixed Phase-2-derived output trim.
+        // The trim is not re-fitted per candidate, so lowering the whole model
+        // cannot improve this term for free.
+        for(std::size_t hi=1;hi<8;++hi){
+            const double nd=db20(namH[i].amp[hi]);
+            const double cd=db20(ch.amp[hi])+fixedOutputTrimDb;
+            absHarm+=absWeight[hi-1]*std::min(30.0,std::fabs(cd-nd));absW+=absWeight[hi-1];
+        }
     }
     m.evenMaeDb=evenW>0.0?evenSum/evenW:0.0;
     m.oddMaeDb=oddW>0.0?oddSum/oddW:0.0;
     m.h1DriftDb=cases.empty()?0.0:h1/static_cast<double>(cases.size());
+    m.absoluteHarmonicMaeDb=absW>0.0?absHarm/absW:0.0;
+    const double drive=preWaveshaperRms(candidate,testInput);
+    m.driveDeltaDb=ratioDb(std::max(drive,1.0e-15),std::max(referenceDriveRms,1.0e-15));
     double e=0.0;for(double v:gainDb)e+=v*v;m.areg=std::sqrt(e/static_cast<double>(gainDb.size()));
-    // A regularization is deliberately weak: it only breaks near-ties and
-    // discourages gratuitous large spectral reshaping. Odd/H1 are hard-limited.
-    m.score=m.evenMaeDb+0.50*m.oddMaeDb+0.25*m.h1DriftDb+0.05*m.areg;
+    // Relative harmonic structure remains the primary target. The absolute term
+    // and drive term prevent the broad-gain reduction heard in Phase 3.
+    m.score=m.evenMaeDb+0.50*m.oddMaeDb+0.20*m.absoluteHarmonicMaeDb+0.25*m.h1DriftDb
+           +0.25*std::fabs(m.driveDeltaDb)+0.05*m.areg;
     return m;
 }
 
 bool writeGp200APkVariant(const fs::path&sourcePath,const fs::path&outPath,const Model&m,std::string&error){
     std::vector<std::uint8_t>d;if(!readFileBytes(sourcePath,d,error))return false;
-    if(d.size()<0x1288||std::memcmp(d.data(),"VTSI",4)!=0||m.A.size()!=128){error="Phase 3: invalid GP-200 source CLO or A128.";return false;}
+    if(d.size()<0x1288||std::memcmp(d.data(),"VTSI",4)!=0||m.A.size()!=128){error="Phase 3B: invalid GP-200 source CLO or A128.";return false;}
     putFloat(d,0x68,m.pk.pp);putFloat(d,0x6c,m.pk.pn);putFloat(d,0x70,m.pk.kp);putFloat(d,0x74,m.pk.kn);
     for(std::size_t i=0;i<128;++i)putFloat(d,0x88+4*i,m.A[i]);
     const auto crc=crc16Official(d.data()+0x0c,d.size()-0x0c);d[8]=static_cast<std::uint8_t>(crc);d[9]=static_cast<std::uint8_t>(crc>>8);
@@ -2167,28 +2203,37 @@ bool optimizeAPkExperimental(const fs::path&modelPath,const fs::path&phase2Clo,c
     std::vector<float>namOut;if(!renderNamTarget44100(modelPath,testInput,namOut,error,status))return false;
     std::vector<float>baseOut;renderModel(base,testInput,baseOut,true);
     std::vector<HarmonicSet>namH,baseH;namH.reserve(cases.size());baseH.reserve(cases.size());
-    for(const auto&c:cases){namH.push_back(measureHarmonics(namOut,c));baseH.push_back(measureHarmonics(baseOut,c));}
-    std::array<double,8> gains{};
-    const auto baseMetrics=evaluatePhase3Candidate(base,testInput,cases,namH,baseH,gains);
+    std::vector<double>outputTrimSamples;
+    for(const auto&c:cases){
+        const auto nh=measureHarmonics(namOut,c),bh=measureHarmonics(baseOut,c);
+        namH.push_back(nh);baseH.push_back(bh);outputTrimSamples.push_back(nh.fundamentalDbfs-bh.fundamentalDbfs);
+    }
+    const double fixedOutputTrimDb=medianValue(outputTrimSamples);
+    const double referenceDriveRms=preWaveshaperRms(base,testInput);
+    if(!(referenceDriveRms>0.0)){error="Phase 3B: invalid Phase-2 pre-waveshaper RMS.";return false;}
+    std::array<double,8>gains{};
+    const auto baseMetrics=evaluatePhase3Candidate(base,testInput,cases,namH,baseH,gains,referenceDriveRms,fixedOutputTrimDb);
     Model bestModel=base;Phase3Metrics best=baseMetrics;std::array<double,8>bestG=gains;
     std::array<double,4> bestPk={std::log(std::max(1.0e-9f,base.pk.pp)),std::log(std::max(1.0e-9f,base.pk.pn)),
                                  std::log(std::max(1.0e-9f,base.pk.kp)),std::log(std::max(1.0e-9f,base.pk.kn))};
     const std::array<double,4> pk0=bestPk;
-    constexpr double pkRange=0.6931471805599453; // Phase-3 may move each Phase-2 P/K by 0.5x..2x.
+    constexpr double pkRange=0.6931471805599453; // 0.5x..2x relative to Phase 2.
     constexpr std::array<double,3> aStepsDb={1.5,0.75,0.375};
     constexpr std::array<double,3> pkSteps={0.11332868530700327,0.058268908123975824,0.029558802241544398};
     const std::array<std::array<int,4>,6> pkAxes={{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1},{1,-1,0,0},{0,0,1,-1}}};
     constexpr double maxAGainDb=6.0;
-    std::ofstream log(summaryPath,std::ios::binary|std::ios::trunc);if(!log){error="Cannot create phase 3 A/P/K summary: "+pathToUtf8(summaryPath);return false;}
-    log<<"# Experimental Phase 3 joint A128 + P/K optimization\n";
-    log<<"# Frozen: B1024, PRE, POST. A is an 8-band minimum-phase magnitude reshape of Phase-2 A.\n";
-    log<<"# Constraints: odd MAE <= Phase2+0.75 dB, H1 drift <= 1.5 dB, each A control <= +/-6 dB.\n";
-    log<<"stage,type,index,sign,pp,pn,kp,kn,a80,a160,a320,a640,a1250,a2500,a5000,a10000,even_mae_db,odd_mae_db,h1_drift_db,a_rms_db,score,accepted\n";
+    constexpr double maxDriveDeltaDb=0.5; // Experimental guard derived from listening feedback.
+    std::ofstream log(summaryPath,std::ios::binary|std::ios::trunc);if(!log){error="Cannot create phase 3B A/P/K summary: "+pathToUtf8(summaryPath);return false;}
+    log<<"# Experimental Phase 3B drive-guarded A128 + P/K optimization\n";
+    log<<"# Restart baseline: Phase 2. Frozen: B1024, PRE, POST.\n";
+    log<<"# Hard constraints: odd MAE <= Phase2+0.75 dB, H1 drift <=1.5 dB, |pre-waveshaper drive delta| <=0.5 dB.\n";
+    log<<"# Absolute H2..H8 term uses fixed Phase-2 output trim dB,"<<fixedOutputTrimDb<<"\n";
+    log<<"stage,type,index,sign,pp,pn,kp,kn,a80,a160,a320,a640,a1250,a2500,a5000,a10000,even_mae_db,odd_mae_db,absolute_h2_h8_mae_db,h1_drift_db,drive_delta_db,a_rms_db,score,accepted\n";
     log<<std::fixed<<std::setprecision(9);
     auto row=[&](int stage,const char*type,int index,int sign,const Model&m,const std::array<double,8>&g,const Phase3Metrics&met,bool accepted){
         log<<stage<<','<<type<<','<<index<<','<<sign<<','<<m.pk.pp<<','<<m.pk.pn<<','<<m.pk.kp<<','<<m.pk.kn;
         for(double v:g)log<<','<<v;
-        log<<','<<met.evenMaeDb<<','<<met.oddMaeDb<<','<<met.h1DriftDb<<','<<met.areg<<','<<met.score<<','<<(accepted?1:0)<<'\n';
+        log<<','<<met.evenMaeDb<<','<<met.oddMaeDb<<','<<met.absoluteHarmonicMaeDb<<','<<met.h1DriftDb<<','<<met.driveDeltaDb<<','<<met.areg<<','<<met.score<<','<<(accepted?1:0)<<'\n';
     };
     row(-1,"baseline",-1,0,base,bestG,baseMetrics,true);
 
@@ -2196,29 +2241,27 @@ bool optimizeAPkExperimental(const fs::path&modelPath,const fs::path&phase2Clo,c
         bool changed=true;int rounds=0;
         while(changed&&rounds<2){
             changed=false;++rounds;
-            // A coordinate pass.
             for(std::size_t bi=0;bi<bestG.size();++bi){
                 Phase3Metrics localBest=best;Model localModel=bestModel;auto localG=bestG;
                 for(int sign:{-1,1}){
                     auto tg=bestG;tg[bi]=std::clamp(tg[bi]+sign*aStepsDb[si],-maxAGainDb,maxAGainDb);
                     Model cand=bestModel;cand.A=makePhase3A(baseMag,tg);
-                    const auto met=evaluatePhase3Candidate(cand,testInput,cases,namH,baseH,tg);
-                    const bool constraints=(met.oddMaeDb<=baseMetrics.oddMaeDb+0.75)&&(met.h1DriftDb<=1.5);
+                    const auto met=evaluatePhase3Candidate(cand,testInput,cases,namH,baseH,tg,referenceDriveRms,fixedOutputTrimDb);
+                    const bool constraints=(met.oddMaeDb<=baseMetrics.oddMaeDb+0.75)&&(met.h1DriftDb<=1.5)&&(std::fabs(met.driveDeltaDb)<=maxDriveDeltaDb);
                     const bool accept=constraints&&(met.score+1.0e-9<localBest.score);
                     row(static_cast<int>(si),"A",static_cast<int>(bi),sign,cand,tg,met,accept);
                     if(accept){localBest=met;localModel=cand;localG=tg;}
                 }
                 if(localBest.score+1.0e-9<best.score){best=localBest;bestModel=localModel;bestG=localG;changed=true;}
             }
-            // P/K pass around the current A.
             for(std::size_t ai=0;ai<pkAxes.size();++ai){
                 Phase3Metrics localBest=best;Model localModel=bestModel;auto localPk=bestPk;
                 for(int sign:{-1,1}){
                     auto tq=bestPk;for(std::size_t j=0;j<4;++j)tq[j]=std::clamp(tq[j]+sign*pkAxes[ai][j]*pkSteps[si],pk0[j]-pkRange,pk0[j]+pkRange);
                     Model cand=bestModel;cand.pk.pp=static_cast<float>(std::exp(tq[0]));cand.pk.pn=static_cast<float>(std::exp(tq[1]));
                     cand.pk.kp=static_cast<float>(std::exp(tq[2]));cand.pk.kn=static_cast<float>(std::exp(tq[3]));
-                    const auto met=evaluatePhase3Candidate(cand,testInput,cases,namH,baseH,bestG);
-                    const bool constraints=(met.oddMaeDb<=baseMetrics.oddMaeDb+0.75)&&(met.h1DriftDb<=1.5);
+                    const auto met=evaluatePhase3Candidate(cand,testInput,cases,namH,baseH,bestG,referenceDriveRms,fixedOutputTrimDb);
+                    const bool constraints=(met.oddMaeDb<=baseMetrics.oddMaeDb+0.75)&&(met.h1DriftDb<=1.5)&&(std::fabs(met.driveDeltaDb)<=maxDriveDeltaDb);
                     const bool accept=constraints&&(met.score+1.0e-9<localBest.score);
                     row(static_cast<int>(si),"PK",static_cast<int>(ai),sign,cand,bestG,met,accept);
                     if(accept){localBest=met;localModel=cand;localPk=tq;}
@@ -2226,40 +2269,45 @@ bool optimizeAPkExperimental(const fs::path&modelPath,const fs::path&phase2Clo,c
                 if(localBest.score+1.0e-9<best.score){best=localBest;bestModel=localModel;bestPk=localPk;changed=true;}
             }
         }
-        std::wostringstream os;os<<std::fixed<<std::setprecision(3)<<L"Experimental phase 3 stage "<<(si+1)<<L"/"<<aStepsDb.size()
-            <<L": even "<<best.evenMaeDb<<L" dB, odd "<<best.oddMaeDb<<L" dB, A-rms "<<best.areg<<L" dB.";report(status,os.str());
+        std::wostringstream os;os<<std::fixed<<std::setprecision(3)<<L"Experimental phase 3B stage "<<(si+1)<<L"/"<<aStepsDb.size()
+            <<L": even "<<best.evenMaeDb<<L" dB, odd "<<best.oddMaeDb<<L" dB, abs H2-H8 "<<best.absoluteHarmonicMaeDb
+            <<L" dB, drive "<<best.driveDeltaDb<<L" dB.";report(status,os.str());
     }
     row(99,"best",-1,0,bestModel,bestG,best,true);
-    if(!log){error="Failed writing phase 3 A/P/K summary: "+pathToUtf8(summaryPath);return false;}
+    if(!log){error="Failed writing phase 3B A/P/K summary: "+pathToUtf8(summaryPath);return false;}
     if(!writeGp200APkVariant(phase2Clo,experimentalClo,bestModel,error))return false;
 
     Model serialized;if(!loadGp200ModelForAnalysis(experimentalClo,serialized,error))return false;
-    if(serialized.A.size()!=128){error="Phase 3: serialized A128 verification failed.";return false;}
+    if(serialized.A.size()!=128){error="Phase 3B: serialized A128 verification failed.";return false;}
     double aMax=0.0;for(std::size_t i=0;i<128;++i)aMax=std::max(aMax,std::fabs(static_cast<double>(serialized.A[i])-bestModel.A[i]));
-    if(aMax>1.0e-6){error="Phase 3: serialized GP-200 A verification failed.";return false;}
+    const auto pkNear=[](float a,float b){const double da=std::fabs(static_cast<double>(a)-b),sc=std::max({1.0,std::fabs(static_cast<double>(a)),std::fabs(static_cast<double>(b))});return da<=1.0e-6*sc;};
+    if(aMax>1.0e-6||!pkNear(serialized.pk.pp,bestModel.pk.pp)||!pkNear(serialized.pk.pn,bestModel.pk.pn)||!pkNear(serialized.pk.kp,bestModel.pk.kp)||!pkNear(serialized.pk.kn,bestModel.pk.kn)){
+        error="Phase 3B: serialized GP-200 A/P/K verification failed.";return false;
+    }
 
     std::vector<HarmonicCase>fullCases;const auto fullInput=buildHarmonicMatrix(fullCases);
     std::vector<float>fullNam;if(!renderNamTarget44100(modelPath,fullInput,fullNam,error,status))return false;
     std::vector<float>fullClo;renderModel(serialized,fullInput,fullClo,true);
-    std::ofstream det(detailPath,std::ios::binary|std::ios::trunc);if(!det){error="Cannot create phase 3 harmonic report: "+pathToUtf8(detailPath);return false;}
-    det<<"# Experimental Phase 3 optimized A128 + P/K harmonic fingerprint\n";
+    std::ofstream det(detailPath,std::ios::binary|std::ios::trunc);if(!det){error="Cannot create phase 3B harmonic report: "+pathToUtf8(detailPath);return false;}
+    det<<"# Experimental Phase 3B drive-guarded A128 + P/K harmonic fingerprint\n";
     det<<"# pp="<<serialized.pk.pp<<" pn="<<serialized.pk.pn<<" kp="<<serialized.pk.kp<<" kn="<<serialized.pk.kn<<"\n";
     det<<"# A_control_db";for(double v:bestG)det<<','<<v;det<<"\n";
+    det<<"# training_drive_delta_db="<<best.driveDeltaDb<<" fixed_output_trim_db="<<fixedOutputTrimDb<<"\n";
     det<<"frequency_hz,input_dbfs,nam_h1_dbfs,clo_h1_dbfs,h1_delta_db";
-    for(int h=2;h<=8;++h)det<<",nam_h"<<h<<"_dbc,clo_h"<<h<<"_dbc,h"<<h<<"_delta_db";
+    for(int h=2;h<=8;++h)det<<",nam_h"<<h<<"_dbc,clo_h"<<h<<"_dbc,h"<<h<<"_delta_db,nam_h"<<h<<"_dbfs,clo_h"<<h<<"_dbfs_cal,h"<<h<<"_abs_delta_db";
     det<<",nam_even_dbc,clo_even_dbc,even_delta_db,nam_odd_dbc,clo_odd_dbc,odd_delta_db,nam_thd_dbc,clo_thd_dbc,thd_delta_db\n";
     det<<std::fixed<<std::setprecision(6);
     for(std::size_t i=0;i<fullCases.size();++i){
         const auto nh=measureHarmonics(fullNam,fullCases[i]),ch=measureHarmonics(fullClo,fullCases[i]);
         det<<fullCases[i].frequencyHz<<','<<fullCases[i].inputDbfs<<','<<nh.fundamentalDbfs<<','<<ch.fundamentalDbfs<<','<<(ch.fundamentalDbfs-nh.fundamentalDbfs);
-        for(int h=2;h<=8;++h){const auto hi=static_cast<std::size_t>(h-1);const double nd=ratioDb(nh.amp[hi],nh.amp[0]),cd=ratioDb(ch.amp[hi],ch.amp[0]);det<<','<<nd<<','<<cd<<','<<(cd-nd);}
+        for(int h=2;h<=8;++h){const auto hi=static_cast<std::size_t>(h-1);const double nd=ratioDb(nh.amp[hi],nh.amp[0]),cd=ratioDb(ch.amp[hi],ch.amp[0]);const double na=db20(nh.amp[hi]),ca=db20(ch.amp[hi])+fixedOutputTrimDb;det<<','<<nd<<','<<cd<<','<<(cd-nd)<<','<<na<<','<<ca<<','<<(ca-na);}
         det<<','<<nh.evenDbc<<','<<ch.evenDbc<<','<<(ch.evenDbc-nh.evenDbc)<<','<<nh.oddDbc<<','<<ch.oddDbc<<','<<(ch.oddDbc-nh.oddDbc)
            <<','<<nh.thdDbc<<','<<ch.thdDbc<<','<<(ch.thdDbc-nh.thdDbc)<<'\n';
     }
-    if(!det){error="Failed writing phase 3 harmonic report: "+pathToUtf8(detailPath);return false;}
-    std::wostringstream os;os<<std::fixed<<std::setprecision(3)<<L"Experimental phase 3 selected: even "<<best.evenMaeDb
-        <<L" dB (Phase2 "<<baseMetrics.evenMaeDb<<L"), odd "<<best.oddMaeDb<<L" dB (Phase2 "<<baseMetrics.oddMaeDb
-        <<L"), A-rms "<<best.areg<<L" dB.";report(status,os.str());
+    if(!det){error="Failed writing phase 3B harmonic report: "+pathToUtf8(detailPath);return false;}
+    std::wostringstream os;os<<std::fixed<<std::setprecision(3)<<L"Experimental phase 3B selected: even "<<best.evenMaeDb
+        <<L" dB (Phase2 "<<baseMetrics.evenMaeDb<<L"), odd "<<best.oddMaeDb<<L" dB, abs H2-H8 "<<best.absoluteHarmonicMaeDb
+        <<L" dB, drive "<<best.driveDeltaDb<<L" dB.";report(status,os.str());
     return true;
 }
 
@@ -2291,18 +2339,18 @@ ConversionResult convertNamToBothIndependent(const fs::path& inputNam,const fs::
         report(status,L"Experimental phase 2 CLO: "+phase2Clo.filename().wstring());
         report(status,L"Experimental phase 2 summary: "+phase2Summary.filename().wstring());
     }else{
-        report(status,L"Experimental phase 2 WARNING: "+std::wstring(phase2Error.begin(),phase2Error.end())+L" Phase 3 will start from frozen NATIVE15 baseline.");
+        report(status,L"Experimental phase 2 WARNING: "+std::wstring(phase2Error.begin(),phase2Error.end())+L" Phase 3B will start from frozen NATIVE15 baseline.");
     }
-    const fs::path phase3Clo=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE3_A_PK_GP200_1024.clo");
-    const fs::path phase3Summary=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE3_A_PK_SUMMARY.csv");
-    const fs::path phase3Detail=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE3_A_PK_HARMONICS.csv");
+    const fs::path phase3Clo=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE3B_DRIVE_GUARDED_A_PK_GP200_1024.clo");
+    const fs::path phase3Summary=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE3B_DRIVE_GUARDED_A_PK_SUMMARY.csv");
+    const fs::path phase3Detail=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE3B_DRIVE_GUARDED_A_PK_HARMONICS.csv");
     std::string phase3Error;
     if(optimizeAPkExperimental(modelPath,phase3Start,phase3Clo,phase3Summary,phase3Detail,phase3Error,status)){
         r.gp2001024=phase3Clo;
-        report(status,L"Experimental phase 3 CLO: "+phase3Clo.filename().wstring());
-        report(status,L"Experimental phase 3 summary: "+phase3Summary.filename().wstring());
+        report(status,L"Experimental phase 3B CLO: "+phase3Clo.filename().wstring());
+        report(status,L"Experimental phase 3B summary: "+phase3Summary.filename().wstring());
     }else{
-        report(status,L"Experimental phase 3 WARNING: "+std::wstring(phase3Error.begin(),phase3Error.end())+L" Falling back to Phase 2/NATIVE15 result.");
+        report(status,L"Experimental phase 3B WARNING: "+std::wstring(phase3Error.begin(),phase3Error.end())+L" Falling back to Phase 2/NATIVE15 result.");
         r.gp2001024=phase3Start;
     }
     if(trainer.generateHarmonicReport){
