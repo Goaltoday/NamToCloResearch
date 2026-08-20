@@ -134,8 +134,10 @@ bool readPcm16Mono(const fs::path& path, std::vector<float>& x, std::uint32_t& s
 
 // The official GP-200.exe RTTI contains CDSPResampler24 together with the
 // pre-v4 templated r8brain type CDSPResampler<CDSPFracInterpolator<24,673>>.
-// The project pins r8brain version-3.7.  Do not use oneshot() here: the
-// audited converter path constructs CDSPResampler24 with MaxInLen equal to the
+// The project pins r8brain version-3.7.  Do not use oneshot() here.  The DLL
+// passes ReqTransBand=2.0 and ReqAtten=180.15 explicitly; version-3.7's default
+// attenuation is different, so relying on constructor defaults changes the SRC.
+// The audited converter path constructs CDSPResampler24 with MaxInLen equal to the
 // complete input length, calls process() on the whole double buffer once, then
 // feeds equal-size zero buffers until the requested output count is produced.
 // GP-200.exe 0x5a70a0.  The converter uses the same whole-buffer
@@ -155,17 +157,26 @@ std::vector<float> resampleR8Brain24(const std::vector<float>& in, double inRate
     if(targetCount==0) return out;
     std::vector<double> block(in.size());
     for(std::size_t i=0;i<in.size();++i) block[i]=static_cast<double>(in[i]);
-    r8b::CDSPResampler24 rs(static_cast<double>(srcF),static_cast<double>(dstF),inCount);
-    std::size_t outPos=0; bool first=true;
-    while(outPos<out.size()){
+    r8b::CDSPResampler24 rs(static_cast<double>(srcF), static_cast<double>(dstF), inCount, 2.0, 180.15);
+    // HTUSBTools.dll 0x180008ef4..0x180009018.  The wrapper keeps the
+    // previous returned count as the DESTINATION start index.  When the next
+    // process() call returns currentCount it copies exactly
+    // currentCount-previousCount samples, but the SOURCE pointer starts again
+    // at produced[0].  The complete input block is zeroed after the first pass.
+    // This is intentionally not a conventional append(count) loop.
+    std::size_t previousCount=0; bool first=true;
+    while(previousCount<out.size()){
         if(!first) std::fill(block.begin(),block.end(),0.0);
         first=false;
         double* produced=nullptr;
         const int count=rs.process(block.data(),inCount,produced);
         if(count<0 || produced==nullptr) break;
-        const std::size_t take=std::min<std::size_t>(static_cast<std::size_t>(count),out.size()-outPos);
-        for(std::size_t i=0;i<take;++i) out[outPos+i]=static_cast<float>(produced[i]);
-        outPos+=take;
+        const std::size_t currentCount=std::min<std::size_t>(static_cast<std::size_t>(count),out.size());
+        if(currentCount>previousCount){
+            const std::size_t n=currentCount-previousCount;
+            for(std::size_t i=0;i<n;++i) out[previousCount+i]=static_cast<float>(produced[i]);
+        }
+        previousCount=currentCount;
     }
     rs.clear();
     return out;
@@ -1404,7 +1415,7 @@ std::vector<float> finalTailCorrection(const std::vector<float>&model,const std:
     const auto cm=conditionMagnitudeF(freq,modelMag,posN);
     std::vector<float>ratio(posN,1.0f);for(std::size_t k=0;k<posN;++k){const double num=static_cast<double>(ct.mag[k])*1000000.0;const double den=static_cast<double>(cm.mag[k])*1000000.0+kEps;ratio[k]=std::clamp(static_cast<float>(num/den),0.1f,10.0f);}
     const std::size_t smoothN=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<float>(posN)*0.1f));ratio=gaussianSmoothExactF(ratio,smoothN);for(auto&v:ratio)v=std::clamp(v,0.1f,10.0f);
-    const auto final=conditionMagnitudeF(ct.freq,ratio,256);return final.mag;
+    const auto final=conditionMagnitudeF(freq,ratio,256);return final.mag;
 }
 
 void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status){
@@ -1436,19 +1447,24 @@ std::vector<float> resampleFirOfficial(const std::vector<float>& h,double sr,std
     const int blockLen=static_cast<int>(h.size());
     std::vector<double> block(h.size());
     for(std::size_t i=0;i<h.size();++i)block[i]=static_cast<double>(h[i]);
-    r8b::CDSPResampler24 rs(static_cast<double>(srcF),static_cast<double>(dstF),blockLen);
+    r8b::CDSPResampler24 rs(static_cast<double>(srcF), static_cast<double>(dstF), blockLen, 2.0, 180.15);
 
-    std::size_t outPos=0;
+    std::size_t previousCount=0;
     bool first=true;
-    while(outPos<wanted){
+    while(previousCount<wanted){
         if(!first)std::fill(block.begin(),block.end(),0.0);
         first=false;
         double* produced=nullptr;
         const int count=rs.process(block.data(),blockLen,produced);
         if(count<0||produced==nullptr)break;
-        const std::size_t take=std::min<std::size_t>(static_cast<std::size_t>(count),wanted-outPos);
-        for(std::size_t i=0;i<take;++i)out[outPos+i]=static_cast<float>(produced[i]);
-        outPos+=take;
+        const std::size_t currentCount=std::min<std::size_t>(static_cast<std::size_t>(count),wanted);
+        // HTUSBTools.dll 0x180008fb1..0x18000900b: destination starts at
+        // previousCount, while the source offset is reset to produced[0].
+        if(currentCount>previousCount){
+            const std::size_t n=currentCount-previousCount;
+            for(std::size_t i=0;i<n;++i)out[previousCount+i]=static_cast<float>(produced[i]);
+        }
+        previousCount=currentCount;
     }
     rs.clear();
     return out;
