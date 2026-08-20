@@ -835,6 +835,45 @@ std::vector<float> hammingF(std::size_t n){
     }
     return w;
 }
+
+// HTUSBTools.dll 0x18009ad86..0x18009aee0 uses a different Hamming
+// arithmetic boundary specifically in the final Block-B routine.  Phase and
+// cos() are float, but cos is promoted to double and the 0.54/0.46 multiply
+// and subtract are performed in double before converting the weight to float.
+std::vector<float> hammingFinalBOfficial(std::size_t n){
+    std::vector<float>w(n,1.0f);if(n<=1)return w;
+    const float twoPi=6.2831854820251465f;
+    const float denom=static_cast<float>(n-1);
+    for(std::size_t i=0;i<n;++i){
+        const float ph=(static_cast<float>(i)*twoPi)/denom;
+        const float c=preciseCosF(ph);
+        const double wd=0.54-static_cast<double>(c)*0.46;
+        w[i]=static_cast<float>(wd);
+    }
+    return w;
+}
+
+// Scalar add order used by the final-B DLL loops: groups of four are still
+// accumulated into the same scalar register in sample order, followed by the
+// remainder.  Keeping this helper separate avoids compiler/vector-library
+// reductions changing the rounding boundary.
+float sumFloatFinalBOfficial(const std::vector<float>&x){
+    float s=0.0f;std::size_t i=0;
+    for(;i+4<=x.size();i+=4){s+=x[i];s+=x[i+1];s+=x[i+2];s+=x[i+3];}
+    for(;i<x.size();++i)s+=x[i];
+    return s;
+}
+
+void energiesFinalBOfficial(const std::vector<float>&target,const std::vector<float>&model,float&et,float&em){
+    et=0.0f;em=0.0f;const std::size_t n=std::min(target.size(),model.size());std::size_t i=0;
+    for(;i+4<=n;i+=4){
+        float v=target[i];et+=v*v;v=model[i];em+=v*v;
+        v=target[i+1];et+=v*v;v=model[i+1];em+=v*v;
+        v=target[i+2];et+=v*v;v=model[i+2];em+=v*v;
+        v=target[i+3];et+=v*v;v=model[i+3];em+=v*v;
+    }
+    for(;i<n;++i){float v=target[i];et+=v*v;v=model[i];em+=v*v;}
+}
 std::vector<double> fftFrequencyGrid(double sr){std::vector<double>f(kBins);for(std::size_t k=0;k<kBins;++k)f[k]=static_cast<double>(k)*(sr*0.5)/static_cast<double>(kBins-1);return f;}
 std::vector<float> fftFrequencyGridF(double sr){
     // Trainer ctor 0x5539a8 calls 0x4225b0 for the N/2+1 frequency grid.
@@ -1389,7 +1428,13 @@ std::vector<float> finalTailCorrection(const std::vector<float>&model,const std:
     // 0x553f90: fold only complete L-sample blocks. Any remainder is ignored.
     const std::size_t blocks=end/L;
     for(std::size_t b=0;b<blocks;++b)for(std::size_t i=0;i<L;++i){const std::size_t n=b*L+i;xm[i]+=model[n];yt[i]+=target[n];}
-    float mm=0.0f,tm=0.0f;for(std::size_t i=0;i<L;++i){mm+=xm[i];tm+=yt[i];}mm/=static_cast<float>(L);tm/=static_cast<float>(L);const auto win=hammingF(L);for(std::size_t i=0;i<L;++i){xm[i]=(xm[i]-mm)*win[i];yt[i]=(yt[i]-tm)*win[i];}
+    // 0x18009aaa..0x18009ad02: each folded vector is mean-removed with
+    // float accumulation.  0x18009ad86..0x18009aee0 then applies the
+    // final-B-specific Hamming arithmetic (double 0.54/0.46 boundary).
+    float mm=sumFloatFinalBOfficial(xm)/static_cast<float>(L);
+    float tm=sumFloatFinalBOfficial(yt)/static_cast<float>(L);
+    const auto win=hammingFinalBOfficial(L);
+    for(std::size_t i=0;i<L;++i){xm[i]=(xm[i]-mm)*win[i];yt[i]=(yt[i]-tm)*win[i];}
     const std::size_t posN=L/2+1;std::vector<float>freq(posN),modelMag(posN),targetMag(posN);
     // GP-200.exe final-B path builds the complete length-L DFT for each
     // folded signal with 0x553400's float trig table and float accumulators.
@@ -1416,15 +1461,44 @@ std::vector<float> finalTailCorrection(const std::vector<float>&model,const std:
     const auto ct=conditionMagnitudeF(freq,targetMag,posN);
     const auto cm=conditionMagnitudeF(freq,modelMag,posN);
     std::vector<float>ratio(posN,1.0f);for(std::size_t k=0;k<posN;++k){const double num=static_cast<double>(ct.mag[k])*1000000.0;const double den=static_cast<double>(cm.mag[k])*1000000.0+kEps;ratio[k]=std::clamp(static_cast<float>(num/den),0.1f,10.0f);}
-    const std::size_t smoothN=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<float>(posN)*0.1f));ratio=gaussianSmoothExactF(ratio,smoothN);for(auto&v:ratio)v=std::clamp(v,0.1f,10.0f);
+    // 0x18009b561..0x18009b575 converts posN to double, multiplies by
+    // the routine's double 0.1 and truncates to int.
+    const std::size_t smoothN=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<int>(static_cast<double>(posN)*0.1)));
+    ratio=gaussianSmoothExactF(ratio,smoothN);for(auto&v:ratio)v=std::clamp(v,0.1f,10.0f);
     const auto final=conditionMagnitudeF(freq,ratio,256);return final.mag;
 }
 
 void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status){
-    report(status,L"Independent: final Block B tail refinement...");const std::size_t b=officialTimeIndex(sr,50.0f),e=officialTimeIndex(sr,70.0f);const auto tailIn=sliceSignal(input,b,e),tailTarget=sliceSignal(target,b,e);std::vector<float>pred;renderModel(m,tailIn,pred,true);
-    auto corrMag=finalTailCorrection(pred,tailTarget,sr);auto corr=minimumPhaseF(corrMag,256);m.B=convolveTruncate(m.B,corr,kB);
-    float sum=0.0f;for(float v:m.B)sum+=v;const float mean=sum/static_cast<float>(m.B.size());for(auto&v:m.B)v-=mean;
-    renderModel(m,tailIn,pred,true);float et=0.0f,ep=0.0f;for(std::size_t i=0;i<std::min(pred.size(),tailTarget.size());++i){et+=tailTarget[i]*tailTarget[i];ep+=pred[i]*pred[i];}if(ep>1.0e-30f){const float g=preciseSqrtF(et)/preciseSqrtF(ep);for(auto&v:m.B)v*=g;}
+    report(status,L"Independent: final Block B tail refinement...");
+    const std::size_t b=officialTimeIndex(sr,50.0f),e=officialTimeIndex(sr,70.0f);
+    const auto tailIn=sliceSignal(input,b,e),tailTarget=sliceSignal(target,b,e);
+
+    // HTUSBTools.dll 0x18009a673..0x18009a9ff computes PRE -> A -> NL4x ->
+    // POST once and keeps that pre-B signal alive.  The original B is then
+    // rendered from that buffer.  After 0x180096c20 changes B, 0x18009b62b
+    // runs only FIR B again over the SAME preserved pre-B signal for the
+    // energy normalization; the upstream nonlinear path is not rerun.
+    std::vector<float>preB;
+    renderModel(m,tailIn,preB,false);
+    std::vector<float>pred;
+    { FirPlan bp(m.B); bp.run(preB,pred); }
+
+    auto corrMag=finalTailCorrection(pred,tailTarget,sr);
+    auto corr=minimumPhaseF(corrMag,256);
+    m.B=convolveTruncate(m.B,corr,kB);
+
+    // 0x180096e02..0x180096f30 removes the corrected B mean in float.
+    const float mean=sumFloatFinalBOfficial(m.B)/static_cast<float>(m.B.size());
+    for(auto&v:m.B)v-=mean;
+
+    // Literal 0x18009b62b path: corrected B only, fed by preserved preB.
+    { FirPlan bp(m.B); bp.run(preB,pred); }
+    float et=0.0f,ep=0.0f;
+    energiesFinalBOfficial(tailTarget,pred,et,ep);
+    if(ep>1.0e-30f){
+        const float g=preciseSqrtF(et)/preciseSqrtF(ep);
+        for(auto&v:m.B)v*=g;
+    }
 }
 
 // Exact FIR serialization SRC reconstructed from GP-200.exe 0x5a70a0.
