@@ -2466,8 +2466,8 @@ bool optimizePkDynamicImdExperimental(const fs::path&modelPath,const fs::path&ph
     row("best",trial+1,bestModel,best,true);if(!log){error="Phase 4B: failed writing summary.";return false;}
     if(!writeGp200PkVariant(phase2Clo,outClo,bestModel.pk,error))return false;
     Model serialized;if(!loadGp200ModelForAnalysis(outClo,serialized,error))return false;
-    const auto near=[](float a,float b){const double da=std::fabs(static_cast<double>(a)-b),sc=std::max({1.0,std::fabs(static_cast<double>(a)),std::fabs(static_cast<double>(b))});return da<=1e-6*sc;};
-    if(!near(serialized.pk.pp,bestModel.pk.pp)||!near(serialized.pk.pn,bestModel.pk.pn)||!near(serialized.pk.kp,bestModel.pk.kp)||!near(serialized.pk.kn,bestModel.pk.kn)){error="Phase 4B: serialized P/K verification failed.";return false;}
+    const auto pkNear=[](float a,float b){const double da=std::fabs(static_cast<double>(a)-b),sc=std::max({1.0,std::fabs(static_cast<double>(a)),std::fabs(static_cast<double>(b))});return da<=1e-6*sc;};
+    if(!pkNear(serialized.pk.pp,bestModel.pk.pp)||!pkNear(serialized.pk.pn,bestModel.pk.pn)||!pkNear(serialized.pk.kp,bestModel.pk.kp)||!pkNear(serialized.pk.kn,bestModel.pk.kn)){error="Phase 4B: serialized P/K verification failed.";return false;}
 
     std::vector<HarmonicCase>fullCases;const auto fullInput=buildHarmonicMatrix(fullCases);std::vector<float>fullNam;if(!renderNamTarget44100(modelPath,fullInput,fullNam,error,status))return false;std::vector<float>fullClo;renderModel(bestModel,fullInput,fullClo,true);
     std::ofstream det(harmonicPath,std::ios::binary|std::ios::trunc);if(!det){error="Phase 4B: cannot create harmonic CSV.";return false;}det<<"# Experimental Phase 4B selected P/K harmonic validation\n# pp="<<bestModel.pk.pp<<" pn="<<bestModel.pk.pn<<" kp="<<bestModel.pk.kp<<" kn="<<bestModel.pk.kn<<"\nfrequency_hz,input_dbfs,nam_h1_dbfs,clo_h1_dbfs,h1_delta_db";for(int h=2;h<=8;++h)det<<",nam_h"<<h<<"_dbc,clo_h"<<h<<"_dbc,h"<<h<<"_delta_db";det<<",nam_even_dbc,clo_even_dbc,even_delta_db,nam_odd_dbc,clo_odd_dbc,odd_delta_db,nam_thd_dbc,clo_thd_dbc,thd_delta_db\n"<<std::fixed<<std::setprecision(6);
