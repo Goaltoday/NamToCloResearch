@@ -2475,6 +2475,99 @@ bool optimizePkDynamicImdGuardedExperimental(const fs::path&modelPath,const fs::
     report(status,L"Experimental phase 4C CLO: "+outClo.filename().wstring());return static_cast<bool>(det);
 }
 
+
+
+// -----------------------------------------------------------------------------
+// Experimental phase 5: joint A128 + P/K fit guided by THD + IMD
+// -----------------------------------------------------------------------------
+// Starts again from Phase 2. B1024, PRE and POST remain frozen. Unlike Phase 3,
+// A is no longer driven mainly by single-tone parity: candidate acceptance is
+// guarded by the Phase-2 THD-vs-level and two-tone IMD errors measured in Phase
+// 4. A is limited to +/-3 dB at eight log-frequency control points to keep it a
+// spectral excitation correction rather than a broad gain escape route.
+
+struct Phase5Metrics{
+    double evenMaeDb=0.0,oddMaeDb=0.0,h1DriftDb=0.0,thdCurveMaeDb=0.0,imdMaeDb=0.0,aRmsDb=0.0,score=0.0;
+};
+
+Phase5Metrics evaluatePhase5Candidate(const Model&candidate,
+                                      const std::vector<float>&harmInput,const std::vector<HarmonicCase>&harmCases,
+                                      const std::vector<HarmonicSet>&namH,const std::vector<HarmonicSet>&baseH,
+                                      const std::vector<float>&levelInput,const std::vector<LevelDiagCase>&levelCases,
+                                      const std::vector<HarmonicSet>&namLevelH,
+                                      const std::vector<float>&imdInput,const std::vector<ImdCase>&imdCases,
+                                      const std::vector<std::array<double,7>>&namImd,
+                                      const std::array<double,8>&aGainDb){
+    const auto q=evaluatePhase4CCandidate(candidate,harmInput,harmCases,namH,baseH,levelInput,levelCases,namLevelH,imdInput,imdCases,namImd);
+    Phase5Metrics m;m.evenMaeDb=q.evenMaeDb;m.oddMaeDb=q.oddMaeDb;m.h1DriftDb=q.h1DriftDb;m.thdCurveMaeDb=q.thdCurveMaeDb;m.imdMaeDb=q.imdMaeDb;
+    double e=0.0;for(double v:aGainDb)e+=v*v;m.aRmsDb=std::sqrt(e/static_cast<double>(aGainDb.size()));
+    // Dynamic behaviour dominates. Parity remains useful, while a small A
+    // regularizer discourages unnecessary spectral drive changes.
+    m.score=0.20*m.evenMaeDb+0.20*m.oddMaeDb+1.20*m.thdCurveMaeDb+0.90*m.imdMaeDb+0.15*m.h1DriftDb+0.08*m.aRmsDb;
+    return m;
+}
+
+bool optimizeAPkDynamicImdExperimental(const fs::path&modelPath,const fs::path&phase2Clo,const fs::path&outClo,
+                                       const fs::path&summaryPath,const fs::path&harmonicPath,
+                                       std::string&error,const StatusCallback&status){
+    Model base;if(!loadGp200ModelForAnalysis(phase2Clo,base,error))return false;
+    const auto baseMag=aPositiveMagnitude128(base.A);
+
+    std::vector<HarmonicCase>harmCases;const auto harmInput=buildPkOptimizationMatrix(harmCases);
+    std::vector<float>namHOut;if(!renderNamTarget44100(modelPath,harmInput,namHOut,error,status))return false;
+    std::vector<float>baseHOut;renderModel(base,harmInput,baseHOut,true);
+    std::vector<HarmonicSet>namH,baseH;for(const auto&c:harmCases){namH.push_back(measureHarmonics(namHOut,c));baseH.push_back(measureHarmonics(baseHOut,c));}
+
+    std::vector<LevelDiagCase>levelCases;const auto levelInput=buildPhase4LevelCurve(levelCases);
+    std::vector<float>namLevel;if(!renderNamTarget44100(modelPath,levelInput,namLevel,error,status))return false;
+    std::vector<HarmonicSet>namLevelH;for(const auto&c:levelCases){HarmonicCase hc{250.0f,c.db,c.start,c.count};namLevelH.push_back(measureHarmonics(namLevel,hc));}
+
+    std::vector<ImdCase>imdCases;const auto imdInput=buildPhase4Imd(imdCases);
+    std::vector<float>namImdOut;if(!renderNamTarget44100(modelPath,imdInput,namImdOut,error,status))return false;
+    constexpr std::array<double,7> probe={110.0,220.0,330.0,440.0,550.0,660.0,770.0};
+    std::vector<std::array<double,7>>namImd;for(const auto&c:imdCases){std::array<double,7>a{};for(std::size_t j=0;j<probe.size();++j)a[j]=goertzelAmplitude(namImdOut,c.start,c.count,probe[j],44100.0);namImd.push_back(a);}
+
+    std::array<double,8>bestG{};
+    auto best=evaluatePhase5Candidate(base,harmInput,harmCases,namH,baseH,levelInput,levelCases,namLevelH,imdInput,imdCases,namImd,bestG);
+    const auto baseline=best;Model bestModel=base;
+    std::array<double,4>bestPk={std::log(std::max(1.0e-9f,base.pk.pp)),std::log(std::max(1.0e-9f,base.pk.pn)),std::log(std::max(1.0e-9f,base.pk.kp)),std::log(std::max(1.0e-9f,base.pk.kn))};
+    const auto pk0=bestPk;constexpr double pkRange=0.6931471805599453;
+    constexpr std::array<double,3>aSteps={0.75,0.375,0.1875};
+    constexpr std::array<double,3>pkSteps={0.11332868530700327,0.058268908123975824,0.029558802241544398};
+    const std::array<std::array<int,4>,6>pkAxes={{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1},{1,-1,0,0},{0,0,1,-1}}};
+    constexpr double maxAGainDb=3.0;
+
+    std::ofstream log(summaryPath,std::ios::binary|std::ios::trunc);if(!log){error="Phase 5: cannot create summary CSV.";return false;}
+    log<<"# Experimental Phase 5 joint A128 + P/K Dynamic + IMD fit\n";
+    log<<"# Restart baseline: Phase 2. Frozen: B1024, PRE, POST. A controls limited to +/-3 dB.\n";
+    log<<"# Hard guards: THD <= Phase2; IMD <= Phase2; odd <= Phase2+0.75 dB; H1 drift <=1.5 dB. P/K 0.5x..2x Phase2.\n";
+    log<<"stage,type,index,sign,pp,pn,kp,kn,a80,a160,a320,a640,a1250,a2500,a5000,a10000,even_mae_db,odd_mae_db,h1_drift_db,thd_curve_mae_db,imd_mae_db,a_rms_db,score,accepted\n"<<std::fixed<<std::setprecision(9);
+    auto row=[&](int stage,const char*type,int index,int sign,const Model&m,const std::array<double,8>&g,const Phase5Metrics&v,bool a){log<<stage<<','<<type<<','<<index<<','<<sign<<','<<m.pk.pp<<','<<m.pk.pn<<','<<m.pk.kp<<','<<m.pk.kn;for(double x:g)log<<','<<x;log<<','<<v.evenMaeDb<<','<<v.oddMaeDb<<','<<v.h1DriftDb<<','<<v.thdCurveMaeDb<<','<<v.imdMaeDb<<','<<v.aRmsDb<<','<<v.score<<','<<(a?1:0)<<'\n';};
+    row(-1,"baseline",-1,0,base,bestG,baseline,true);
+    auto allowed=[&](const Phase5Metrics&m){return m.thdCurveMaeDb<=baseline.thdCurveMaeDb+1e-9&&m.imdMaeDb<=baseline.imdMaeDb+1e-9&&m.oddMaeDb<=baseline.oddMaeDb+0.75&&m.h1DriftDb<=1.5;};
+
+    for(std::size_t si=0;si<aSteps.size();++si){bool changed=true;int rounds=0;while(changed&&rounds<2){changed=false;++rounds;
+        for(std::size_t bi=0;bi<bestG.size();++bi){auto localBest=best;auto localModel=bestModel;auto localG=bestG;
+            for(int sign:{-1,1}){auto tg=bestG;tg[bi]=std::clamp(tg[bi]+sign*aSteps[si],-maxAGainDb,maxAGainDb);Model cand=bestModel;cand.A=makePhase3A(baseMag,tg);const auto met=evaluatePhase5Candidate(cand,harmInput,harmCases,namH,baseH,levelInput,levelCases,namLevelH,imdInput,imdCases,namImd,tg);const bool accept=allowed(met)&&met.score+1e-9<localBest.score;row(static_cast<int>(si),"A",static_cast<int>(bi),sign,cand,tg,met,accept);if(accept){localBest=met;localModel=cand;localG=tg;}}
+            if(localBest.score+1e-9<best.score){best=localBest;bestModel=localModel;bestG=localG;changed=true;}}
+        for(std::size_t ai=0;ai<pkAxes.size();++ai){auto localBest=best;auto localModel=bestModel;auto localPk=bestPk;
+            for(int sign:{-1,1}){auto tq=bestPk;for(std::size_t j=0;j<4;++j)tq[j]=std::clamp(tq[j]+sign*pkAxes[ai][j]*pkSteps[si],pk0[j]-pkRange,pk0[j]+pkRange);Model cand=bestModel;cand.pk.pp=static_cast<float>(std::exp(tq[0]));cand.pk.pn=static_cast<float>(std::exp(tq[1]));cand.pk.kp=static_cast<float>(std::exp(tq[2]));cand.pk.kn=static_cast<float>(std::exp(tq[3]));const auto met=evaluatePhase5Candidate(cand,harmInput,harmCases,namH,baseH,levelInput,levelCases,namLevelH,imdInput,imdCases,namImd,bestG);const bool accept=allowed(met)&&met.score+1e-9<localBest.score;row(static_cast<int>(si),"PK",static_cast<int>(ai),sign,cand,bestG,met,accept);if(accept){localBest=met;localModel=cand;localPk=tq;}}
+            if(localBest.score+1e-9<best.score){best=localBest;bestModel=localModel;bestPk=localPk;changed=true;}}
+    }
+        std::wostringstream os;os<<std::fixed<<std::setprecision(3)<<L"Experimental phase 5 stage "<<(si+1)<<L"/"<<aSteps.size()<<L": THD "<<best.thdCurveMaeDb<<L" dB, IMD "<<best.imdMaeDb<<L" dB, even "<<best.evenMaeDb<<L" dB, A rms "<<best.aRmsDb<<L" dB.";report(status,os.str());
+    }
+    row(99,"best",-1,0,bestModel,bestG,best,true);if(!log){error="Phase 5: failed writing summary.";return false;}
+    if(!writeGp200APkVariant(phase2Clo,outClo,bestModel,error))return false;
+    Model serialized;if(!loadGp200ModelForAnalysis(outClo,serialized,error))return false;double aMax=0.0;for(std::size_t i=0;i<128;++i)aMax=std::max(aMax,std::fabs(static_cast<double>(serialized.A[i])-bestModel.A[i]));
+    const auto pkNear=[](float a,float b){const double da=std::fabs(static_cast<double>(a)-b),sc=std::max({1.0,std::fabs(static_cast<double>(a)),std::fabs(static_cast<double>(b))});return da<=1e-6*sc;};
+    if(aMax>1e-6||!pkNear(serialized.pk.pp,bestModel.pk.pp)||!pkNear(serialized.pk.pn,bestModel.pk.pn)||!pkNear(serialized.pk.kp,bestModel.pk.kp)||!pkNear(serialized.pk.kn,bestModel.pk.kn)){error="Phase 5: serialized A/P/K verification failed.";return false;}
+
+    std::vector<HarmonicCase>fullCases;const auto fullInput=buildHarmonicMatrix(fullCases);std::vector<float>fullNam;if(!renderNamTarget44100(modelPath,fullInput,fullNam,error,status))return false;std::vector<float>fullClo;renderModel(serialized,fullInput,fullClo,true);
+    std::ofstream det(harmonicPath,std::ios::binary|std::ios::trunc);if(!det){error="Phase 5: cannot create harmonic CSV.";return false;}det<<"# Experimental Phase 5 A128 + P/K dynamic/IMD validation\n# pp="<<serialized.pk.pp<<" pn="<<serialized.pk.pn<<" kp="<<serialized.pk.kp<<" kn="<<serialized.pk.kn<<"\n# A_control_db";for(double v:bestG)det<<','<<v;det<<"\nfrequency_hz,input_dbfs,nam_h1_dbfs,clo_h1_dbfs,h1_delta_db";for(int h=2;h<=8;++h)det<<",nam_h"<<h<<"_dbc,clo_h"<<h<<"_dbc,h"<<h<<"_delta_db";det<<",nam_even_dbc,clo_even_dbc,even_delta_db,nam_odd_dbc,clo_odd_dbc,odd_delta_db,nam_thd_dbc,clo_thd_dbc,thd_delta_db\n"<<std::fixed<<std::setprecision(6);
+    for(std::size_t i=0;i<fullCases.size();++i){const auto nh=measureHarmonics(fullNam,fullCases[i]),ch=measureHarmonics(fullClo,fullCases[i]);det<<fullCases[i].frequencyHz<<','<<fullCases[i].inputDbfs<<','<<nh.fundamentalDbfs<<','<<ch.fundamentalDbfs<<','<<(ch.fundamentalDbfs-nh.fundamentalDbfs);for(int h=2;h<=8;++h){const auto hi=static_cast<std::size_t>(h-1);const double nd=ratioDb(nh.amp[hi],nh.amp[0]),cd=ratioDb(ch.amp[hi],ch.amp[0]);det<<','<<nd<<','<<cd<<','<<(cd-nd);}det<<','<<nh.evenDbc<<','<<ch.evenDbc<<','<<(ch.evenDbc-nh.evenDbc)<<','<<nh.oddDbc<<','<<ch.oddDbc<<','<<(ch.oddDbc-nh.oddDbc)<<','<<nh.thdDbc<<','<<ch.thdDbc<<','<<(ch.thdDbc-nh.thdDbc)<<'\n';}
+    report(status,L"Experimental phase 5 CLO: "+outClo.filename().wstring());return static_cast<bool>(det);
+}
+
 bool findOptionalDi(const fs::path&inputNam,fs::path&di){
     const auto dir=inputNam.parent_path();const auto stem=inputNam.stem().wstring();
     const std::array<fs::path,4> c={dir/(stem+L"_DI.wav"),dir/(stem+L"_di.wav"),dir/L"DI.wav",dir/L"di.wav"};std::error_code ec;for(const auto&p:c)if(fs::exists(p,ec)&&!ec){di=p;return true;}return false;
@@ -2562,6 +2655,25 @@ ConversionResult convertNamToBothIndependent(const fs::path& inputNam,const fs::
         report(status,L"Experimental phase 4C WARNING: "+std::wstring(phase4cError.begin(),phase4cError.end())+L" Falling back to Phase 2/NATIVE15 result.");
         r.gp2001024=phase3Start;
     }
+
+    // Phase 5 deliberately restarts from Phase 2, using the Phase-4 lessons to
+    // optimize A128 + P/K jointly while B1024/PRE/POST remain frozen.
+    const fs::path phase5Clo=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE5_A_PK_DYNAMIC_IMD_GP200_1024.clo");
+    const fs::path phase5Summary=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE5_A_PK_DYNAMIC_IMD_SUMMARY.csv");
+    const fs::path phase5Detail=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE5_A_PK_DYNAMIC_IMD_HARMONICS.csv");
+    std::string phase5Error;
+    if(optimizeAPkDynamicImdExperimental(modelPath,phase3Start,phase5Clo,phase5Summary,phase5Detail,phase5Error,status)){
+        r.gp2001024=phase5Clo;
+        report(status,L"Experimental phase 5 summary: "+phase5Summary.filename().wstring());
+        Model phase5Model;std::string diagError;
+        if(loadGp200ModelForAnalysis(phase5Clo,phase5Model,diagError)){
+            const fs::path level5=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE5_LEVEL_CURVE.csv");
+            const fs::path imd5=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE5_IMD.csv");
+            if(writePhase4LevelCurve(modelPath,phase5Model,level5,diagError,status))report(status,L"Experimental phase 5 level curve: "+level5.filename().wstring());
+            diagError.clear();if(writePhase4Imd(modelPath,phase5Model,imd5,diagError,status))report(status,L"Experimental phase 5 IMD: "+imd5.filename().wstring());
+        }
+    }else report(status,L"Experimental phase 5 WARNING: "+std::wstring(phase5Error.begin(),phase5Error.end())+L" Keeping Phase 4C/Phase2 result.");
+
     if(trainer.generateHarmonicReport){
         const fs::path harmonicReport=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_HARMONICS.csv");
         std::string diagnosticError;
