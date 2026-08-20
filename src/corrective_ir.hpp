@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace ntc {
 
@@ -20,6 +21,14 @@ struct CorrectiveIrStats {
     double postGainDb = -6.0;
     double totalGainDb = -6.0;
 };
+
+
+bool applyCorrectiveIrToClo(const fs::path& sourceClo,
+                            const std::vector<float>& correctiveIr,
+                            const fs::path& destinationClo,
+                            CorrectiveIrStats& stats,
+                            std::string& error,
+                            double postCorrectionDb = -6.0);
 
 bool applyCorrectiveIrToClo(const fs::path& sourceClo,
                             const fs::path& correctiveWav,

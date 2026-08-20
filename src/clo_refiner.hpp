@@ -18,89 +18,17 @@ struct CloRefineConfig {
     fs::path referenceWav;
 };
 
-struct CloRefineStats {
-    bool improved = false;
-    double originalNmse = 0.0;
-    double refinedNmse = 0.0;
-    double improvementPercent = 0.0;
-
-    double originalStimulusNmse = 0.0;
-    double refinedStimulusNmse = 0.0;
-    double stimulusImprovementPercent = 0.0;
-
-    double originalTailNmse = 0.0;
-    double refinedTailNmse = 0.0;
-    double tailImprovementPercent = 0.0;
-
-    // Full-render secondary metrics. Spectral error is a multi-resolution
-    // STFT loss (FFT 512/2048/8192, spectral convergence + log magnitude).
-    // Envelope error is mean absolute dB RMS mismatch at 256/2048/8192 samples.
-    double originalSpectralError = 0.0;
-    double refinedSpectralError = 0.0;
-    double spectralImprovementPercent = 0.0;
-    double originalEnvelopeError = 0.0;
-    double refinedEnvelopeError = 0.0;
-    double envelopeImprovementPercent = 0.0;
-
-    // Final-20-s VST-style Tone Match spectral error.
-    // Historical/raw final-20-s metric.  Low-confidence bins retain a 5% floor.
-    double originalResponseSpectralError = 0.0;
-    double refinedResponseSpectralError = 0.0;
-    double responseSpectralImprovementPercent = 0.0;
-
-    // Guitar-weighted final-20-s metric used for the user-facing judgement.
-    // This de-emphasises sub-bass / extreme HF and uses spectral confidence
-    // directly, so low-energy unstable bins do not dominate the result.
-    double originalPerceptualResponseSpectralError = 0.0;
-    double refinedPerceptualResponseSpectralError = 0.0;
-    double perceptualResponseSpectralImprovementPercent = 0.0;
-
-    // One calibration derived from the ORIGINAL CLO only and then frozen for
-    // every candidate. It is intentionally not re-fitted during optimisation.
-    double outputScale = 1.0;
-
-    // Candidate metrics used by the current Block-B Tone Match validation.
-    bool searchedCandidateAccepted = false;
-    double searchedCompositeImprovementPercent = 0.0;
-    double searchedNmse = 0.0;
-    double searchedNmseImprovementPercent = 0.0;
-    double searchedStimulusNmse = 0.0;
-    double searchedStimulusImprovementPercent = 0.0;
-    double searchedTailNmse = 0.0;
-    double searchedTailImprovementPercent = 0.0;
-    double searchedSpectralError = 0.0;
-    double searchedSpectralImprovementPercent = 0.0;
-    double searchedEnvelopeError = 0.0;
-    double searchedEnvelopeImprovementPercent = 0.0;
-    double searchedResponseSpectralError = 0.0;
-    double searchedResponseSpectralImprovementPercent = 0.0;
-    double searchedPerceptualResponseSpectralError = 0.0;
-    double searchedPerceptualResponseSpectralImprovementPercent = 0.0;
-
-    // Level-conditioned temporal errors (low/mid/high stimulus excitation).
-    double originalLowLevelNmse = 0.0, originalMidLevelNmse = 0.0, originalHighLevelNmse = 0.0;
-    double searchedLowLevelNmse = 0.0, searchedMidLevelNmse = 0.0, searchedHighLevelNmse = 0.0;
-    double searchedLowLevelImprovementPercent = 0.0;
-    double searchedMidLevelImprovementPercent = 0.0;
-    double searchedHighLevelImprovementPercent = 0.0;
-    std::string searchedDecisionReason;
-
-};
-
 using RefineStatusCallback = std::function<void(const std::wstring&)>;
 
-// Current VST-style CAB Tone Match refinement on the final 20 seconds.
-// Generates auto_tonematch_ir.wav (2048-sample minimum-phase), then applies it through
-// the existing Corrective IR implementation. The analysis matches SOURCE_latest_19 style,
-// but the exported solver is not yet an exact replica of the VST 1024-sample export path.
+// CAB Tone Match refinement on the final 20 seconds.
+// The 2048-sample minimum-phase IR stays in memory and is applied directly to Block B.
+// The analysis/solver itself is unchanged by the diagnostic cleanup.
 bool refineCloBOnly(const fs::path& inputClo2048,
-                 const fs::path& stimulusWav,
-                 const fs::path& targetWav,
-                 const fs::path& outputClo2048,
-                 const fs::path& bestClo2048,
-                 const CloRefineConfig& config,
-                 CloRefineStats& stats,
-                 std::string& error,
-                 const RefineStatusCallback& status = {});
+                    const fs::path& stimulusWav,
+                    const fs::path& targetWav,
+                    const fs::path& outputClo2048,
+                    const CloRefineConfig& config,
+                    std::string& error,
+                    const RefineStatusCallback& status = {});
 
 } // namespace ntc

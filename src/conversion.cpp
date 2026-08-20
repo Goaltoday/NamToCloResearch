@@ -879,10 +879,9 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     }
 
     const fs::path work = makeWorkDirectory();
-    const fs::path diagnosticLog = uniquePath(outDir / (inputNam.stem().wstring() + L"_HTUSBTools_DIAGNOSTIC.log"));
-    appendDiagnostic(diagnosticLog, "=== NamToClo v2.6.7 diagnostic conversion begin ===");
-    appendDiagnostic(diagnosticLog, "Application: " + pathToUtf8(executablePath()));
-    appendDiagnostic(diagnosticLog, "Work directory: " + pathToUtf8(work));
+    // Normal conversions no longer create persistent diagnostic logs.
+    // The worker still accepts an empty diagnostic path, making all diagnostic writes no-ops.
+    const fs::path diagnosticLog;
     if (work.empty()) {
         result.exitCode = kExitStageFailure;
         result.error = "Could not create temporary work directory.";
@@ -910,19 +909,6 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
         return result;
     }
 
-    // Diagnostic-only preserved copies. These make it possible to compare the exact staged
-    // WAV/NAM between a failing non-elevated run and a successful elevated run.
-    const fs::path diagInputWav = uniquePath(outDir / (inputNam.stem().wstring() + L"_DIAG_INPUT.wav"));
-    const fs::path diagInputNam = uniquePath(outDir / (inputNam.stem().wstring() + L"_DIAG_INPUT.nam"));
-    std::error_code diagEc;
-    fs::copy_file(worker.inputWav, diagInputWav, fs::copy_options::overwrite_existing, diagEc);
-    appendDiagnostic(diagnosticLog, std::string("PARENT DIAG COPY WAV: ") + (diagEc ? ("FAILED: " + diagEc.message()) : fileDiagnostic(diagInputWav)));
-    diagEc.clear();
-    fs::copy_file(worker.inputNam, diagInputNam, fs::copy_options::overwrite_existing, diagEc);
-    appendDiagnostic(diagnosticLog, std::string("PARENT DIAG COPY NAM: ") + (diagEc ? ("FAILED: " + diagEc.message()) : fileDiagnostic(diagInputNam)));
-    appendDiagnostic(diagnosticLog, "PARENT HASH: staged WAV fnv1a64=" + hex64(fnv1aFile(worker.inputWav)));
-    appendDiagnostic(diagnosticLog, "PARENT HASH: staged NAM fnv1a64=" + hex64(fnv1aFile(worker.inputNam)));
-    appendDiagnostic(diagnosticLog, wavHeaderDiagnostic(worker.inputWav));
 
     SharedBuffer shared;
     if (!createSharedBuffer(shared, error)) {
@@ -941,7 +927,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     const int workerExit = launchWorker(worker, shared, capturedValid, error);
     if (workerExit != kExitOk || !capturedValid || !valid2048(worker.outputClo)) {
         result.exitCode = workerExit != kExitOk ? workerExit : kExitConversionBadSize;
-        result.error = error.empty() ? "The generated Ampero CLO failed validation. Diagnostic log: " + pathToUtf8(diagnosticLog) : error;
+        result.error = error.empty() ? "The generated Ampero CLO failed validation." : error;
         fs::remove_all(work, ec);
         return result;
     }
@@ -955,8 +941,6 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
     // stimulus through the original Ampero 2048 CLO. Tone Match then compares
     // the common final 20-second section.
     fs::path refinedWorkClo;
-    fs::path bestWorkClo;
-    CloRefineStats refineStats{};
     if (refine.enabled) {
         fs::path refineStimulus = worker.inputWav;
         fs::path refineTarget = worker.outputWav;
@@ -1010,7 +994,7 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
             if (refineWorkerExit != kExitOk || !refineCapturedValid || !valid2048(refineWorker.outputClo)) {
                 result.exitCode = refineWorkerExit != kExitOk ? refineWorkerExit : kExitConversionBadSize;
                 result.error = error.empty()
-                    ? "Could not render the refinement stimulus through the NAM. Diagnostic log: " + pathToUtf8(diagnosticLog)
+                    ? "Could not render the refinement stimulus through the NAM."
                     : error;
                 fs::remove_all(work, ec);
                 return result;
@@ -1022,9 +1006,8 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
         }
 
         refinedWorkClo = work / L"ampero_2048_REFINED.clo";
-        bestWorkClo = work / L"ampero_2048_REFINED_CANDIDATE.clo";
-        if (!refineCloBOnly(worker.outputClo, refineStimulus, refineTarget, refinedWorkClo, bestWorkClo,
-                           refine, refineStats, error, status)
+        if (!refineCloBOnly(worker.outputClo, refineStimulus, refineTarget, refinedWorkClo,
+                           refine, error, status)
             || !valid2048(refinedWorkClo)) {
             result.exitCode = kExitStageFailure;
             result.error = error.empty() ? "CLO refinement failed." : error;
@@ -1032,30 +1015,6 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
             return result;
         }
 
-        result.hasRefineStats = true;
-        result.refineMetricImproved = refineStats.improved;
-        result.refineOriginalResponseSpectralError = refineStats.originalResponseSpectralError;
-        result.refineResponseSpectralError = refineStats.refinedResponseSpectralError;
-        result.refineResponseSpectralImprovementPercent = refineStats.responseSpectralImprovementPercent;
-        result.refineOriginalPerceptualResponseSpectralError = refineStats.originalPerceptualResponseSpectralError;
-        result.refinePerceptualResponseSpectralError = refineStats.refinedPerceptualResponseSpectralError;
-        result.refinePerceptualResponseSpectralImprovementPercent = refineStats.perceptualResponseSpectralImprovementPercent;
-        result.refineDecisionReason = refineStats.searchedDecisionReason;
-
-        if (status) {
-            std::wostringstream refineSummary;
-            refineSummary << std::fixed << std::setprecision(3)
-                          << L"Tone Match raw metric: before " << result.refineOriginalResponseSpectralError
-                          << L" dB, after " << result.refineResponseSpectralError
-                          << L" dB; guitar-weighted: before " << result.refineOriginalPerceptualResponseSpectralError
-                          << L" dB, after " << result.refinePerceptualResponseSpectralError
-                          << L" dB, change " << std::showpos << std::setprecision(2)
-                          << result.refinePerceptualResponseSpectralImprovementPercent << L"%" << std::noshowpos
-                          << L". REFINED correction applied ("
-                          << (result.refineMetricImproved ? L"weighted metric improved" : L"weighted metric did not improve")
-                          << L").";
-            status(refineSummary.str());
-        }
     }
 
     fs::path sourceForOutput = worker.outputClo;
@@ -1116,7 +1075,6 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
         }
     }
 
-    appendDiagnostic(diagnosticLog, "=== Conversion completed successfully ===");
     fs::remove_all(work, ec);
     result.ok = true;
     result.exitCode = kExitOk;

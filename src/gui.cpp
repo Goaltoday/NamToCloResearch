@@ -1276,23 +1276,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             if (!r->refinedGp2001024.empty()) {
                 resultMessage += L"\r\n\r\nRefined GP-200 1024:\r\n" + r->refinedGp2001024.wstring();
             }
-            if (r->hasRefineStats) {
-                wchar_t metricText[768]{};
-                swprintf_s(metricText,
-                           L"\r\n\r\nTone Match refinement:\r\n"
-                           L"Raw spectral error: %.3f -> %.3f dB (%+.2f %%)\r\n"
-                           L"Guitar-weighted error: %.3f -> %.3f dB (%+.2f %%)\r\n"
-                           L"Weighted result: %s\r\n"
-                           L"REFINED correction: APPLIED",
-                           r->refineOriginalResponseSpectralError,
-                           r->refineResponseSpectralError,
-                           r->refineResponseSpectralImprovementPercent,
-                           r->refineOriginalPerceptualResponseSpectralError,
-                           r->refinePerceptualResponseSpectralError,
-                           r->refinePerceptualResponseSpectralImprovementPercent,
-                           r->refineMetricImproved ? L"IMPROVED" : L"WORSE / UNCHANGED");
-                resultMessage += metricText;
-            }
             setText(gStatus, r->refinedGp2001024.empty() ? L"Done. Two CLO files were generated successfully." : L"Done. Three CLO files were generated successfully.");
             const std::wstring doneTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;
             MessageBoxW(hwnd, resultMessage.c_str(), doneTitle.c_str(), MB_ICONINFORMATION | MB_OK);

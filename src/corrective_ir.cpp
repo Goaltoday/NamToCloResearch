@@ -260,7 +260,7 @@ double rms(const std::array<double, kBlockBCount>& values) {
 } // namespace
 
 bool applyCorrectiveIrToClo(const fs::path& sourceClo,
-                            const fs::path& correctiveWav,
+                            const std::vector<float>& correctiveIr,
                             const fs::path& destinationClo,
                             CorrectiveIrStats& stats,
                             std::string& error,
@@ -285,11 +285,18 @@ bool applyCorrectiveIrToClo(const fs::path& sourceClo,
         return false;
     }
 
-    std::vector<double> ir;
-    if (!decodeCorrectiveIr(correctiveWav, ir, error)) return false;
-    if (ir.empty()) {
-        error = "Corrective IR WAV has no samples.";
+    if (correctiveIr.empty()) {
+        error = "Corrective IR has no samples.";
         return false;
+    }
+    std::vector<double> ir;
+    ir.reserve(correctiveIr.size());
+    for (const float sample : correctiveIr) {
+        if (!std::isfinite(sample)) {
+            error = "Corrective IR contains a non-finite sample.";
+            return false;
+        }
+        ir.push_back(static_cast<double>(sample));
     }
 
     std::array<double, kBlockBCount> original{};
@@ -355,6 +362,28 @@ bool applyCorrectiveIrToClo(const fs::path& sourceClo,
     data[0x09] = static_cast<std::uint8_t>(crc & 0xFFu);
 
     return writeFileBytes(destinationClo, data.data(), data.size(), error);
+}
+
+bool applyCorrectiveIrToClo(const fs::path& sourceClo,
+                            const fs::path& correctiveWav,
+                            const fs::path& destinationClo,
+                            CorrectiveIrStats& stats,
+                            std::string& error,
+                            double postCorrectionDb) {
+    std::vector<double> decoded;
+    if (!decodeCorrectiveIr(correctiveWav, decoded, error)) return false;
+    std::vector<float> ir;
+    ir.reserve(decoded.size());
+    for (const double sample : decoded) {
+        if (!std::isfinite(sample)
+            || sample > static_cast<double>(std::numeric_limits<float>::max())
+            || sample < -static_cast<double>(std::numeric_limits<float>::max())) {
+            error = "Corrective IR WAV contains an invalid sample.";
+            return false;
+        }
+        ir.push_back(static_cast<float>(sample));
+    }
+    return applyCorrectiveIrToClo(sourceClo, ir, destinationClo, stats, error, postCorrectionDb);
 }
 
 } // namespace ntc

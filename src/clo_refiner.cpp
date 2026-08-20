@@ -17,15 +17,7 @@ namespace ntc {
 namespace {
 constexpr std::uint32_t kSampleRate = 44100;
 constexpr std::size_t kCoeffBase = 0x88;
-constexpr std::size_t kStimulusFrames = 50u * kSampleRate;
 constexpr std::size_t kPreferredFftSize = 32768;
-constexpr std::array<std::size_t,3> kStftFftSizes = {512, 2048, 8192};
-constexpr std::array<std::size_t,3> kStftHopSizes = {256, 1024, 4096};
-constexpr std::array<std::size_t,3> kEnvelopeWindows = {256, 2048, 8192};
-constexpr std::size_t kLevelWindow = 2048;
-constexpr double kMetricEpsilon = 1.0e-12;
-constexpr std::size_t kABandCount = 10;
-constexpr std::array<double,kABandCount> kABandHz = {40.0, 80.0, 160.0, 315.0, 630.0, 1250.0, 2500.0, 5000.0, 10000.0, 18000.0};
 
 std::uint16_t le16(const std::uint8_t* p) { return static_cast<std::uint16_t>(p[0] | (p[1] << 8)); }
 std::uint32_t le32(const std::uint8_t* p) { return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) | (static_cast<std::uint32_t>(p[2]) << 16) | (static_cast<std::uint32_t>(p[3]) << 24); }
@@ -194,23 +186,6 @@ double fitScale(const std::vector<float>& candidate,const std::vector<float>& ta
     return cc>1e-30L?static_cast<double>(ct/cc):1.0;
 }
 
-double nmseRange(const std::vector<float>& candidate,const std::vector<float>& target,double scale,std::size_t begin,std::size_t end){
-    const std::size_t n=std::min(candidate.size(),target.size());
-    begin=std::min(begin,n); end=std::min(end,n); if(end<=begin)return 0.0;
-    long double er=0.0L,tt=0.0L;
-    for(std::size_t i=begin;i<end;++i){ const long double t=target[i]; const long double d=scale*static_cast<long double>(candidate[i])-t; er+=d*d; tt+=t*t; }
-    return tt>1e-30L?static_cast<double>(er/tt):0.0;
-}
-
-struct StftReference {
-    std::size_t fftSize = 0;
-    std::size_t hopSize = 0;
-    std::size_t bins = 0;
-    std::size_t frames = 0;
-    std::vector<float> magnitude;
-    long double energy = 0.0L;
-};
-
 std::vector<float> hannWindow(std::size_t n){
     std::vector<float> w(n);
     constexpr double pi=3.14159265358979323846;
@@ -219,191 +194,13 @@ std::vector<float> hannWindow(std::size_t n){
     return w;
 }
 
-StftReference buildStftReference(const std::vector<float>& signal,std::size_t fftSize,std::size_t hopSize,double scale){
-    StftReference r;
-    r.fftSize=fftSize; r.hopSize=hopSize; r.bins=fftSize/2+1;
-    r.frames=signal.empty()?0:((signal.size()+hopSize-1)/hopSize);
-    r.magnitude.resize(r.frames*r.bins);
-    const auto window=hannWindow(fftSize);
-    std::vector<std::complex<float>> buf(fftSize);
-    for(std::size_t frame=0;frame<r.frames;++frame){
-        const std::size_t pos=frame*hopSize;
-        std::fill(buf.begin(),buf.end(),std::complex<float>{});
-        const std::size_t count=pos<signal.size()?std::min(fftSize,signal.size()-pos):0;
-        for(std::size_t i=0;i<count;++i) buf[i]=std::complex<float>(static_cast<float>(scale*signal[pos+i])*window[i],0.0f);
-        fft(buf,false);
-        for(std::size_t k=0;k<r.bins;++k){
-            const float mag=std::abs(buf[k]);
-            r.magnitude[frame*r.bins+k]=mag;
-            r.energy+=static_cast<long double>(mag)*mag;
-        }
-    }
-    return r;
 }
-
-struct StftLossParts { double spectralConvergence=0.0, logMagnitude=0.0, total=0.0; };
-
-StftLossParts stftLoss(const std::vector<float>& candidate,double scale,const StftReference& target){
-    if(target.frames==0 || target.bins==0) return {};
-    const auto window=hannWindow(target.fftSize);
-    std::vector<std::complex<float>> buf(target.fftSize);
-    long double diff2=0.0L, logAbs=0.0L;
-    std::size_t used=0;
-    constexpr double eps=1.0e-7;
-    for(std::size_t frame=0;frame<target.frames;++frame){
-        const std::size_t pos=frame*target.hopSize;
-        std::fill(buf.begin(),buf.end(),std::complex<float>{});
-        const std::size_t count=pos<candidate.size()?std::min(target.fftSize,candidate.size()-pos):0;
-        for(std::size_t i=0;i<count;++i) buf[i]=std::complex<float>(static_cast<float>(scale*candidate[pos+i])*window[i],0.0f);
-        fft(buf,false);
-        for(std::size_t k=0;k<target.bins;++k){
-            const double cm=std::abs(buf[k]);
-            const double tm=target.magnitude[frame*target.bins+k];
-            const long double d=cm-tm;
-            diff2+=d*d;
-            logAbs+=std::abs(std::log(cm+eps)-std::log(tm+eps));
-            ++used;
-        }
-    }
-    StftLossParts out;
-    out.spectralConvergence=target.energy>1e-30L?std::sqrt(static_cast<double>(diff2/target.energy)):0.0;
-    out.logMagnitude=used?static_cast<double>(logAbs/used):0.0;
-    // Parallel WaveGAN-style combination: spectral convergence + log-magnitude.
-    out.total=out.spectralConvergence+out.logMagnitude;
-    return out;
-}
-
-struct MultiStftReference { std::array<StftReference,3> resolutions; };
-
-MultiStftReference buildMultiStftReference(const std::vector<float>& target){
-    MultiStftReference r;
-    for(std::size_t i=0;i<r.resolutions.size();++i)
-        r.resolutions[i]=buildStftReference(target,kStftFftSizes[i],kStftHopSizes[i],1.0);
-    return r;
-}
-
-double multiResolutionStftLoss(const std::vector<float>& candidate,double scale,const MultiStftReference& target){
-    double total=0.0;
-    for(const auto& r:target.resolutions) total+=stftLoss(candidate,scale,r).total;
-    return total/static_cast<double>(target.resolutions.size());
-}
-
-std::vector<double> envelopeDb(const std::vector<float>& signal,double scale,std::size_t windowSize){
-    std::vector<double> out;
-    out.reserve((signal.size()+windowSize-1)/windowSize);
-    for(std::size_t pos=0;pos<signal.size();pos+=windowSize){
-        const std::size_t end=std::min(signal.size(),pos+windowSize);
-        long double ss=0.0L;
-        for(std::size_t i=pos;i<end;++i){const long double x=scale*static_cast<long double>(signal[i]);ss+=x*x;}
-        const double rms=end>pos?std::sqrt(static_cast<double>(ss/(end-pos))):0.0;
-        out.push_back(20.0*std::log10(std::max(rms,1.0e-8)));
-    }
-    return out;
-}
-
-double envelopeMae(const std::vector<double>& candidate,const std::vector<double>& target){
-    const std::size_t n=std::min(candidate.size(),target.size()); if(n==0)return 0.0;
-    long double e=0.0L; std::size_t used=0;
-    for(std::size_t i=0;i<n;++i){
-        if(candidate[i]<-95.0 && target[i]<-95.0) continue;
-        e+=std::abs(candidate[i]-target[i]); ++used;
-    }
-    return used?static_cast<double>(e/used):0.0;
-}
-
-struct MultiEnvelopeReference { std::array<std::vector<double>,3> scales; };
-
-MultiEnvelopeReference buildMultiEnvelopeReference(const std::vector<float>& target){
-    MultiEnvelopeReference r;
-    for(std::size_t i=0;i<r.scales.size();++i) r.scales[i]=envelopeDb(target,1.0,kEnvelopeWindows[i]);
-    return r;
-}
-
-double multiScaleEnvelopeError(const std::vector<float>& candidate,double scale,const MultiEnvelopeReference& target){
-    double e=0.0;
-    for(std::size_t i=0;i<target.scales.size();++i)
-        e+=envelopeMae(envelopeDb(candidate,scale,kEnvelopeWindows[i]),target.scales[i]);
-    return e/static_cast<double>(target.scales.size());
-}
-
-
-
-struct LevelReference {
-    std::size_t windowSize = kLevelWindow;
-    std::vector<std::uint8_t> band; // 0=inactive, 1=low, 2=mid, 3=high
-    double lowThreshold = 0.0;
-    double highThreshold = 0.0;
-};
-
-LevelReference buildLevelReference(const std::vector<float>& stimulus){
-    LevelReference r;
-    const std::size_t windows=(stimulus.size()+r.windowSize-1)/r.windowSize;
-    r.band.assign(windows,0);
-    std::vector<double> rms(windows,0.0), active;
-    active.reserve(windows);
-    double maxRms=0.0;
-    for(std::size_t w=0;w<windows;++w){
-        const std::size_t begin=w*r.windowSize;
-        const std::size_t end=std::min(stimulus.size(),begin+r.windowSize);
-        long double ss=0.0L;
-        for(std::size_t i=begin;i<end;++i){ const long double x=stimulus[i]; ss+=x*x; }
-        const double v=end>begin?std::sqrt(static_cast<double>(ss/(end-begin))):0.0;
-        rms[w]=v; maxRms=std::max(maxRms,v);
-    }
-    const double activeFloor=maxRms*1.0e-3; // -60 dB relative to the loudest stimulus window
-    for(double v:rms) if(v>activeFloor) active.push_back(v);
-    if(active.size()<3){
-        for(std::size_t w=0;w<windows;++w) if(rms[w]>activeFloor) r.band[w]=2;
-        return r;
-    }
-    std::sort(active.begin(),active.end());
-    auto quantile=[&](double q){
-        const double pos=q*double(active.size()-1);
-        const std::size_t i0=static_cast<std::size_t>(pos);
-        const std::size_t i1=std::min(i0+1,active.size()-1);
-        const double f=pos-double(i0);
-        return active[i0]+(active[i1]-active[i0])*f;
-    };
-    r.lowThreshold=quantile(1.0/3.0);
-    r.highThreshold=quantile(2.0/3.0);
-    for(std::size_t w=0;w<windows;++w){
-        const double v=rms[w];
-        if(v<=activeFloor) r.band[w]=0;
-        else if(v<=r.lowThreshold) r.band[w]=1;
-        else if(v<=r.highThreshold) r.band[w]=2;
-        else r.band[w]=3;
-    }
-    return r;
-}
-
-std::array<double,3> levelNmse(const std::vector<float>& candidate,const std::vector<float>& target,double scale,const LevelReference& levels){
-    std::array<long double,3> er{0,0,0}, tt{0,0,0};
-    const std::size_t n=std::min(candidate.size(),target.size());
-    for(std::size_t w=0;w<levels.band.size();++w){
-        const auto b=levels.band[w]; if(b<1 || b>3) continue;
-        const std::size_t begin=w*levels.windowSize;
-        if(begin>=n) break;
-        const std::size_t end=std::min(n,begin+levels.windowSize);
-        const std::size_t bi=static_cast<std::size_t>(b-1);
-        for(std::size_t i=begin;i<end;++i){
-            const long double t=target[i];
-            const long double d=scale*static_cast<long double>(candidate[i])-t;
-            er[bi]+=d*d; tt[bi]+=t*t;
-        }
-    }
-    std::array<double,3> out{};
-    for(std::size_t i=0;i<3;++i) out[i]=tt[i]>1e-30L?static_cast<double>(er[i]/tt[i]):0.0;
-    return out;
-}
-
-}
-
 
 namespace {
 // Current SOURCE_latest_19-style CAB Tone Match analysis on final 20 s.
 // No band guards, no confidence masking, no artificial HF freeze and no global-level removal.
-// The generated 2048-sample minimum-phase IR is exported as a WAV and then applied through
-// the existing applyCorrectiveIrToClo() path, exactly like a manually selected Corrective IR.
+// The generated 2048-sample minimum-phase IR is applied directly in memory to Block B.
+// This avoids creating a temporary diagnostic WAV without changing the correction itself.
 constexpr std::size_t kV26Fft=16384;
 constexpr std::size_t kV26Hop=4096;
 constexpr int kV26Groups=11;
@@ -439,76 +236,15 @@ static V26Comp v26compare(const V26Profile&s,const V26Profile&t){V26Comp c;if(!s
 static double v26SmoothWidth(double amount){struct P{double a,w;};static constexpr P p[]={{0,0},{.25,1.0/24},{.5,1.0/12},{.75,1.0/6},{1,1.0/3}};if(amount<=0)return 0;for(int i=1;i<5;++i)if(amount<=p[i].a){double q=(amount-p[i-1].a)/(p[i].a-p[i-1].a);return p[i-1].w+q*(p[i].w-p[i-1].w);}return p[4].w;}
 static std::vector<double> v26smooth(const V26Comp&c,double amount){std::vector<double> out(c.raw.size());if(amount<=0)return c.raw;double width=v26SmoothWidth(amount),sigma=std::max(width/2.354820045,1e-6),maxd=3*sigma;for(std::size_t i=0;i<c.raw.size();++i){double sw=0,sx=0;for(std::size_t j=0;j<c.raw.size();++j){double d=std::log2(c.f[j]/c.f[i]);if(std::abs(d)>maxd)continue;double w=std::exp(-.5*d*d/(sigma*sigma));sx+=w*c.raw[j];sw+=w;}out[i]=sw>1e-12?sx/sw:c.raw[i];}return out;}
 static std::vector<float> v26minPhaseIr(const V26Comp&c,double smooth){auto curve=v26smooth(c,smooth);const std::size_t N=4096;std::vector<std::complex<float>> logsp(N),cep(N),mc(N),cls(N),mps(N),imp(N);for(std::size_t k=0;k<=N/2;++k){double hz=double(k)*kSampleRate/N,db=v26interp(c.f,curve,hz),lm=db*0.11512925464970229;logsp[k]={float(lm),0};if(k>0&&k<N/2)logsp[N-k]={float(lm),0};}fft(logsp,true);cep=logsp;mc[0]=cep[0];for(std::size_t i=1;i<N/2;++i)mc[i]=cep[i]*2.0f;mc[N/2]=cep[N/2];fft(mc,false);cls=mc;for(std::size_t i=0;i<N;++i)mps[i]=std::exp(cls[i]);fft(mps,true);imp=mps;std::vector<float> ir(kV26IrLength);for(std::size_t i=0;i<ir.size();++i)ir[i]=imp[i].real();return ir;}
-static bool v26writeFloatWav(const fs::path&path,const std::vector<float>&x,std::string&error){std::ofstream f(path,std::ios::binary);if(!f){error="Cannot write automatic tone-match IR WAV: "+pathToUtf8(path);return false;}auto w16=[&](std::uint16_t v){char b[2]={char(v&255),char((v>>8)&255)};f.write(b,2);};auto w32=[&](std::uint32_t v){char b[4]={char(v&255),char((v>>8)&255),char((v>>16)&255),char((v>>24)&255)};f.write(b,4);};std::uint32_t data=std::uint32_t(x.size()*4),riff=36+data;f.write("RIFF",4);w32(riff);f.write("WAVEfmt ",8);w32(16);w16(3);w16(1);w32(kSampleRate);w32(kSampleRate*4);w16(4);w16(32);f.write("data",4);w32(data);f.write(reinterpret_cast<const char*>(x.data()),data);if(!f){error="Failed writing automatic tone-match IR WAV";return false;}return true;}
 static void renderWithB(const std::vector<float>& preB,const std::vector<float>& B,std::vector<float>& out){ FirFftPlan plan(B); plan.process(preB,out);}
-// Historical/reference metric. Every comparison point keeps at least 5% weight,
-// even when the spectral estimate has almost no confidence there.  Keep this
-// metric for diagnostics so old/new runs remain comparable.
-static double v26toneErrorRaw(const V26Comp& c) {
-    long double ss = 0.0L, w = 0.0L;
-    for (std::size_t i = 0; i < c.raw.size(); ++i) {
-        const double q = std::max(c.conf[i], 0.05);
-        ss += q * c.raw[i] * c.raw[i];
-        w += q;
-    }
-    return w > 0.0L ? std::sqrt(static_cast<double>(ss / w)) : 0.0;
-}
 
-static double v26smoothStep(double x) {
-    x = std::clamp(x, 0.0, 1.0);
-    return x * x * (3.0 - 2.0 * x);
-}
-
-// Experimental perceptual weighting for distorted-guitar / full-rig matching.
-// It deliberately does NOT change the Tone Match correction itself; it only
-// changes how the already-generated result is judged.
-//
-//  - below 60 Hz: ignored
-//  - 60..120 Hz: smoothly enters the useful guitar band
-//  - 120 Hz..6 kHz: full weight
-//  - 6..12 kHz: progressively reduced
-//  - 12..16 kHz: strongly reduced to zero
-//  - above 16 kHz: ignored
-//
-// Confidence is used directly, with no artificial 5% floor.  v26analyse()
-// already folds spectral energy and frame/group stability into confidence,
-// so very-low-energy / unstable bins no longer dominate the score.
-static double v26guitarBandWeight(double hz) {
-    if (hz < 60.0 || hz >= 16000.0) return 0.0;
-    if (hz < 120.0) {
-        const double t = v26smoothStep((hz - 60.0) / 60.0);
-        return 0.15 + 0.85 * t;
-    }
-    if (hz <= 6000.0) return 1.0;
-    if (hz < 12000.0) {
-        const double t = v26smoothStep((hz - 6000.0) / 6000.0);
-        return 1.0 - 0.80 * t; // 1.0 -> 0.20
-    }
-    const double t = v26smoothStep((hz - 12000.0) / 4000.0);
-    return 0.20 * (1.0 - t);   // 0.20 -> 0.0
-}
-
-static double v26toneErrorPerceptual(const V26Comp& c) {
-    long double ss = 0.0L, w = 0.0L;
-    for (std::size_t i = 0; i < c.raw.size(); ++i) {
-        const double confidence = std::clamp(c.conf[i], 0.0, 1.0);
-        const double band = v26guitarBandWeight(c.f[i]);
-        const double q = confidence * band;
-        if (q <= 1.0e-9) continue;
-        ss += q * c.raw[i] * c.raw[i];
-        w += q;
-    }
-    return w > 0.0L ? std::sqrt(static_cast<double>(ss / w)) : v26toneErrorRaw(c);
-}
 }
 
 bool refineCloBOnly(const fs::path& inputClo2048,
                     const fs::path& stimulusWav,
                     const fs::path& targetWav,
                     const fs::path& outputClo2048,
-                    const fs::path& bestClo2048,
                     const CloRefineConfig& config,
-                    CloRefineStats& stats,
                     std::string& error,
                     const RefineStatusCallback& status) {
     (void)config;
@@ -532,23 +268,18 @@ bool refineCloBOnly(const fs::path& inputClo2048,
         return false;
     }
 
-    if (status) status(L"Rendering CLO for VST-style Tone Match...");
+    if (status) status(L"Rendering CLO for Tone Match...");
     auto aout = precomputeA(m, in, in.size());
     std::vector<float> preB, orig;
     renderPreB(m, aout, m.pp, m.pn, m.kp, m.kn, preB);
     renderWithB(preB, m.B, orig);
 
-    // Tone Match is always performed on the last 20 seconds of each signal.
-    // This lets an external 20-second (or longer) WAV be used as the target
-    // without requiring it to contain the preceding 50-second stimulus.
     const std::size_t sourceStart = orig.size() - tailFrames;
     const std::size_t targetStart = target.size() - tailFrames;
     std::vector<float> sourceTail(orig.begin() + static_cast<std::ptrdiff_t>(sourceStart), orig.end());
     std::vector<float> targetTail(target.begin() + static_cast<std::ptrdiff_t>(targetStart), target.end());
 
     const double fixedScale = fitScale(sourceTail, targetTail);
-    stats.outputScale = fixedScale;
-
     const auto sourceProfile = v26analyse(sourceTail, fixedScale, 0, tailFrames);
     const auto targetProfile = v26analyse(targetTail, 1.0, 0, tailFrames);
     const auto comparison = v26compare(sourceProfile, targetProfile);
@@ -557,70 +288,18 @@ bool refineCloBOnly(const fs::path& inputClo2048,
         return false;
     }
 
-    const double beforeRaw = v26toneErrorRaw(comparison);
-    const double beforePerceptual = v26toneErrorPerceptual(comparison);
-    stats.originalResponseSpectralError = beforeRaw;
-    stats.originalPerceptualResponseSpectralError = beforePerceptual;
-
+    // Keep the established refinement DSP unchanged: 5% smoothing and a
+    // 2048-sample minimum-phase IR.  The IR is now passed in memory, so no
+    // diagnostic/intermediate WAV is written to disk.
     const auto ir = v26minPhaseIr(comparison, kV26Smooth);
-    const fs::path irPath = bestClo2048.parent_path() / L"auto_tonematch_ir.wav";
-    if (!v26writeFloatWav(irPath, ir, error)) return false;
 
     if (status) status(L"Applying Tone Match correction to Block B...");
     CorrectiveIrStats correctionStats;
-    const fs::path applied = bestClo2048.parent_path() / L"v26_applied.clo";
     // Refinement intentionally uses 0 dB post gain; the historical manual
     // Corrective IR path keeps its own -6 dB default.
-    if (!applyCorrectiveIrToClo(inputClo2048, irPath, applied, correctionStats, error, 0.0)) return false;
+    if (!applyCorrectiveIrToClo(inputClo2048, ir, outputClo2048, correctionStats, error, 0.0)) return false;
 
-    std::vector<std::uint8_t> appliedBytes;
-    if (!readFileBytes(applied, appliedBytes, error)) return false;
-    Model appliedModel;
-    if (!parseModel(appliedBytes, appliedModel, error)) return false;
-
-    std::vector<float> candidate;
-    renderWithB(preB, appliedModel.B, candidate);
-    std::vector<float> candidateTail(candidate.begin() + static_cast<std::ptrdiff_t>(sourceStart), candidate.end());
-
-    const auto candidateProfile = v26analyse(candidateTail, fixedScale, 0, tailFrames);
-    const auto candidateComparison = v26compare(candidateProfile, targetProfile);
-    const double afterRaw = v26toneErrorRaw(candidateComparison);
-    const double afterPerceptual = v26toneErrorPerceptual(candidateComparison);
-    const auto improvement = [](double a, double b) { return a > 0.0 ? 100.0 * (a - b) / a : 0.0; };
-    stats.searchedResponseSpectralError = afterRaw;
-    stats.searchedResponseSpectralImprovementPercent = improvement(beforeRaw, afterRaw);
-    stats.searchedPerceptualResponseSpectralError = afterPerceptual;
-    stats.searchedPerceptualResponseSpectralImprovementPercent = improvement(beforePerceptual, afterPerceptual);
-
-    // Keep an internal candidate copy for validation/debugging only. It is not
-    // exported to the user's output folder.
-    if (!copyFileCreatingParents(applied, bestClo2048, error)) return false;
-
-    // The quality comparison is diagnostic only.  A REFINED output must always
-    // contain the Tone Match correction that was calculated, even when the
-    // selected spectral metric becomes worse.  This lets the user audition the
-    // actual refined model instead of silently receiving a copy of the base CLO.
-    // The user-facing quality judgement uses the guitar-weighted metric.
-    // The historical/raw metric remains available alongside it for diagnosis.
-    const bool metricImproved = afterPerceptual < beforePerceptual;
-    stats.searchedCandidateAccepted = metricImproved;
-    stats.improved = metricImproved;
-    stats.refinedResponseSpectralError = afterRaw;
-    stats.responseSpectralImprovementPercent = improvement(beforeRaw, afterRaw);
-    stats.refinedPerceptualResponseSpectralError = afterPerceptual;
-    stats.perceptualResponseSpectralImprovementPercent = improvement(beforePerceptual, afterPerceptual);
-
-    if (!copyFileCreatingParents(applied, outputClo2048, error)) return false;
-
-    constexpr double kMetricEpsilon = 1.0e-9;
-    if (afterPerceptual < beforePerceptual - kMetricEpsilon)
-        stats.searchedDecisionReason = "Tone Match correction applied; guitar-weighted metric improved";
-    else if (afterPerceptual > beforePerceptual + kMetricEpsilon)
-        stats.searchedDecisionReason = "Tone Match correction applied; guitar-weighted metric worsened";
-    else
-        stats.searchedDecisionReason = "Tone Match correction applied; guitar-weighted metric unchanged";
-
-    if (status) status(L"CLO refinement complete. Tone Match correction was applied to the REFINED output.");
+    if (status) status(L"CLO refinement complete. Tone Match correction applied.");
     return true;
 }
 
