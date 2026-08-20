@@ -300,9 +300,9 @@ void updateBackendUi() {
         EnableWindow(gRefineTargetEdit, FALSE);
         EnableWindow(gBrowseRefineTargetButton, FALSE);
         setText(gInfo,
-            L"Independent / Native: NAM is rendered locally and the CLO is trained/serialized in this program. "
-            L"No GP-200.exe or HTUSBTools.dll is loaded. Reconstructed native conversion baseline for comparison.");
-        setText(gStatus, L"Independent / Native backend selected. Ready for conversion.");
+            L"Independent / Experimental: NATIVE15 is used as the frozen GP-200-compatible baseline. "
+            L"Phase 1 adds a NAM-vs-CLO harmonic fingerprint report; it does not alter the generated CLO.");
+        setText(gStatus, L"Independent / Experimental selected. Phase 1 harmonic analysis is enabled.");
     } else {
         setText(gInfo,
             L"Current backend: existing HTUSBTools conversion path. Corrective IR and Tone Match refinement remain available.");
@@ -574,7 +574,7 @@ void startConversion(HWND hwnd) {
 #if NTC_HAS_INDEPENDENT_TRAINER
         ntc::IndependentTrainerConfig nativeConfig;
         if (gInputMode == InputMode::SingleNam) {
-            setText(gStatus, L"Starting independent/native conversion...");
+            setText(gStatus, L"Starting independent/experimental conversion...");
             std::thread([hwnd, input, out, stimulus, nativeConfig] {
                 auto result = std::make_unique<ntc::ConversionResult>(
                     ntc::convertNamToBothIndependent(input, out, stimulus, nativeConfig,
@@ -582,7 +582,7 @@ void startConversion(HWND hwnd) {
                 PostMessageW(hwnd, WM_APP_DONE_SINGLE, 0, reinterpret_cast<LPARAM>(result.release()));
             }).detach();
         } else {
-            setText(gStatus, L"Starting independent/native batch conversion...");
+            setText(gStatus, L"Starting independent/experimental batch conversion...");
             std::thread([hwnd, input, out, stimulus, nativeConfig] {
                 auto result = std::make_unique<ntc::BatchConversionResult>(
                     ntc::convertNamFolderIndependent(input, out, stimulus, nativeConfig,
@@ -816,9 +816,9 @@ void createUi(HWND hwnd) {
     tab.pszText = const_cast<LPWSTR>(L"Current / HTUSBTools");
     TabCtrl_InsertItem(gBackendTabs, 0, &tab);
 #if NTC_HAS_INDEPENDENT_TRAINER
-    tab.pszText = const_cast<LPWSTR>(L"Independent / Native");
+    tab.pszText = const_cast<LPWSTR>(L"Independent / Experimental");
 #else
-    tab.pszText = const_cast<LPWSTR>(L"Independent / Native (not built)");
+    tab.pszText = const_cast<LPWSTR>(L"Independent / Experimental (not built)");
 #endif
     TabCtrl_InsertItem(gBackendTabs, 1, &tab);
     tab.pszText = const_cast<LPWSTR>(L"GP-200 Uploader");
@@ -1117,10 +1117,10 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         std::string error;
         const auto rt = ntc::resolveDefaultRuntime();
         if (ntc::validateRuntime(rt, error)) {
-            setText(gStatus, L"Ready. Current/HTUSBTools, Independent/Native and GP-200 Uploader tabs are available.");
+            setText(gStatus, L"Ready. Current/HTUSBTools, Independent/Experimental and GP-200 Uploader tabs are available.");
         } else {
 #if NTC_HAS_INDEPENDENT_TRAINER
-            setText(gStatus, L"Independent/Native ready. Current/HTUSBTools runtime unavailable: " + ntc::fromUtf8(error));
+            setText(gStatus, L"Independent/Experimental ready. Current/HTUSBTools runtime unavailable: " + ntc::fromUtf8(error));
 #else
             setText(gStatus, L"Current runtime missing: " + ntc::fromUtf8(error));
 #endif
@@ -1275,6 +1275,21 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                                       + L"\r\n\r\nGP-200 1024:\r\n" + r->gp2001024.wstring();
             if (!r->refinedGp2001024.empty()) {
                 resultMessage += L"\r\n\r\nRefined GP-200 1024:\r\n" + r->refinedGp2001024.wstring();
+            }
+            if (r->hasRefineStats) {
+                wchar_t metricText[512]{};
+                swprintf_s(metricText,
+                           L"\r\n\r\nTone Match refinement:\r\n"
+                           L"Original spectral error: %.3f dB\r\n"
+                           L"Refined spectral error: %.3f dB\r\n"
+                           L"Improvement: %+.2f %%\r\n"
+                           L"Metric result: %s\r\n"
+                           L"REFINED correction: APPLIED",
+                           r->refineOriginalResponseSpectralError,
+                           r->refineResponseSpectralError,
+                           r->refineResponseSpectralImprovementPercent,
+                           r->refineMetricImproved ? L"IMPROVED" : L"WORSE / UNCHANGED");
+                resultMessage += metricText;
             }
             setText(gStatus, r->refinedGp2001024.empty() ? L"Done. Two CLO files were generated successfully." : L"Done. Three CLO files were generated successfully.");
             const std::wstring doneTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;

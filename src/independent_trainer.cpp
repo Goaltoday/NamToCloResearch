@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cwctype>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <numeric>
 #include <optional>
@@ -1608,6 +1609,150 @@ bool serialize2048(const fs::path&path,const Model&m,double trainerRate,std::str
     putDouble(d,0x40,m.post.b0);putDouble(d,0x48,m.post.b1);putDouble(d,0x50,m.post.b2);putDouble(d,0x58,m.post.a1);putDouble(d,0x60,m.post.a2);putFloat(d,0x68,m.pk.pp);putFloat(d,0x6c,m.pk.pn);putFloat(d,0x70,m.pk.kp);putFloat(d,0x74,m.pk.kn);put32(d,0x78,0);put32(d,0x7c,128);put32(d,0x80,128);put32(d,0x84,2048);
     auto A44=resampleFirOfficial(m.A,trainerRate,128);auto Bscaled=m.B;for(auto&v:Bscaled)v*=4.0f;auto B44=resampleFirOfficial(Bscaled,trainerRate,2048);for(std::size_t i=0;i<A44.size();++i)putFloat(d,0x88+4*i,A44[i]);for(std::size_t i=0;i<B44.size();++i)putFloat(d,0x88+4*(128+i),B44[i]);const auto crc=crc16Official(d.data()+0x0c,d.size()-0x0c);d[8]=static_cast<std::uint8_t>(crc);d[9]=static_cast<std::uint8_t>(crc>>8);return writeFileBytes(path,d.data(),d.size(),error);}
 
+// -----------------------------------------------------------------------------
+// Experimental phase 1: harmonic fingerprint
+// -----------------------------------------------------------------------------
+// This layer is deliberately diagnostic-only.  NATIVE15 remains untouched:
+// the CLO is generated first, then the exact serialized GP-200 B1024 file is
+// loaded back and compared with the NAM target on a deterministic sine matrix.
+// The report is the measurement baseline for later P/K, A and B experiments.
+
+float readFloatLe(const std::vector<std::uint8_t>&d,std::size_t o){
+    const std::uint32_t u=le32(d.data()+o);float v{};std::memcpy(&v,&u,sizeof(v));return v;
+}
+double readDoubleLe(const std::vector<std::uint8_t>&d,std::size_t o){
+    std::uint64_t u=0;for(int i=0;i<8;++i)u|=static_cast<std::uint64_t>(d[o+static_cast<std::size_t>(i)])<<(8*i);
+    double v{};std::memcpy(&v,&u,sizeof(v));return v;
+}
+
+bool loadGp200ModelForAnalysis(const fs::path&path,Model&m,std::string&error){
+    std::vector<std::uint8_t>d;if(!readFileBytes(path,d,error))return false;
+    if(d.size()<0x1288||std::memcmp(d.data(),"VTSI",4)!=0){error="Phase 1: invalid GP-200 CLO.";return false;}
+    if(le32(d.data()+0x78)!=0||le32(d.data()+0x7c)!=128||le32(d.data()+0x80)!=128||le32(d.data()+0x84)!=1024){
+        error="Phase 1: expected GP-200 A128/B1024 layout.";return false;
+    }
+    m.pre={readDoubleLe(d,0x18),readDoubleLe(d,0x20),readDoubleLe(d,0x28),readDoubleLe(d,0x30),readDoubleLe(d,0x38),0.0,0.0};
+    m.post={readDoubleLe(d,0x40),readDoubleLe(d,0x48),readDoubleLe(d,0x50),readDoubleLe(d,0x58),readDoubleLe(d,0x60),0.0,0.0};
+    m.pk={readFloatLe(d,0x68),readFloatLe(d,0x6c),readFloatLe(d,0x70),readFloatLe(d,0x74)};
+    m.A.resize(128);m.B.resize(1024);
+    for(std::size_t i=0;i<m.A.size();++i)m.A[i]=readFloatLe(d,0x88+4*i);
+    for(std::size_t i=0;i<m.B.size();++i)m.B[i]=readFloatLe(d,0x88+4*(128+i));
+    return true;
+}
+
+struct HarmonicCase{float frequencyHz=0.0f,inputDbfs=0.0f;std::size_t analysisStart=0,analysisCount=0;};
+struct HarmonicSet{std::array<double,8> amp{};double fundamentalDbfs=-300.0,evenDbc=-300.0,oddDbc=-300.0,thdDbc=-300.0;};
+
+std::vector<float> buildHarmonicMatrix(std::vector<HarmonicCase>&cases){
+    constexpr std::size_t sr=44100;
+    constexpr std::size_t silence=sr/4;      // 250 ms state clearing
+    constexpr std::size_t warmup=sr/2;       // 500 ms steady-state settling
+    constexpr std::size_t measure=sr;        // exactly 1 s -> integer-Hz DFT bins
+    constexpr std::array<float,7> freqs={80.0f,110.0f,220.0f,440.0f,880.0f,1320.0f,1760.0f};
+    constexpr std::array<float,6> levels={-30.0f,-24.0f,-18.0f,-12.0f,-6.0f,-3.0f};
+    std::vector<float>x;
+    x.reserve(freqs.size()*levels.size()*(silence+warmup+measure));
+    for(float db:levels){
+        const float gain=static_cast<float>(std::pow(10.0,static_cast<double>(db)/20.0));
+        for(float f:freqs){
+            x.insert(x.end(),silence,0.0f);
+            const std::size_t toneStart=x.size();
+            const std::size_t toneCount=warmup+measure;
+            for(std::size_t n=0;n<toneCount;++n){
+                const double ph=2.0*kPi*static_cast<double>(f)*static_cast<double>(n)/static_cast<double>(sr);
+                x.push_back(gain*static_cast<float>(std::sin(ph)));
+            }
+            cases.push_back({f,db,toneStart+warmup,measure});
+        }
+    }
+    return x;
+}
+
+bool renderNamTarget44100(const fs::path&modelPath,const std::vector<float>&input44100,std::vector<float>&output44100,
+                          std::string&error,const StatusCallback&status){
+    try{
+        auto dsp=nam::get_dsp(modelPath);if(!dsp){error="Phase 1: NeuralAmpModelerCore could not load the NAM.";return false;}
+        double rate=dsp->GetExpectedSampleRate();if(!(rate>1000.0&&rate<384000.0))rate=48000.0;
+        report(status,L"Experimental phase 1: rendering harmonic NAM reference...");
+        auto inModel=resampleR8Brain24(input44100,44100.0,rate);
+        std::vector<float>outModel(inModel.size(),0.0f);
+        constexpr int block=1024;dsp->Reset(rate,block);
+        std::vector<NAM_SAMPLE>ib(block,NAM_SAMPLE{}),ob(block,NAM_SAMPLE{});NAM_SAMPLE*ip[1]={ib.data()};NAM_SAMPLE*op[1]={ob.data()};
+        for(std::size_t pos=0;pos<inModel.size();pos+=block){
+            const int n=static_cast<int>(std::min<std::size_t>(block,inModel.size()-pos));
+            for(int i=0;i<n;++i)ib[static_cast<std::size_t>(i)]=static_cast<NAM_SAMPLE>(inModel[pos+static_cast<std::size_t>(i)]);
+            dsp->process(ip,op,n);
+            for(int i=0;i<n;++i)outModel[pos+static_cast<std::size_t>(i)]=static_cast<float>(ob[static_cast<std::size_t>(i)])*0.31f;
+        }
+        output44100=resampleR8Brain24(outModel,rate,44100.0);
+        output44100.resize(input44100.size(),0.0f);
+        return true;
+    }catch(const std::exception&e){error=std::string("Phase 1 NAM render: ")+e.what();return false;}
+}
+
+double goertzelAmplitude(const std::vector<float>&x,std::size_t start,std::size_t count,double frequency,double sr){
+    if(count==0||start>=x.size()||start+count>x.size()||!(frequency>0.0)||frequency>=sr*0.5)return 0.0;
+    const double omega=2.0*kPi*frequency/sr,co=std::cos(omega),si=std::sin(omega),coeff=2.0*co;
+    double s1=0.0,s2=0.0;
+    for(std::size_t i=0;i<count;++i){const double s0=static_cast<double>(x[start+i])+coeff*s1-s2;s2=s1;s1=s0;}
+    const double re=s1-s2*co,im=s2*si;
+    return 2.0*std::hypot(re,im)/static_cast<double>(count);
+}
+
+double db20(double v){return 20.0*std::log10(std::max(v,1.0e-15));}
+double ratioDb(double num,double den){return db20(std::max(num,1.0e-15)/std::max(den,1.0e-15));}
+
+HarmonicSet measureHarmonics(const std::vector<float>&x,const HarmonicCase&c){
+    HarmonicSet h;
+    for(std::size_t i=0;i<h.amp.size();++i)h.amp[i]=goertzelAmplitude(x,c.analysisStart,c.analysisCount,static_cast<double>(c.frequencyHz)*static_cast<double>(i+1),44100.0);
+    const double fundamental=std::max(h.amp[0],1.0e-15);h.fundamentalDbfs=db20(fundamental);
+    double even2=0.0,odd2=0.0,all2=0.0;
+    for(std::size_t i=1;i<h.amp.size();++i){const double p=h.amp[i]*h.amp[i];all2+=p;if(((i+1)&1u)==0u)even2+=p;else odd2+=p;}
+    h.evenDbc=ratioDb(std::sqrt(even2),fundamental);h.oddDbc=ratioDb(std::sqrt(odd2),fundamental);h.thdDbc=ratioDb(std::sqrt(all2),fundamental);
+    return h;
+}
+
+bool writeHarmonicFingerprint(const fs::path&modelPath,const fs::path&gp200Clo,const fs::path&reportPath,
+                              std::string&error,const StatusCallback&status){
+    Model gp;if(!loadGp200ModelForAnalysis(gp200Clo,gp,error))return false;
+    std::vector<HarmonicCase>cases;const auto testInput=buildHarmonicMatrix(cases);
+    std::vector<float>namOut;if(!renderNamTarget44100(modelPath,testInput,namOut,error,status))return false;
+    report(status,L"Experimental phase 1: rendering serialized GP-200 CLO...");
+    std::vector<float>cloOut;renderModel(gp,testInput,cloOut,true);
+    if(cloOut.size()!=testInput.size()){error="Phase 1: CLO renderer returned unexpected length.";return false;}
+
+    std::ofstream out(reportPath,std::ios::binary|std::ios::trunc);if(!out){error="Cannot create harmonic report: "+pathToUtf8(reportPath);return false;}
+    out<<"# Experimental Phase 1 harmonic fingerprint\n";
+    out<<"# NATIVE15 CLO generation is unchanged; this CSV is diagnostic only.\n";
+    out<<"# NAM reference path: 44.1k input -> r8brain -> NAM expected rate -> NAM * 0.31 -> r8brain -> 44.1k.\n";
+    out<<"# CLO path: exact serialized GP-200 A128/B1024 model at 44.1k.\n";
+    out<<"frequency_hz,input_dbfs,nam_h1_dbfs,clo_h1_dbfs,h1_delta_db";
+    for(int h=2;h<=8;++h)out<<",nam_h"<<h<<"_dbc,clo_h"<<h<<"_dbc,h"<<h<<"_delta_db";
+    out<<",nam_even_dbc,clo_even_dbc,even_delta_db,nam_odd_dbc,clo_odd_dbc,odd_delta_db,nam_thd_dbc,clo_thd_dbc,thd_delta_db\n";
+    out<<std::fixed<<std::setprecision(6);
+
+    double h1Abs=0.0,evenAbs=0.0,oddAbs=0.0,thdAbs=0.0;std::size_t n=0;
+    for(const auto&c:cases){
+        const auto nh=measureHarmonics(namOut,c),ch=measureHarmonics(cloOut,c);
+        out<<c.frequencyHz<<','<<c.inputDbfs<<','<<nh.fundamentalDbfs<<','<<ch.fundamentalDbfs<<','<<(ch.fundamentalDbfs-nh.fundamentalDbfs);
+        for(int h=2;h<=8;++h){
+            const double nd=ratioDb(nh.amp[static_cast<std::size_t>(h-1)],nh.amp[0]);
+            const double cd=ratioDb(ch.amp[static_cast<std::size_t>(h-1)],ch.amp[0]);
+            out<<','<<nd<<','<<cd<<','<<(cd-nd);
+        }
+        out<<','<<nh.evenDbc<<','<<ch.evenDbc<<','<<(ch.evenDbc-nh.evenDbc)
+           <<','<<nh.oddDbc<<','<<ch.oddDbc<<','<<(ch.oddDbc-nh.oddDbc)
+           <<','<<nh.thdDbc<<','<<ch.thdDbc<<','<<(ch.thdDbc-nh.thdDbc)<<'\n';
+        h1Abs+=std::fabs(ch.fundamentalDbfs-nh.fundamentalDbfs);evenAbs+=std::fabs(ch.evenDbc-nh.evenDbc);oddAbs+=std::fabs(ch.oddDbc-nh.oddDbc);thdAbs+=std::fabs(ch.thdDbc-nh.thdDbc);++n;
+    }
+    if(!out){error="Failed writing harmonic report: "+pathToUtf8(reportPath);return false;}
+    const double inv=n?1.0/static_cast<double>(n):0.0;
+    std::wostringstream os;os<<std::fixed<<std::setprecision(3)
+        <<L"Experimental phase 1: H1 MAE "<<(h1Abs*inv)<<L" dB, even MAE "<<(evenAbs*inv)
+        <<L" dB, odd MAE "<<(oddAbs*inv)<<L" dB, THD MAE "<<(thdAbs*inv)<<L" dB.";report(status,os.str());
+    return true;
+}
+
 fs::path uniqueOutput(const fs::path&dir,const std::wstring&stem,const wchar_t*suffix){fs::path p=dir/(stem+suffix);int i=2;while(fs::exists(p))p=dir/(stem+L"_"+std::to_wstring(i++)+suffix);return p;}
 
 } // namespace
@@ -1626,7 +1771,15 @@ ConversionResult convertNamToBothIndependent(const fs::path& inputNam,const fs::
     fitAB(m,input,target,sr,status);refineB(m,input,target,sr,status);
     r.ampero2048=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_2048.clo");if(!serialize2048(r.ampero2048,m,sr,error)){r.error=error;fs::remove_all(work,ec);return r;}
     r.gp2001024=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP200_1024.clo");if(!makeGp200CompactClo(r.ampero2048,r.gp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
-    fs::remove_all(work,ec);r.ok=true;report(status,L"Independent conversion complete.");return r;
+    if(trainer.generateHarmonicReport){
+        const fs::path harmonicReport=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_HARMONICS.csv");
+        std::string diagnosticError;
+        if(writeHarmonicFingerprint(modelPath,r.gp2001024,harmonicReport,diagnosticError,status))
+            report(status,L"Experimental phase 1 report: "+harmonicReport.filename().wstring());
+        else
+            report(status,L"Experimental phase 1 WARNING: "+std::wstring(diagnosticError.begin(),diagnosticError.end()));
+    }
+    fs::remove_all(work,ec);r.ok=true;report(status,L"Independent / Experimental conversion complete.");return r;
 }
 
 BatchConversionResult convertNamFolderIndependent(const fs::path& inputDirectory,const fs::path& outputDirectory,
