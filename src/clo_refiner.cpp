@@ -533,20 +533,27 @@ bool refineCloBOnly(const fs::path& inputClo2048,
     // exported to the user's output folder.
     if (!copyFileCreatingParents(applied, bestClo2048, error)) return false;
 
-    const bool accepted = after < before;
-    stats.searchedCandidateAccepted = accepted;
-    stats.improved = accepted;
-    stats.refinedResponseSpectralError = accepted ? after : before;
-    stats.responseSpectralImprovementPercent = improvement(before, stats.refinedResponseSpectralError);
-    if (accepted) {
-        if (!copyFileCreatingParents(applied, outputClo2048, error)) return false;
-        stats.searchedDecisionReason = "Tone Match target improved";
-    } else {
-        if (!copyFileCreatingParents(inputClo2048, outputClo2048, error)) return false;
-        stats.searchedDecisionReason = "Tone Match candidate rejected";
-    }
+    // The quality comparison is diagnostic only.  A REFINED output must always
+    // contain the Tone Match correction that was calculated, even when the
+    // selected spectral metric becomes worse.  This lets the user audition the
+    // actual refined model instead of silently receiving a copy of the base CLO.
+    const bool metricImproved = after < before;
+    stats.searchedCandidateAccepted = metricImproved;
+    stats.improved = metricImproved;
+    stats.refinedResponseSpectralError = after;
+    stats.responseSpectralImprovementPercent = improvement(before, after);
 
-    if (status) status(L"CLO refinement complete.");
+    if (!copyFileCreatingParents(applied, outputClo2048, error)) return false;
+
+    constexpr double kMetricEpsilon = 1.0e-9;
+    if (after < before - kMetricEpsilon)
+        stats.searchedDecisionReason = "Tone Match correction applied; spectral metric improved";
+    else if (after > before + kMetricEpsilon)
+        stats.searchedDecisionReason = "Tone Match correction applied; spectral metric worsened";
+    else
+        stats.searchedDecisionReason = "Tone Match correction applied; spectral metric unchanged";
+
+    if (status) status(L"CLO refinement complete. Tone Match correction was applied to the REFINED output.");
     return true;
 }
 

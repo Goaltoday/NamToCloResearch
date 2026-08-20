@@ -29,6 +29,16 @@ struct ConversionResult {
     fs::path ampero2048;
     fs::path gp2001024;
     fs::path refinedGp2001024;
+
+    // Tone Match refinement diagnostics.  These fields describe the metric
+    // measured before/after applying the correction; the REFINED file is
+    // generated regardless of whether this particular metric improves.
+    bool hasRefineStats = false;
+    bool refineMetricImproved = false;
+    double refineOriginalResponseSpectralError = 0.0;
+    double refineResponseSpectralError = 0.0;
+    double refineResponseSpectralImprovementPercent = 0.0;
+    std::string refineDecisionReason;
 };
 
 struct BatchConversionResult {
