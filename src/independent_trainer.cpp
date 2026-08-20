@@ -2017,14 +2017,28 @@ bool optimizePkExperimental(const fs::path&modelPath,const fs::path&baselineClo,
     if(!log){error="Failed writing phase 2 P/K summary: "+pathToUtf8(summaryPath);return false;}
     if(!writeGp200PkVariant(baselineClo,experimentalClo,bestModel.pk,error))return false;
 
-    // Full 42-case validation of the selected P/K, using the exact serialized experimental CLO.
-    Model full;if(!loadGp200ModelForAnalysis(experimentalClo,full,error))return false;
+    // Full 42-case validation of the selected P/K.  Render the exact accepted
+    // Model used by the optimizer, and independently verify that the serialized
+    // GP-200 CLO reloads to the same four P/K values.  This avoids the Phase-2
+    // diagnostic accidentally falling back to stale/baseline state while still
+    // guaranteeing that the written hardware file contains the accepted values.
+    Model serialized;if(!loadGp200ModelForAnalysis(experimentalClo,serialized,error))return false;
+    const auto pkNear=[](float a,float b){
+        const double da=std::fabs(static_cast<double>(a)-static_cast<double>(b));
+        const double sc=std::max({1.0,std::fabs(static_cast<double>(a)),std::fabs(static_cast<double>(b))});
+        return da<=1.0e-6*sc;
+    };
+    if(!pkNear(serialized.pk.pp,bestModel.pk.pp)||!pkNear(serialized.pk.pn,bestModel.pk.pn)||
+       !pkNear(serialized.pk.kp,bestModel.pk.kp)||!pkNear(serialized.pk.kn,bestModel.pk.kn)){
+        error="Phase 2: serialized GP-200 CLO P/K verification failed.";return false;
+    }
     std::vector<HarmonicCase>fullCases;const auto fullInput=buildHarmonicMatrix(fullCases);
     std::vector<float>fullNam;if(!renderNamTarget44100(modelPath,fullInput,fullNam,error,status))return false;
-    std::vector<float>fullClo;renderModel(full,fullInput,fullClo,true);
+    std::vector<float>fullClo;renderModel(bestModel,fullInput,fullClo,true);
     std::ofstream det(detailPath,std::ios::binary|std::ios::trunc);if(!det){error="Cannot create phase 2 harmonic report: "+pathToUtf8(detailPath);return false;}
     det<<"# Experimental Phase 2 optimized P/K harmonic fingerprint\n";
-    det<<"# pp="<<bestModel.pk.pp<<" pn="<<bestModel.pk.pn<<" kp="<<bestModel.pk.kp<<" kn="<<bestModel.pk.kn<<"\n";
+    det<<"# accepted_pp="<<bestModel.pk.pp<<" accepted_pn="<<bestModel.pk.pn<<" accepted_kp="<<bestModel.pk.kp<<" accepted_kn="<<bestModel.pk.kn<<"\n";
+    det<<"# serialized_pp="<<serialized.pk.pp<<" serialized_pn="<<serialized.pk.pn<<" serialized_kp="<<serialized.pk.kp<<" serialized_kn="<<serialized.pk.kn<<"\n";
     det<<"frequency_hz,input_dbfs,nam_h1_dbfs,clo_h1_dbfs,h1_delta_db";
     for(int h=2;h<=8;++h)det<<",nam_h"<<h<<"_dbc,clo_h"<<h<<"_dbc,h"<<h<<"_delta_db";
     det<<",nam_even_dbc,clo_even_dbc,even_delta_db,nam_odd_dbc,clo_odd_dbc,odd_delta_db,nam_thd_dbc,clo_thd_dbc,thd_delta_db\n";
