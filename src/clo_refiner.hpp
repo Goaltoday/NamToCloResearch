@@ -43,9 +43,17 @@ struct CloRefineStats {
     double envelopeImprovementPercent = 0.0;
 
     // Final-20-s VST-style Tone Match spectral error.
+    // Historical/raw final-20-s metric.  Low-confidence bins retain a 5% floor.
     double originalResponseSpectralError = 0.0;
     double refinedResponseSpectralError = 0.0;
     double responseSpectralImprovementPercent = 0.0;
+
+    // Guitar-weighted final-20-s metric used for the user-facing judgement.
+    // This de-emphasises sub-bass / extreme HF and uses spectral confidence
+    // directly, so low-energy unstable bins do not dominate the result.
+    double originalPerceptualResponseSpectralError = 0.0;
+    double refinedPerceptualResponseSpectralError = 0.0;
+    double perceptualResponseSpectralImprovementPercent = 0.0;
 
     // One calibration derived from the ORIGINAL CLO only and then frozen for
     // every candidate. It is intentionally not re-fitted during optimisation.
@@ -66,6 +74,8 @@ struct CloRefineStats {
     double searchedEnvelopeImprovementPercent = 0.0;
     double searchedResponseSpectralError = 0.0;
     double searchedResponseSpectralImprovementPercent = 0.0;
+    double searchedPerceptualResponseSpectralError = 0.0;
+    double searchedPerceptualResponseSpectralImprovementPercent = 0.0;
 
     // Level-conditioned temporal errors (low/mid/high stimulus excitation).
     double originalLowLevelNmse = 0.0, originalMidLevelNmse = 0.0, originalHighLevelNmse = 0.0;

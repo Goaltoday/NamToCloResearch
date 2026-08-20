@@ -38,6 +38,9 @@ struct ConversionResult {
     double refineOriginalResponseSpectralError = 0.0;
     double refineResponseSpectralError = 0.0;
     double refineResponseSpectralImprovementPercent = 0.0;
+    double refineOriginalPerceptualResponseSpectralError = 0.0;
+    double refinePerceptualResponseSpectralError = 0.0;
+    double refinePerceptualResponseSpectralImprovementPercent = 0.0;
     std::string refineDecisionReason;
 };
 

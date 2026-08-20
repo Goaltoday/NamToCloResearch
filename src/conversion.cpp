@@ -1037,17 +1037,22 @@ ConversionResult convertNamToBoth(const fs::path& inputNam, const fs::path& outp
         result.refineOriginalResponseSpectralError = refineStats.originalResponseSpectralError;
         result.refineResponseSpectralError = refineStats.refinedResponseSpectralError;
         result.refineResponseSpectralImprovementPercent = refineStats.responseSpectralImprovementPercent;
+        result.refineOriginalPerceptualResponseSpectralError = refineStats.originalPerceptualResponseSpectralError;
+        result.refinePerceptualResponseSpectralError = refineStats.refinedPerceptualResponseSpectralError;
+        result.refinePerceptualResponseSpectralImprovementPercent = refineStats.perceptualResponseSpectralImprovementPercent;
         result.refineDecisionReason = refineStats.searchedDecisionReason;
 
         if (status) {
             std::wostringstream refineSummary;
             refineSummary << std::fixed << std::setprecision(3)
-                          << L"Tone Match metric: before " << result.refineOriginalResponseSpectralError
+                          << L"Tone Match raw metric: before " << result.refineOriginalResponseSpectralError
                           << L" dB, after " << result.refineResponseSpectralError
+                          << L" dB; guitar-weighted: before " << result.refineOriginalPerceptualResponseSpectralError
+                          << L" dB, after " << result.refinePerceptualResponseSpectralError
                           << L" dB, change " << std::showpos << std::setprecision(2)
-                          << result.refineResponseSpectralImprovementPercent << L"%" << std::noshowpos
+                          << result.refinePerceptualResponseSpectralImprovementPercent << L"%" << std::noshowpos
                           << L". REFINED correction applied ("
-                          << (result.refineMetricImproved ? L"metric improved" : L"metric did not improve")
+                          << (result.refineMetricImproved ? L"weighted metric improved" : L"weighted metric did not improve")
                           << L").";
             status(refineSummary.str());
         }

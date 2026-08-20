@@ -1277,17 +1277,19 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 resultMessage += L"\r\n\r\nRefined GP-200 1024:\r\n" + r->refinedGp2001024.wstring();
             }
             if (r->hasRefineStats) {
-                wchar_t metricText[512]{};
+                wchar_t metricText[768]{};
                 swprintf_s(metricText,
                            L"\r\n\r\nTone Match refinement:\r\n"
-                           L"Original spectral error: %.3f dB\r\n"
-                           L"Refined spectral error: %.3f dB\r\n"
-                           L"Improvement: %+.2f %%\r\n"
-                           L"Metric result: %s\r\n"
+                           L"Raw spectral error: %.3f -> %.3f dB (%+.2f %%)\r\n"
+                           L"Guitar-weighted error: %.3f -> %.3f dB (%+.2f %%)\r\n"
+                           L"Weighted result: %s\r\n"
                            L"REFINED correction: APPLIED",
                            r->refineOriginalResponseSpectralError,
                            r->refineResponseSpectralError,
                            r->refineResponseSpectralImprovementPercent,
+                           r->refineOriginalPerceptualResponseSpectralError,
+                           r->refinePerceptualResponseSpectralError,
+                           r->refinePerceptualResponseSpectralImprovementPercent,
                            r->refineMetricImproved ? L"IMPROVED" : L"WORSE / UNCHANGED");
                 resultMessage += metricText;
             }
