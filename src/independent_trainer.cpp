@@ -134,9 +134,11 @@ bool readPcm16Mono(const fs::path& path, std::vector<float>& x, std::uint32_t& s
 
 // The official GP-200.exe RTTI contains CDSPResampler24 together with the
 // pre-v4 templated r8brain type CDSPResampler<CDSPFracInterpolator<24,673>>.
-// The project pins r8brain version-3.7.  Do not use oneshot() here.  The DLL
-// passes ReqTransBand=2.0 and ReqAtten=180.15 explicitly; version-3.7's default
-// attenuation is different, so relying on constructor defaults changes the SRC.
+// The project pins r8brain version-3.7.  Do not use oneshot() here.  The DLL's
+// effective CDSPResampler24 parameters are ReqTransBand=2.0 and ReqAtten=180.15.
+// In r8brain 3.7 CDSPResampler24 exposes a 4-argument constructor and hardcodes
+// 180.15 dB when it delegates to CDSPResampler, so the correct call passes 2.0
+// as the fourth argument; a fifth attenuation argument does not exist.
 // The audited converter path constructs CDSPResampler24 with MaxInLen equal to the
 // complete input length, calls process() on the whole double buffer once, then
 // feeds equal-size zero buffers until the requested output count is produced.
@@ -157,7 +159,7 @@ std::vector<float> resampleR8Brain24(const std::vector<float>& in, double inRate
     if(targetCount==0) return out;
     std::vector<double> block(in.size());
     for(std::size_t i=0;i<in.size();++i) block[i]=static_cast<double>(in[i]);
-    r8b::CDSPResampler24 rs(static_cast<double>(srcF), static_cast<double>(dstF), inCount, 2.0, 180.15);
+    r8b::CDSPResampler24 rs(static_cast<double>(srcF), static_cast<double>(dstF), inCount, 2.0);
     // HTUSBTools.dll 0x180008ef4..0x180009018.  The wrapper keeps the
     // previous returned count as the DESTINATION start index.  When the next
     // process() call returns currentCount it copies exactly
@@ -1447,7 +1449,7 @@ std::vector<float> resampleFirOfficial(const std::vector<float>& h,double sr,std
     const int blockLen=static_cast<int>(h.size());
     std::vector<double> block(h.size());
     for(std::size_t i=0;i<h.size();++i)block[i]=static_cast<double>(h[i]);
-    r8b::CDSPResampler24 rs(static_cast<double>(srcF), static_cast<double>(dstF), blockLen, 2.0, 180.15);
+    r8b::CDSPResampler24 rs(static_cast<double>(srcF), static_cast<double>(dstF), blockLen, 2.0);
 
     std::size_t previousCount=0;
     bool first=true;
