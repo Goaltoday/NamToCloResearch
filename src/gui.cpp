@@ -1,5 +1,6 @@
 #include "conversion.hpp"
 #include "common.hpp"
+#include "gp200_midi.hpp"
 #include "resource.h"
 #if NTC_HAS_INDEPENDENT_TRAINER
 #include "independent_trainer.hpp"
@@ -24,6 +25,8 @@ constexpr wchar_t kClassName[] = L"NamToCloMainWindow";
 constexpr UINT WM_APP_STATUS = WM_APP + 1;
 constexpr UINT WM_APP_DONE_SINGLE = WM_APP + 2;
 constexpr UINT WM_APP_DONE_BATCH = WM_APP + 3;
+constexpr UINT WM_APP_UPLOAD_PROGRESS = WM_APP + 4;
+constexpr UINT WM_APP_UPLOAD_DONE = WM_APP + 5;
 constexpr int IDC_INPUT_PATH = 101;
 constexpr int IDC_LOAD_FILE = 102;
 constexpr int IDC_LOAD_FOLDER = 103;
@@ -48,6 +51,13 @@ constexpr int IDC_REFINE_CLO = 121;
 constexpr int IDC_REFINE_TARGET_PATH = 122;
 constexpr int IDC_BROWSE_REFINE_TARGET = 123;
 constexpr int IDC_BACKEND_TABS = 124;
+constexpr int IDC_UPLOADER_CLO_PATH = 125;
+constexpr int IDC_UPLOADER_BROWSE = 126;
+constexpr int IDC_UPLOADER_SLOT = 127;
+constexpr int IDC_UPLOADER_RESCAN = 128;
+constexpr int IDC_UPLOADER_UPLOAD = 129;
+constexpr int IDC_UPLOADER_DEVICE = 130;
+constexpr int IDC_UPLOADER_PROGRESS = 131;
 
 constexpr COLORREF kColorWindow = RGB(246, 248, 252);
 constexpr COLORREF kColorCard = RGB(255, 255, 255);
@@ -76,9 +86,17 @@ struct UiMetrics {
     RECT buttonArea{};
     RECT footer{};
     RECT infoBox{};
+    RECT uploaderCard{};
 };
 
 HWND gBackendTabs = nullptr;
+HWND gUploaderCloEdit = nullptr;
+HWND gUploaderBrowseButton = nullptr;
+HWND gUploaderSlotCombo = nullptr;
+HWND gUploaderRescanButton = nullptr;
+HWND gUploaderUploadButton = nullptr;
+HWND gUploaderDevice = nullptr;
+HWND gUploaderProgress = nullptr;
 HWND gInputEdit = nullptr;
 HWND gOutEdit = nullptr;
 HWND gLoadFileButton = nullptr;
@@ -117,6 +135,13 @@ UiMetrics gUi{};
 bool gBusy = false;
 InputMode gInputMode = InputMode::None;
 BackendMode gBackendMode = BackendMode::CurrentDll;
+bool gUploadBusy = false;
+
+struct UploadProgressMessage {
+    int current = 0;
+    int total = 0;
+    std::wstring status;
+};
 
 std::wstring getText(HWND h) {
     const int len = GetWindowTextLengthW(h);
@@ -195,6 +220,44 @@ void applyFont(HWND h, HFONT font) {
 
 void applyFont(HWND h) { applyFont(h, gFont); }
 
+bool uploaderTabSelected() {
+    return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 2;
+}
+
+void showControl(HWND h, bool show) {
+    if (h) ShowWindow(h, show ? SW_SHOW : SW_HIDE);
+}
+
+void showConversionUi(HWND hwnd, bool show) {
+    const HWND controls[] = {
+        gInputEdit, gOutEdit, gLoadFileButton, gLoadFolderButton, gBrowseButton,
+        gConvertButton, gOpenButton, gStimulusCombo, gCustomStimulusEdit,
+        gBrowseCustomStimulusButton, gTailCombo, gRecordedEdit, gBrowseRecordedButton,
+        gCorrectiveCheck, gCorrectiveEdit, gBrowseCorrectiveButton, gRefineCheck,
+        gRefineTargetEdit, gBrowseRefineTargetButton, gInfo
+    };
+    for (HWND h : controls) showControl(h, show);
+    for (int id : {1002,1003,1004,1005,1006,1007,1008,1009,1010})
+        showControl(GetDlgItem(hwnd, id), show);
+}
+
+void showUploaderUi(HWND hwnd, bool show) {
+    const HWND controls[] = {
+        gUploaderCloEdit, gUploaderBrowseButton, gUploaderSlotCombo,
+        gUploaderRescanButton, gUploaderUploadButton, gUploaderDevice, gUploaderProgress
+    };
+    for (HWND h : controls) showControl(h, show);
+    for (int id : {1011,1012,1013,1014})
+        showControl(GetDlgItem(hwnd, id), show);
+}
+
+void refreshUploaderDetection() {
+    const auto d = ntc::gp200::detectGp200Midi();
+    setText(gUploaderDevice, ntc::gp200::describeDetection(d));
+    if (!gUploadBusy)
+        EnableWindow(gUploaderUploadButton, d.inputFound && d.outputFound ? TRUE : FALSE);
+}
+
 BackendMode selectedBackendMode() {
     if (!gBackendTabs) return BackendMode::CurrentDll;
     const int index = TabCtrl_GetCurSel(gBackendTabs);
@@ -207,6 +270,18 @@ bool nativeBackendSelected() {
 
 void updateBackendUi() {
     gBackendMode = selectedBackendMode();
+    HWND hwnd = gBackendTabs ? GetParent(gBackendTabs) : nullptr;
+    const bool uploader = uploaderTabSelected();
+    showConversionUi(hwnd, !uploader);
+    showUploaderUi(hwnd, uploader);
+    if (uploader) {
+        setText(gSubtitle, L"Upload Sound Clone (.clo) files directly to a GP-200 SnapTone slot via USB MIDI.");
+        refreshUploaderDetection();
+        setText(gStatus, L"GP-200 Uploader ready.");
+        if (hwnd) InvalidateRect(hwnd, nullptr, TRUE);
+        return;
+    }
+    setText(gSubtitle, L"Convert one NAM or batch-convert every NAM in a selected folder.");
     const bool native = gBackendMode == BackendMode::IndependentNative;
 #if !NTC_HAS_INDEPENDENT_TRAINER
     if (native) {
@@ -232,6 +307,7 @@ void updateBackendUi() {
         setText(gInfo,
             L"Current backend: existing HTUSBTools conversion path. Corrective IR and Tone Match refinement remain available.");
     }
+    if (hwnd) InvalidateRect(hwnd, nullptr, TRUE);
 }
 
 void enableControls(bool enable) {
@@ -544,6 +620,67 @@ void openOutputFolder(HWND hwnd) {
     ShellExecuteW(hwnd, L"open", out.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
+void chooseUploaderClo(HWND hwnd) {
+    wchar_t file[32768]{};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = hwnd;
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = static_cast<DWORD>(std::size(file));
+    ofn.lpstrFilter = L"Sound Clone files (*.clo)\0*.clo\0All files (*.*)\0*.*\0\0";
+    ofn.lpstrDefExt = L"clo";
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
+    if (GetOpenFileNameW(&ofn)) {
+        setText(gUploaderCloEdit, file);
+        setText(gStatus, L"CLO selected. Choose a destination slot and press Upload to GP-200.");
+    }
+}
+
+void startUploader(HWND hwnd) {
+    if (gUploadBusy) return;
+    const std::wstring clo = getText(gUploaderCloEdit);
+    if (clo.empty()) {
+        MessageBoxW(hwnd, L"Select a .clo file first.", L"GP-200 Uploader", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    const int slot = static_cast<int>(SendMessageW(gUploaderSlotCombo, CB_GETCURSEL, 0, 0));
+    if (slot < 0 || slot >= 10) {
+        MessageBoxW(hwnd, L"Select a destination SnapTone slot.", L"GP-200 Uploader", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+
+    const auto d = ntc::gp200::detectGp200Midi();
+    if (!d.inputFound || !d.outputFound) {
+        const auto msg = ntc::gp200::describeDetection(d);
+        setText(gUploaderDevice, msg);
+        MessageBoxW(hwnd, msg.c_str(), L"GP-200 Uploader", MB_OK | MB_ICONWARNING);
+        return;
+    }
+
+    gUploadBusy = true;
+    EnableWindow(gBackendTabs, FALSE);
+    EnableWindow(gUploaderBrowseButton, FALSE);
+    EnableWindow(gUploaderSlotCombo, FALSE);
+    EnableWindow(gUploaderRescanButton, FALSE);
+    EnableWindow(gUploaderUploadButton, FALSE);
+    SendMessageW(gUploaderProgress, PBM_SETRANGE32, 0, 45);
+    SendMessageW(gUploaderProgress, PBM_SETPOS, 0, 0);
+    setText(gStatus, L"Starting Sound Clone upload...");
+
+    std::thread([hwnd, clo, slot] {
+        auto result = ntc::gp200::uploadCloToGp200(fs::path(clo), slot,
+            [hwnd](int current, int total, const std::wstring& status) {
+                auto* m = new UploadProgressMessage{};
+                m->current = current;
+                m->total = total;
+                m->status = status;
+                PostMessageW(hwnd, WM_APP_UPLOAD_PROGRESS, 0, reinterpret_cast<LPARAM>(m));
+            });
+        auto* posted = new ntc::gp200::UploadResult(std::move(result));
+        PostMessageW(hwnd, WM_APP_UPLOAD_DONE, 0, reinterpret_cast<LPARAM>(posted));
+    }).detach();
+}
+
 void moveCtrl(HWND h, int x, int y, int w, int hgt) {
     if (h) MoveWindow(h, x, y, w, hgt, TRUE);
 }
@@ -567,6 +704,7 @@ void computeLayout(int clientW, int clientH) {
     gUi.footer = RECT{ 0, clientH - footerH, clientW, clientH };
     gUi.infoBox = RECT{ gUi.sectionRecorded.left + 108, gUi.sectionRecorded.top + 62,
                         gUi.sectionRecorded.right - 16, gUi.sectionRecorded.top + 96 };
+    gUi.uploaderCard = RECT{ margin, 145, clientW - margin, 535 };
 }
 
 void layoutControls(HWND hwnd) {
@@ -631,6 +769,20 @@ void layoutControls(HWND hwnd) {
     moveCtrl(gConvertButton, center - 222, gUi.buttonArea.top, 200, 36);
     moveCtrl(gOpenButton, center - 10, gUi.buttonArea.top, 200, 36);
 
+    const int ux = gUi.uploaderCard.left + 34;
+    const int ur = gUi.uploaderCard.right - 34;
+    moveCtrl(GetDlgItem(hwnd, 1011), ux, gUi.uploaderCard.top + 28, 220, 22);
+    moveCtrl(gUploaderCloEdit, ux, gUi.uploaderCard.top + 56, ur - ux - 136, 30);
+    moveCtrl(gUploaderBrowseButton, ur - 124, gUi.uploaderCard.top + 52, 124, 34);
+    moveCtrl(GetDlgItem(hwnd, 1012), ux, gUi.uploaderCard.top + 112, 220, 22);
+    moveCtrl(gUploaderSlotCombo, ux, gUi.uploaderCard.top + 140, 310, 260);
+    moveCtrl(GetDlgItem(hwnd, 1013), ux, gUi.uploaderCard.top + 196, 220, 22);
+    moveCtrl(gUploaderDevice, ux, gUi.uploaderCard.top + 224, ur - ux - 136, 28);
+    moveCtrl(gUploaderRescanButton, ur - 124, gUi.uploaderCard.top + 220, 124, 34);
+    moveCtrl(GetDlgItem(hwnd, 1014), ux, gUi.uploaderCard.top + 276, 220, 22);
+    moveCtrl(gUploaderProgress, ux, gUi.uploaderCard.top + 306, ur - ux, 22);
+    moveCtrl(gUploaderUploadButton, center - 120, gUi.uploaderCard.top + 340, 240, 38);
+
     moveCtrl(gStatus, 44, gUi.footer.top + 8, rc.right - 220, 22);
     moveCtrl(gVersion, rc.right - 140, gUi.footer.top + 8, 110, 22);
 }
@@ -658,7 +810,7 @@ void createUi(HWND hwnd) {
                                     WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FIXEDWIDTH,
                                     0, 0, 100, 32, hwnd, controlId(IDC_BACKEND_TABS), nullptr, nullptr);
     applyFont(gBackendTabs);
-    SendMessageW(gBackendTabs, TCM_SETITEMSIZE, 0, MAKELPARAM(260, 25));
+    SendMessageW(gBackendTabs, TCM_SETITEMSIZE, 0, MAKELPARAM(250, 25));
     TCITEMW tab{};
     tab.mask = TCIF_TEXT;
     tab.pszText = const_cast<LPWSTR>(L"Current / HTUSBTools");
@@ -669,6 +821,8 @@ void createUi(HWND hwnd) {
     tab.pszText = const_cast<LPWSTR>(L"Independent / Native (not built)");
 #endif
     TabCtrl_InsertItem(gBackendTabs, 1, &tab);
+    tab.pszText = const_cast<LPWSTR>(L"GP-200 Uploader");
+    TabCtrl_InsertItem(gBackendTabs, 2, &tab);
     TabCtrl_SetCurSel(gBackendTabs, 0);
 
     createSectionLabel(hwnd, 1002, L"Input NAM or folder");
@@ -752,6 +906,41 @@ void createUi(HWND hwnd) {
     gBrowseRefineTargetButton = CreateWindowW(L"BUTTON", L"Browse WAV...",
                                                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                                0, 0, 124, 32, hwnd, controlId(IDC_BROWSE_REFINE_TARGET), nullptr, nullptr);
+
+    createSectionLabel(hwnd, 1011, L"Sound Clone file (.clo)");
+    createSectionLabel(hwnd, 1012, L"Destination SnapTone slot");
+    createSectionLabel(hwnd, 1013, L"USB MIDI device");
+    createSectionLabel(hwnd, 1014, L"Transfer progress");
+
+    gUploaderCloEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                       WS_CHILD | ES_AUTOHSCROLL | ES_READONLY,
+                                       0, 0, 100, 30, hwnd, controlId(IDC_UPLOADER_CLO_PATH), nullptr, nullptr);
+    applyFont(gUploaderCloEdit);
+    gUploaderBrowseButton = CreateWindowW(L"BUTTON", L"Browse CLO...", WS_CHILD | BS_OWNERDRAW,
+                                          0, 0, 124, 34, hwnd, controlId(IDC_UPLOADER_BROWSE), nullptr, nullptr);
+    applyFont(gUploaderBrowseButton);
+    gUploaderSlotCombo = CreateWindowW(L"COMBOBOX", L"", WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                       0, 0, 310, 240, hwnd, controlId(IDC_UPLOADER_SLOT), nullptr, nullptr);
+    applyFont(gUploaderSlotCombo);
+    for (const wchar_t* name : { L"SnapTone 1 (AMP 1)", L"SnapTone 2 (AMP 2)", L"SnapTone 3 (AMP 3)",
+                                 L"SnapTone 4 (AMP 4)", L"SnapTone 5 (AMP 5)", L"SnapTone 6 (DIST 1)",
+                                 L"SnapTone 7 (DIST 2)", L"SnapTone 8 (DIST 3)", L"SnapTone 9 (DIST 4)",
+                                 L"SnapTone 10 (DIST 5)" })
+        SendMessageW(gUploaderSlotCombo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
+    SendMessageW(gUploaderSlotCombo, CB_SETCURSEL, 0, 0);
+    gUploaderDevice = CreateWindowW(L"STATIC", L"GP-200 MIDI not scanned yet.", WS_CHILD,
+                                    0, 0, 100, 24, hwnd, controlId(IDC_UPLOADER_DEVICE), nullptr, nullptr);
+    applyFont(gUploaderDevice);
+    gUploaderRescanButton = CreateWindowW(L"BUTTON", L"Rescan", WS_CHILD | BS_OWNERDRAW,
+                                          0, 0, 124, 34, hwnd, controlId(IDC_UPLOADER_RESCAN), nullptr, nullptr);
+    applyFont(gUploaderRescanButton);
+    gUploaderProgress = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD | PBS_SMOOTH,
+                                        0, 0, 100, 22, hwnd, controlId(IDC_UPLOADER_PROGRESS), nullptr, nullptr);
+    SendMessageW(gUploaderProgress, PBM_SETRANGE32, 0, 45);
+    SendMessageW(gUploaderProgress, PBM_SETPOS, 0, 0);
+    gUploaderUploadButton = CreateWindowW(L"BUTTON", L"Upload to GP-200", WS_CHILD | BS_OWNERDRAW,
+                                          0, 0, 240, 38, hwnd, controlId(IDC_UPLOADER_UPLOAD), nullptr, nullptr);
+    applyFont(gUploaderUploadButton);
 
     gInfo = CreateWindowW(L"STATIC",
                           L"CLO files will be created as Mono, PCM16, 44.1 kHz.\r\n"
@@ -849,14 +1038,18 @@ void paintBackground(HWND hwnd, HDC hdc) {
 
     drawBitmap(hdc, gLogoBitmap, 28, 18);
 
-    drawSectionCard(hdc, gUi.sectionInput, 0);
-    drawSectionCard(hdc, gUi.sectionOutput, 1);
-    drawSectionCard(hdc, gUi.sectionStimulus, 2);
-    drawSectionCard(hdc, gUi.sectionTail, 3);
-    drawSectionCard(hdc, gUi.sectionRecorded, 4);
-    drawSectionCard(hdc, gUi.sectionCorrective, 4);
-    drawSectionCard(hdc, gUi.sectionRefine, 2);
-    drawInfoBox(hdc);
+    if (uploaderTabSelected()) {
+        drawRoundedRect(hdc, gUi.uploaderCard, kColorCard, kColorBorder, 18);
+    } else {
+        drawSectionCard(hdc, gUi.sectionInput, 0);
+        drawSectionCard(hdc, gUi.sectionOutput, 1);
+        drawSectionCard(hdc, gUi.sectionStimulus, 2);
+        drawSectionCard(hdc, gUi.sectionTail, 3);
+        drawSectionCard(hdc, gUi.sectionRecorded, 4);
+        drawSectionCard(hdc, gUi.sectionCorrective, 4);
+        drawSectionCard(hdc, gUi.sectionRefine, 2);
+        drawInfoBox(hdc);
+    }
     fillRect(hdc, gUi.footer, kColorFooter);
 
     RECT statusDot{ 18, gUi.footer.top + 9, 32, gUi.footer.top + 23 };
@@ -873,7 +1066,7 @@ void drawButton(DRAWITEMSTRUCT* dis) {
     const bool disabled = (dis->itemState & ODS_DISABLED) != 0;
     const bool selected = (dis->itemState & ODS_SELECTED) != 0;
     const int id = static_cast<int>(dis->CtlID);
-    const bool primary = id == IDC_CONVERT;
+    const bool primary = id == IDC_CONVERT || id == IDC_UPLOADER_UPLOAD;
 
     COLORREF fill = primary ? (selected ? kColorAccentDark : kColorAccent) : kColorCard;
     COLORREF border = primary ? (selected ? kColorAccentDark : kColorAccentDark) : kColorAccent;
@@ -924,7 +1117,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         std::string error;
         const auto rt = ntc::resolveDefaultRuntime();
         if (ntc::validateRuntime(rt, error)) {
-            setText(gStatus, L"Ready. Current/HTUSBTools and Independent/Native tabs are available.");
+            setText(gStatus, L"Ready. Current/HTUSBTools, Independent/Native and GP-200 Uploader tabs are available.");
         } else {
 #if NTC_HAS_INDEPENDENT_TRAINER
             setText(gStatus, L"Independent/Native ready. Current/HTUSBTools runtime unavailable: " + ntc::fromUtf8(error));
@@ -957,7 +1150,9 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (ctrl == gSubtitle || ctrl == GetDlgItem(hwnd, 1001)
             || ctrl == GetDlgItem(hwnd, 1002) || ctrl == GetDlgItem(hwnd, 1003) || ctrl == GetDlgItem(hwnd, 1004)
             || ctrl == GetDlgItem(hwnd, 1005) || ctrl == GetDlgItem(hwnd, 1006) || ctrl == GetDlgItem(hwnd, 1007)
-            || ctrl == GetDlgItem(hwnd, 1008) || ctrl == GetDlgItem(hwnd, 1009) || ctrl == GetDlgItem(hwnd, 1010)) {
+            || ctrl == GetDlgItem(hwnd, 1008) || ctrl == GetDlgItem(hwnd, 1009) || ctrl == GetDlgItem(hwnd, 1010)
+            || ctrl == GetDlgItem(hwnd, 1011) || ctrl == GetDlgItem(hwnd, 1012) || ctrl == GetDlgItem(hwnd, 1013)
+            || ctrl == GetDlgItem(hwnd, 1014) || ctrl == gUploaderDevice) {
             SetTextColor(hdc, ctrl == gSubtitle ? kColorSubtleText : kColorText);
             return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
         }
@@ -1007,6 +1202,12 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         case IDC_CONVERT: startConversion(hwnd); return 0;
         case IDC_OPEN_OUTPUT: openOutputFolder(hwnd); return 0;
+        case IDC_UPLOADER_BROWSE: chooseUploaderClo(hwnd); return 0;
+        case IDC_UPLOADER_RESCAN:
+            refreshUploaderDetection();
+            setText(gStatus, getText(gUploaderDevice));
+            return 0;
+        case IDC_UPLOADER_UPLOAD: startUploader(hwnd); return 0;
         default: break;
         }
         break;
@@ -1016,7 +1217,16 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (DragQueryFileW(drop, 0, path, static_cast<UINT>(std::size(path)))) {
             fs::path p(path);
             std::error_code ec;
-            if (fs::is_directory(p, ec) && !ec) setNamFolder(p);
+            if (uploaderTabSelected()) {
+                std::wstring ext = p.extension().wstring();
+                for (auto& c : ext) c = static_cast<wchar_t>(towlower(c));
+                if (ext == L".clo") {
+                    setText(gUploaderCloEdit, p.wstring());
+                    setText(gStatus, L"CLO selected. Choose a destination slot and press Upload to GP-200.");
+                } else {
+                    MessageBoxW(hwnd, L"The GP-200 Uploader accepts .clo files.", L"GP-200 Uploader", MB_OK | MB_ICONINFORMATION);
+                }
+            } else if (fs::is_directory(p, ec) && !ec) setNamFolder(p);
             else setSingleNam(p);
         }
         DragFinish(drop);
@@ -1025,6 +1235,34 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_APP_STATUS: {
         std::unique_ptr<std::wstring> s(reinterpret_cast<std::wstring*>(lParam));
         if (s) setText(gStatus, *s);
+        return 0;
+    }
+    case WM_APP_UPLOAD_PROGRESS: {
+        std::unique_ptr<UploadProgressMessage> m(reinterpret_cast<UploadProgressMessage*>(lParam));
+        if (m) {
+            SendMessageW(gUploaderProgress, PBM_SETRANGE32, 0, m->total > 0 ? m->total : 45);
+            SendMessageW(gUploaderProgress, PBM_SETPOS, m->current, 0);
+            setText(gStatus, m->status);
+        }
+        return 0;
+    }
+    case WM_APP_UPLOAD_DONE: {
+        std::unique_ptr<ntc::gp200::UploadResult> r(reinterpret_cast<ntc::gp200::UploadResult*>(lParam));
+        gUploadBusy = false;
+        EnableWindow(gBackendTabs, TRUE);
+        EnableWindow(gUploaderBrowseButton, TRUE);
+        EnableWindow(gUploaderSlotCombo, TRUE);
+        EnableWindow(gUploaderRescanButton, TRUE);
+        refreshUploaderDetection();
+        if (r) {
+            setText(gStatus, r->message);
+            if (r->ok) {
+                SendMessageW(gUploaderProgress, PBM_SETPOS, 45, 0);
+                MessageBoxW(hwnd, r->message.c_str(), L"GP-200 Uploader", MB_OK | MB_ICONINFORMATION);
+            } else {
+                MessageBoxW(hwnd, r->message.c_str(), L"GP-200 Uploader", MB_OK | MB_ICONERROR);
+            }
+        }
         return 0;
     }
     case WM_APP_DONE_SINGLE: {
@@ -1104,7 +1342,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     INITCOMMONCONTROLSEX icc{};
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_TAB_CLASSES;
+    icc.dwICC = ICC_TAB_CLASSES | ICC_PROGRESS_CLASS;
     InitCommonControlsEx(&icc);
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);

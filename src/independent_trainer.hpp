@@ -5,9 +5,8 @@
 namespace ntc {
 
 struct IndependentTrainerConfig {
-    // Kept for source/API compatibility with earlier native builds. The
-    // EXE-audited conversion path is fixed to 0.31f and 1024 samples exactly;
-    // independent_trainer.cpp intentionally ignores overrides of these fields.
+    // Reconstructed Valeton baseline constants. Kept explicit so future
+    // experiments can fork this backend without touching the legacy/DLL path.
     double namTargetScale = 0.31;
     int blockSize = 1024;
 };

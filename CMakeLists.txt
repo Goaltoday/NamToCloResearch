@@ -26,13 +26,17 @@ add_executable(NamToClo WIN32
     src/clo_refiner.hpp
     src/common.cpp
     src/common.hpp
+    src/gp200_clo_upload.cpp
+    src/gp200_clo_upload.hpp
+    src/gp200_midi.cpp
+    src/gp200_midi.hpp
     src/resources.rc
     src/resource.h
 )
 
 target_compile_features(NamToClo PRIVATE cxx_std_20)
 target_compile_definitions(NamToClo PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
-target_link_libraries(NamToClo PRIVATE comdlg32 shell32 ole32 dbghelp advapi32 comctl32)
+target_link_libraries(NamToClo PRIVATE comdlg32 shell32 ole32 dbghelp advapi32 comctl32 winmm)
 
 if(NTC_ENABLE_INDEPENDENT_TRAINER)
     if(NAM_CORE_SOURCE_DIR)
