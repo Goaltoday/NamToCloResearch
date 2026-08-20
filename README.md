@@ -1,3 +1,9 @@
+# FINAL12-NATIVE
+
+This revision consolidates the EXE + HTUSBTools DLL audit into the **Independent / Native** path.  The native converter does not load or execute `HTUSBTools.dll` or `GP-200.exe`; those binaries were used only as reverse-engineering references.  NeuralAmpModelerCore v0.5.4 remains intentionally enabled for A2/Slimmable/WaveNet compatibility.
+
+Important FINAL12 corrections include the equal-length minimum-phase branch from HTUSBTools, Ooura FFT4G being compiled into the target, the historical r8brain `process()+zero-flush` path, fixed NAM target scale `0.31f`, and exact Legacy + Original Preset Audio composition from `nam_input_wav.wav` samples 0..70 s.  See `FINAL12_NATIVE_AUDIT.md` and `FINAL12_CHANGELOG.md`.
+
 # NAM to CLO v2.7.0-FINAL
 
 This build keeps the existing **Current / HTUSBTools** path untouched and updates the parallel **Independent / Native** backend with the complete trainer flow reconstructed from the GP-200 v1.8 converter analysis.
@@ -73,7 +79,3 @@ The old tab can be built without the native trainer with:
 ```powershell
 cmake -S . -B build -A x64 -DNTC_ENABLE_INDEPENDENT_TRAINER=OFF
 ```
-
-## GP-200.exe conversion audit
-
-The independent trainer's closed executable audit is documented in [`FINAL8_EXE_AUDIT.md`](FINAL8_EXE_AUDIT.md). The implementation changes are summarized in [`FINAL8_FULL_AUDIT_CHANGELOG.md`](FINAL8_FULL_AUDIT_CHANGELOG.md), and the intentionally documented external-runtime provenance boundaries are in [`FINAL8_AUDIT_LIMITS.md`](FINAL8_AUDIT_LIMITS.md).

@@ -134,12 +134,10 @@ bool readPcm16Mono(const fs::path& path, std::vector<float>& x, std::uint32_t& s
 
 // The official GP-200.exe RTTI contains CDSPResampler24 together with the
 // pre-v4 templated r8brain type CDSPResampler<CDSPFracInterpolator<24,673>>.
-// The project pins r8brain version-3.7. In that API oneshot() has the exact
-// signature:
-//   oneshot(MaxInLen, const Tin* ip, int iplen, Tout* op, int oplen)
-// Use the same bounded MaxInLen for construction and for oneshot(); r8brain
-// performs the internal blocking and zero flushing required to produce the
-// requested output length.
+// The project pins r8brain version-3.7.  Do not use oneshot() here: the
+// audited converter path constructs CDSPResampler24 with MaxInLen equal to the
+// complete input length, calls process() on the whole double buffer once, then
+// feeds equal-size zero buffers until the requested output count is produced.
 // GP-200.exe 0x5a70a0.  The converter uses the same whole-buffer
 // CDSPResampler24 path for the 70-second stimulus and for FIR serialization.
 // Source/destination rates and the output length are first rounded to float;
@@ -1228,22 +1226,11 @@ std::vector<float> minimumPhaseF(const std::vector<float>&positive,std::size_t t
         logMag[i]=preciseLogF(v+std::numeric_limits<float>::epsilon());
     }
 
-    // HTUSBTools.dll 0x180097960 (the same trainer used by the original
-    // HTUSBTools route) confirms a subtle operation that the previous EXE
-    // audit misclassified.  When inputCount == outputCount, interpolation is
-    // skipped at 0x180097a65..0x180097b6d, BUT the following half-buffer
-    // reversal at 0x180097ae7..0x180097b62 is still executed unconditionally.
-    // It overwrites only indices [0, fullN/2) with samples read from the
-    // mirrored end of the log-magnitude vector:
-    //
-    //     logMag[i] = logMag[fullN - 1 - i]
-    //
-    // The source half and destination half do not overlap, so the reads use
-    // the original mirrored values.  This is deliberately NOT replaced by a
-    // mathematically cleaner symmetric-spectrum shortcut: it is the literal
-    // conversion performed by the proprietary trainer.
-    for(std::size_t i=0;i<fullN/2u;++i)
-        logMag[i]=logMag[fullN-1u-i];
+    // HTUSBTools.dll 0x180097a65: when inputCount == outputCount (the
+    // normal A/B trainer path), execution jumps directly to 0x180097b64 and
+    // copies the log-magnitude buffer.  The half-buffer reversal at
+    // 0x180097ae7..0x180097b62 belongs only to the unequal-length/interpolated
+    // branch and must NOT run for A/B reconstruction.
 
     std::vector<ComplexF> logSpec(fullN);
     for(std::size_t i=0;i<fullN;++i)logSpec[i]={logMag[i],0.0f};
@@ -1482,7 +1469,7 @@ ConversionResult convertNamToBothIndependent(const fs::path& inputNam,const fs::
     const fs::path stim=work/L"stimulus_70s.wav";report(status,L"Independent: building stimulus...");if(!buildStimulus(runtime,stimulus,stim,error)){r.error=error;fs::remove_all(work,ec);return r;}
     std::vector<float>s44;std::uint32_t ssr=0;if(!readPcm16Mono(stim,s44,ssr,error)){r.error=error;fs::remove_all(work,ec);return r;}
     fs::path modelPath;if(!prepareFullA2(inputNam,work,modelPath,error)){r.error=error;fs::remove_all(work,ec);return r;}
-    std::vector<float>input,target;double sr=48000;if(!renderNam(modelPath,s44,trainer.blockSize,trainer.namTargetScale,input,target,sr,error,status)){r.error=error;fs::remove_all(work,ec);return r;}
+    std::vector<float>input,target;double sr=48000;if(!renderNam(modelPath,s44,trainer.blockSize,0.31f,input,target,sr,error,status)){r.error=error;fs::remove_all(work,ec);return r;}
     detrend(target);const auto latency=detectLatency(target,sr);target=alignLeft(target,latency);report(status,L"Independent: detected NAM latency "+std::to_wstring(latency)+L" samples.");
     Model m;m.A.assign(kA,0);m.A[0]=1;m.B.assign(kB,0);m.B[0]=1;m.pk=fitPk(input,target,sr);m.pre=Biquad{};m.post=postForRate(sr);{std::wostringstream os;os<<L"Independent: P/K = "<<m.pk.pp<<L" / "<<m.pk.pn<<L" / "<<m.pk.kp<<L" / "<<m.pk.kn;report(status,os.str());}
     fitAB(m,input,target,sr,status);refineB(m,input,target,sr,status);

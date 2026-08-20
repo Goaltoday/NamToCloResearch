@@ -17,6 +17,7 @@ runtime\
 ## Mode requirements
 
 - **Original / Legacy** uses the first 50.000 s of `nam_input_wav.wav` as its base stimulus, then appends the selected 20.000 s Tail / Reamp source through the same builder used by Clean, Dist and Custom.
+- With **Original / Legacy + Original Preset Audio**, FINAL12 takes the tail directly from seconds 50.000–70.000 of the same official `nam_input_wav.wav`; a separate `PresetAudio.wav` is not required for this exact-default combination.
 - **Clean** requires `inputSignalCleanSW.wav` plus either `PresetAudio.wav` or a user-selected Recorded Audio WAV.
 - **Dist** requires `inputSignalDistSW.wav` plus either `PresetAudio.wav` or a user-selected Recorded Audio WAV.
 
