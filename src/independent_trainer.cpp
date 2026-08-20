@@ -1753,6 +1753,133 @@ bool writeHarmonicFingerprint(const fs::path&modelPath,const fs::path&gp200Clo,c
     return true;
 }
 
+
+// -----------------------------------------------------------------------------
+// Experimental phase 1B: gain-convention / drive calibration diagnostic
+// -----------------------------------------------------------------------------
+// The serialized CLO is NOT modified. We sweep a scalar drive trim before the
+// GP-200 model and, for every trim, fit a scalar output trim from the low-level
+// fundamental measurements. Output trim cannot change harmonic dBc, so this
+// cleanly separates an output-level convention from a drive/nonlinearity issue.
+
+struct Phase1BCalibrationRow {
+    double inputTrimDb=0.0;
+    double fittedOutputTrimDb=0.0;
+    double h1MaeDb=0.0;
+    double h2to8MaeDb=0.0;
+    double evenMaeDb=0.0;
+    double oddMaeDb=0.0;
+    double thdMaeDb=0.0;
+    double score=0.0;
+};
+
+double medianValue(std::vector<double> v){
+    if(v.empty())return 0.0;
+    const std::size_t mid=v.size()/2;
+    std::nth_element(v.begin(),v.begin()+static_cast<std::ptrdiff_t>(mid),v.end());
+    double m=v[mid];
+    if((v.size()&1u)==0u){
+        const auto it=std::max_element(v.begin(),v.begin()+static_cast<std::ptrdiff_t>(mid));
+        if(it!=v.begin()+static_cast<std::ptrdiff_t>(mid))m=0.5*(m+*it);
+    }
+    return m;
+}
+
+bool writePhase1BCalibration(const fs::path&modelPath,const fs::path&gp200Clo,const fs::path&summaryPath,
+                             const fs::path&bestDetailPath,std::string&error,const StatusCallback&status){
+    Model gp;if(!loadGp200ModelForAnalysis(gp200Clo,gp,error))return false;
+    std::vector<HarmonicCase>cases;const auto baseInput=buildHarmonicMatrix(cases);
+    std::vector<float>namOut;if(!renderNamTarget44100(modelPath,baseInput,namOut,error,status))return false;
+
+    std::vector<HarmonicSet> namH;namH.reserve(cases.size());
+    for(const auto&c:cases)namH.push_back(measureHarmonics(namOut,c));
+
+    constexpr std::array<double,25> trims={
+        -18.0,-16.5,-15.0,-13.5,-12.0,-10.5,-9.0,-7.5,-6.0,-4.5,-3.0,-1.5,0.0,
+         1.5,  3.0,  4.5,  6.0, 7.5, 9.0,10.5,12.0,13.5,15.0,16.5,18.0};
+    std::vector<Phase1BCalibrationRow> rows;rows.reserve(trims.size());
+    double bestScore=std::numeric_limits<double>::infinity();
+    double bestInputTrim=0.0,bestOutputTrim=0.0;
+    std::vector<float>bestCloOut;
+
+    for(double trimDb:trims){
+        report(status,L"Experimental phase 1B: testing CLO drive trim "+std::to_wstring(trimDb)+L" dB...");
+        const float g=static_cast<float>(std::pow(10.0,trimDb/20.0));
+        std::vector<float>driven(baseInput.size());
+        for(std::size_t i=0;i<baseInput.size();++i)driven[i]=baseInput[i]*g;
+        std::vector<float>cloOut;renderModel(gp,driven,cloOut,true);
+        if(cloOut.size()!=baseInput.size()){error="Phase 1B: CLO renderer returned unexpected length.";return false;}
+
+        std::vector<HarmonicSet> cloH;cloH.reserve(cases.size());
+        std::vector<double> lowLevelH1Delta;
+        for(std::size_t i=0;i<cases.size();++i){
+            auto ch=measureHarmonics(cloOut,cases[i]);cloH.push_back(ch);
+            if(cases[i].inputDbfs<=-18.0f)lowLevelH1Delta.push_back(ch.fundamentalDbfs-namH[i].fundamentalDbfs);
+        }
+        // Robust scalar output correction. This is diagnostic only and never
+        // written to the CLO. A pure output correction leaves all dBc values unchanged.
+        const double outTrim=-medianValue(lowLevelH1Delta);
+        double h1=0.0,harm=0.0,even=0.0,odd=0.0,thd=0.0;std::size_t harmN=0;
+        for(std::size_t i=0;i<cases.size();++i){
+            h1+=std::fabs((cloH[i].fundamentalDbfs+outTrim)-namH[i].fundamentalDbfs);
+            for(int h=2;h<=8;++h){
+                const auto hi=static_cast<std::size_t>(h-1);
+                const double nd=ratioDb(namH[i].amp[hi],namH[i].amp[0]);
+                const double cd=ratioDb(cloH[i].amp[hi],cloH[i].amp[0]);
+                harm+=std::fabs(cd-nd);++harmN;
+            }
+            even+=std::fabs(cloH[i].evenDbc-namH[i].evenDbc);
+            odd +=std::fabs(cloH[i].oddDbc -namH[i].oddDbc);
+            thd +=std::fabs(cloH[i].thdDbc -namH[i].thdDbc);
+        }
+        const double inv=cases.empty()?0.0:1.0/static_cast<double>(cases.size());
+        Phase1BCalibrationRow row;
+        row.inputTrimDb=trimDb;row.fittedOutputTrimDb=outTrim;row.h1MaeDb=h1*inv;
+        row.h2to8MaeDb=harmN?harm/static_cast<double>(harmN):0.0;
+        row.evenMaeDb=even*inv;row.oddMaeDb=odd*inv;row.thdMaeDb=thd*inv;
+        // Diagnostic ranking: harmonic structure dominates; H1 only breaks ties.
+        row.score=row.h2to8MaeDb+0.25*row.h1MaeDb;
+        rows.push_back(row);
+        if(row.score<bestScore){bestScore=row.score;bestInputTrim=trimDb;bestOutputTrim=outTrim;bestCloOut=std::move(cloOut);}
+    }
+
+    std::ofstream out(summaryPath,std::ios::binary|std::ios::trunc);if(!out){error="Cannot create phase 1B calibration report: "+pathToUtf8(summaryPath);return false;}
+    out<<"# Experimental Phase 1B calibration sweep\n";
+    out<<"# Diagnostic only: serialized CLO is never modified.\n";
+    out<<"# input_trim_db is applied before the CLO; fitted_output_trim_db is a scalar post gain fitted from <= -18 dBFS H1.\n";
+    out<<"# Output trim cannot alter harmonic dBc; changes in H2-H8/even/odd therefore come only from CLO drive.\n";
+    out<<"input_trim_db,fitted_output_trim_db,h1_mae_db,h2_to_h8_mae_db,even_mae_db,odd_mae_db,thd_mae_db,score\n";
+    out<<std::fixed<<std::setprecision(6);
+    for(const auto&r:rows)out<<r.inputTrimDb<<','<<r.fittedOutputTrimDb<<','<<r.h1MaeDb<<','<<r.h2to8MaeDb<<','<<r.evenMaeDb<<','<<r.oddMaeDb<<','<<r.thdMaeDb<<','<<r.score<<'\n';
+    if(!out){error="Failed writing phase 1B calibration report: "+pathToUtf8(summaryPath);return false;}
+
+    // Detailed harmonic table for the best diagnostic drive trim.
+    const double bestGain=std::pow(10.0,bestOutputTrim/20.0);
+    std::ofstream det(bestDetailPath,std::ios::binary|std::ios::trunc);if(!det){error="Cannot create phase 1B best-detail report: "+pathToUtf8(bestDetailPath);return false;}
+    det<<"# Experimental Phase 1B best calibrated harmonic fingerprint\n";
+    det<<"# best_input_trim_db="<<std::fixed<<std::setprecision(6)<<bestInputTrim<<"\n";
+    det<<"# fitted_output_trim_db="<<bestOutputTrim<<"\n";
+    det<<"frequency_hz,input_dbfs,nam_h1_dbfs,clo_h1_dbfs_cal,h1_delta_db";
+    for(int h=2;h<=8;++h)det<<",nam_h"<<h<<"_dbc,clo_h"<<h<<"_dbc,h"<<h<<"_delta_db";
+    det<<",nam_even_dbc,clo_even_dbc,even_delta_db,nam_odd_dbc,clo_odd_dbc,odd_delta_db,nam_thd_dbc,clo_thd_dbc,thd_delta_db\n";
+    det<<std::fixed<<std::setprecision(6);
+    (void)bestGain; // dBc is invariant to the fitted scalar output trim.
+    for(std::size_t i=0;i<cases.size();++i){
+        const auto ch=measureHarmonics(bestCloOut,cases[i]);const auto&nh=namH[i];
+        det<<cases[i].frequencyHz<<','<<cases[i].inputDbfs<<','<<nh.fundamentalDbfs<<','<<(ch.fundamentalDbfs+bestOutputTrim)<<','<<((ch.fundamentalDbfs+bestOutputTrim)-nh.fundamentalDbfs);
+        for(int h=2;h<=8;++h){const auto hi=static_cast<std::size_t>(h-1);const double nd=ratioDb(nh.amp[hi],nh.amp[0]),cd=ratioDb(ch.amp[hi],ch.amp[0]);det<<','<<nd<<','<<cd<<','<<(cd-nd);}
+        det<<','<<nh.evenDbc<<','<<ch.evenDbc<<','<<(ch.evenDbc-nh.evenDbc)
+           <<','<<nh.oddDbc<<','<<ch.oddDbc<<','<<(ch.oddDbc-nh.oddDbc)
+           <<','<<nh.thdDbc<<','<<ch.thdDbc<<','<<(ch.thdDbc-nh.thdDbc)<<'\n';
+    }
+    if(!det){error="Failed writing phase 1B best-detail report: "+pathToUtf8(bestDetailPath);return false;}
+
+    std::wostringstream os;os<<std::fixed<<std::setprecision(2)
+        <<L"Experimental phase 1B best diagnostic drive trim "<<bestInputTrim<<L" dB; fitted output trim "<<bestOutputTrim
+        <<L" dB; score "<<bestScore<<L".";report(status,os.str());
+    return true;
+}
+
 fs::path uniqueOutput(const fs::path&dir,const std::wstring&stem,const wchar_t*suffix){fs::path p=dir/(stem+suffix);int i=2;while(fs::exists(p))p=dir/(stem+L"_"+std::to_wstring(i++)+suffix);return p;}
 
 } // namespace
@@ -1778,6 +1905,15 @@ ConversionResult convertNamToBothIndependent(const fs::path& inputNam,const fs::
             report(status,L"Experimental phase 1 report: "+harmonicReport.filename().wstring());
         else
             report(status,L"Experimental phase 1 WARNING: "+std::wstring(diagnosticError.begin(),diagnosticError.end()));
+
+        const fs::path calibrationReport=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE1B_CALIBRATION.csv");
+        const fs::path bestDetailReport=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE1B_BEST_HARMONICS.csv");
+        diagnosticError.clear();
+        if(writePhase1BCalibration(modelPath,r.gp2001024,calibrationReport,bestDetailReport,diagnosticError,status)){
+            report(status,L"Experimental phase 1B report: "+calibrationReport.filename().wstring());
+            report(status,L"Experimental phase 1B best detail: "+bestDetailReport.filename().wstring());
+        }else
+            report(status,L"Experimental phase 1B WARNING: "+std::wstring(diagnosticError.begin(),diagnosticError.end()));
     }
     fs::remove_all(work,ec);r.ok=true;report(status,L"Independent / Experimental conversion complete.");return r;
 }
