@@ -925,7 +925,7 @@ std::vector<float> ratioSpectrumF(const std::vector<float>& model,const std::vec
     // 0x5538xx: float Fs * 0.125f -> double + 0.5 -> cvttsd2si.
     const int Li=static_cast<int>(static_cast<double>(fs*0.125f)+0.5);
     const std::size_t L=static_cast<std::size_t>(std::max(1,Li));
-    const std::size_t hop=std::max<std::size_t>(1,L/2);
+    const std::size_t hop=std::max<std::size_t>(1,L-L/2);
     const auto wv=hammingF(L);
     const std::size_t total=std::min(model.size(),target.size());
     if(total<L)return std::vector<float>(kBins,1.0f);
@@ -1385,32 +1385,101 @@ FactorState initialFactorState(const Model&m,const std::vector<float>&input,cons
 struct Phase{double t0,t1;int iterations;const wchar_t*name;};
 void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,const std::vector<float>&target,double sr,const Phase&ph,int&globalIter,const StatusCallback&status){
     const auto freq=fftFrequencyGridF(sr),weights=frequencyWeightsF(sr);const std::size_t b=officialTimeIndex(sr,static_cast<float>(ph.t0)),e=officialTimeIndex(sr,static_cast<float>(ph.t1));const auto phaseIn=sliceSignal(input,b,e),phaseTarget=sliceSignal(target,b,e);
-    float step=1.0f,bestLoss=100.0f;Model bestM=m;FactorState bestState=state;std::vector<float>corr(kBins,1.0f),bestCorr=corr;
+
+    // HTUSBTools.dll 0x18009b890: each phase starts with a fresh all-ones
+    // working curve.  This curve is NOT the residual from the previous
+    // render.  It is evolved in-place from its own previous value and then
+    // multiplied by the fixed conditioned-sweep factor (state.b).
+    float step=1.0f,bestLoss=100.0f;
+    Model bestM=m;
+    FactorState bestState=state;
+    std::vector<float>work(kBins,1.0f),bestWork=work;
+
     for(int it=0;it<ph.iterations;++it){
         ++globalIter;report(status,L"Independent: A/B fit "+std::to_wstring(globalIter)+L"/10 ("+ph.name+L")...");
-        // 0x5574e0: exponent = frequencyWeight[k] * step.  The weight vector
-        // is prepared by the caller as 1.0 above ~80 Hz-index onset and a
-        // 1.0 -> 0.5 ramp through the remainder of the spectrum.
-        std::vector<float>stepped(kBins);for(std::size_t k=0;k<kBins;++k){const float base=corr[k];const float exponent=weights[k]*step;stepped[k]=std::clamp(precisePowF(base,exponent),0.2f,5.0f);}
-        // 0x55751f: step is decayed immediately after pow/clamp and BEFORE
-        // the two conditioning passes. A rollback may subsequently halve
-        // this already-decayed value.
+
+        // 0x18009bae0..0x18009bb1c: pow(work, weight*step), clamp [0.2,5].
+        for(std::size_t k=0;k<kBins;++k){
+            const float exponent=weights[k]*step;
+            work[k]=std::clamp(precisePowF(work[k],exponent),0.2f,5.0f);
+        }
+
+        // 0x18009bb3e: decay occurs before the two conditioning calls.
         step*=0.8999999761581421f;
-        // Confirmed at 0x557532..0x557563: the correction traverses 0x554f00
-        // twice, back-to-back, before either factor state is updated.
-        const auto conditioned1=conditionMagnitudeF(freq,stepped,kBins);
+
+        // 0x18009bb59 / 0x18009bb78: two back-to-back conditionMagnitude
+        // passes.  The second result becomes the current work curve.
+        const auto conditioned1=conditionMagnitudeF(freq,work,kBins);
         const auto conditioned2=conditionMagnitudeF(conditioned1.freq,conditioned1.mag,kBins);
-        const auto& conditioned=conditioned2.mag;
-        FactorState trial=state;for(std::size_t k=0;k<kBins;++k){trial.b[k]*=conditioned[k];trial.a[k]/=conditioned[k];}lowSmoothASequentialF(trial.a,sr);
-        Model candidate=m;const auto amag=conditionMagnitudeF(freq,trial.a,kA);candidate.A=minimumPhaseF(amag.mag,kA);
-        std::vector<float>pre;renderModel(candidate,phaseIn,pre,false);auto fresh=ratioSpectrumF(pre,phaseTarget,sr);std::vector<float>rb(kBins);for(std::size_t k=0;k<kBins;++k){const double num=static_cast<double>(fresh[k])*1000000.0;const double den=static_cast<double>(trial.b[k])*1000000.0+kEps;rb[k]=static_cast<float>(num/den);}
-        auto bmag=conditionMagnitudeF(freq,rb,kBins);candidate.B=minimumPhaseF(bmag.mag,kB);
-        std::vector<float>final;renderModel(candidate,phaseIn,final,true);auto residual=ratioSpectrumF(final,phaseTarget,sr);const float loss=lossFromRatioF(residual,sr);
-        if(loss<bestLoss){bestLoss=loss;bestM=candidate;bestState=trial;bestCorr=residual;m=candidate;state=trial;corr=residual;}
-        else if(loss>1.2f*bestLoss){m=bestM;state=bestState;corr=bestCorr;step*=0.5f;}
-        else{m=candidate;state=trial;corr=residual;}
+        work=conditioned2.mag;
+
+        // 0x18009bbe0..0x18009bce8: multiply the working curve by the fixed
+        // sweep spectrum passed from 0x18009cd30.  The DLL then divides the
+        // persistent A state by THIS complete product (not merely by the
+        // residual correction, and not by an accumulated B state).
+        for(std::size_t k=0;k<kBins;++k)work[k]*=state.b[k];
+
+        FactorState trial=state;
+        for(std::size_t k=0;k<kBins;++k)trial.a[k]/=work[k];
+        lowSmoothASequentialF(trial.a,sr);
+
+        // A magnitude -> condition -> minimum phase -> FIR A.
+        Model candidate=m;
+        const auto amag=conditionMagnitudeF(freq,trial.a,kA);
+        candidate.A=minimumPhaseF(amag.mag,kA);
+
+        // Render with A but without B, then estimate the fresh transfer.
+        std::vector<float>pre;
+        renderModel(candidate,phaseIn,pre,false);
+        const auto fresh=ratioSpectrumF(pre,phaseTarget,sr);
+
+        // 0x18009c773..0x18009c996: B's spectral estimate is fresh/state.b.
+        // Note carefully that the denominator is the fixed sweep spectrum,
+        // NOT 'work' and NOT an accumulated trial.b.
+        std::vector<float>rb(kBins);
+        for(std::size_t k=0;k<kBins;++k){
+            const double num=static_cast<double>(fresh[k])*1000000.0;
+            const double den=static_cast<double>(state.b[k])*1000000.0+kEps;
+            rb[k]=static_cast<float>(num/den);
+        }
+
+        const auto bmag=conditionMagnitudeF(freq,rb,kBins);
+        candidate.B=minimumPhaseF(bmag.mag,kB);
+
+        // Full render and loss.  The residual is used ONLY to calculate the
+        // loss; HTUSBTools does not feed it back as the next work curve.
+        std::vector<float>final;
+        renderModel(candidate,phaseIn,final,true);
+        const auto residual=ratioSpectrumF(final,phaseTarget,sr);
+        const float loss=lossFromRatioF(residual,sr);
+
+        if(loss<bestLoss){
+            bestLoss=loss;
+            bestM=candidate;
+            bestState=trial;
+            bestWork=work;
+            m=candidate;
+            state=trial;
+        }
+        else if(loss>1.2f*bestLoss){
+            // 0x18009cb7e..0x18009cc24: restore the best snapshots and halve
+            // the already-decayed step.
+            m=bestM;
+            state=bestState;
+            work=bestWork;
+            step*=0.5f;
+        }
+        else{
+            // Loss is worse but within 1.2x: keep the current candidate and
+            // continue evolving the current work curve.
+            m=candidate;
+            state=trial;
+        }
     }
-    m=bestM;state=bestState;
+
+    // 0x18009cca1..0x18009ccff: phase exits on the best A/B snapshot.
+    m=bestM;
+    state=bestState;
 }
 
 void fitAB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status){
