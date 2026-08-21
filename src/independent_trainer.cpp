@@ -133,6 +133,49 @@ bool readPcm16Mono(const fs::path& path, std::vector<float>& x, std::uint32_t& s
     return true;
 }
 
+// Diagnostic DI reader. Keep the audited stimulus reader above unchanged: the
+// conversion stimulus is still required to be mono PCM16 exactly as before.
+// Real guitar DIs, however, are commonly exported as 24-bit PCM, so Phase 4/6
+// diagnostics accept mono integer PCM16/24/32 and convert it to float here.
+bool readPcmIntegerMonoDiagnostic(const fs::path& path, std::vector<float>& x, std::uint32_t& sr, std::string& error) {
+    std::ifstream f(path, std::ios::binary); if(!f){error="Cannot open diagnostic DI WAV: "+pathToUtf8(path);return false;}
+    std::array<std::uint8_t,12> h{}; f.read(reinterpret_cast<char*>(h.data()),12);
+    if(f.gcount()!=12 || std::memcmp(h.data(),"RIFF",4)||std::memcmp(h.data()+8,"WAVE",4)){error="Phase 6: invalid DI WAV (expected RIFF/WAVE).";return false;}
+    std::uint16_t fmt=0,ch=0,bits=0,align=0; std::vector<std::uint8_t> data;
+    while(f){
+        std::array<std::uint8_t,8> c{};f.read(reinterpret_cast<char*>(c.data()),8);if(f.gcount()!=8)break;
+        const auto n=le32(c.data()+4);std::vector<std::uint8_t>b(n);
+        if(n){f.read(reinterpret_cast<char*>(b.data()),n);if(static_cast<std::uint32_t>(f.gcount())!=n){error="Phase 6: truncated DI WAV.";return false;}}
+        if(n&1)f.seekg(1,std::ios::cur);
+        if(!std::memcmp(c.data(),"fmt ",4)&&n>=16){fmt=le16(b.data());ch=le16(b.data()+2);sr=le32(b.data()+4);align=le16(b.data()+12);bits=le16(b.data()+14);}
+        else if(!std::memcmp(c.data(),"data",4))data=std::move(b);
+    }
+    const std::uint16_t expectedAlign=static_cast<std::uint16_t>(bits/8u);
+    if(fmt!=1||ch!=1||sr==0||data.empty()||(bits!=16&&bits!=24&&bits!=32)||align!=expectedAlign){
+        error="Phase 6: DI WAV must be mono integer PCM16, PCM24 or PCM32.";return false;
+    }
+    if(data.size()%align!=0){error="Phase 6: DI WAV data size is not aligned to complete samples.";return false;}
+    x.resize(data.size()/align);
+    if(bits==16){
+        for(std::size_t i=0;i<x.size();++i)x[i]=static_cast<std::int16_t>(le16(data.data()+2*i))/32768.0f;
+    }else if(bits==24){
+        for(std::size_t i=0;i<x.size();++i){
+            const auto* q=data.data()+3*i;
+            std::int32_t v=static_cast<std::int32_t>(static_cast<std::uint32_t>(q[0])|(static_cast<std::uint32_t>(q[1])<<8)|(static_cast<std::uint32_t>(q[2])<<16));
+            if(v&0x00800000)v|=static_cast<std::int32_t>(0xff000000u);
+            x[i]=static_cast<float>(static_cast<double>(v)/8388608.0);
+        }
+    }else{
+        for(std::size_t i=0;i<x.size();++i){
+            const auto* q=data.data()+4*i;
+            const std::uint32_t u=static_cast<std::uint32_t>(q[0])|(static_cast<std::uint32_t>(q[1])<<8)|(static_cast<std::uint32_t>(q[2])<<16)|(static_cast<std::uint32_t>(q[3])<<24);
+            const std::int32_t v=static_cast<std::int32_t>(u);
+            x[i]=static_cast<float>(static_cast<double>(v)/2147483648.0);
+        }
+    }
+    return true;
+}
+
 // The official GP-200.exe RTTI contains CDSPResampler24 together with the
 // pre-v4 templated r8brain type CDSPResampler<CDSPFracInterpolator<24,673>>.
 // The project pins r8brain version-3.7.  Do not use oneshot() here: the
@@ -2574,7 +2617,7 @@ bool findOptionalDi(const fs::path&inputNam,fs::path&di){
 }
 
 bool writePhase4DiDiagnostic(const fs::path&modelPath,const Model&clo,const fs::path&diPath,const fs::path&outDir,const std::wstring&stem,std::string&error,const StatusCallback&status){
-    std::vector<float>in;std::uint32_t sr=0;if(!readPcm16Mono(diPath,in,sr,error))return false;if(sr!=44100){in=resampleR8Brain24(in,static_cast<double>(sr),44100.0);sr=44100;}if(in.empty()){error="Phase 4: DI WAV is empty.";return false;}
+    std::vector<float>in;std::uint32_t sr=0;if(!readPcmIntegerMonoDiagnostic(diPath,in,sr,error))return false;if(sr!=44100){in=resampleR8Brain24(in,static_cast<double>(sr),44100.0);sr=44100;}if(in.empty()){error="Phase 4: DI WAV is empty.";return false;}
     std::vector<float>nam,co;if(!renderNamTarget44100(modelPath,in,nam,error,status))return false;renderModel(clo,in,co,true);nam.resize(in.size(),0.0f);co.resize(in.size(),0.0f);
     const fs::path namW=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_DI_NAM.wav"),cloW=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_DI_PHASE2_CLO.wav"),namM=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_DI_NAM_LEVELMATCH.wav"),cloM=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_DI_PHASE2_LEVELMATCH.wav"),winP=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_DI_WINDOWS.csv"),sumP=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_DI_SUMMARY.csv");
     if(!writePcm16MonoDiagnostic(namW,nam,44100,error)||!writePcm16MonoDiagnostic(cloW,co,44100,error))return false;
@@ -2615,7 +2658,7 @@ bool writePhase6DiDiagnostic(const fs::path&modelPath,const fs::path&phase2CloPa
     if(!loadGp200ModelForAnalysis(phase5CloPath,p5,error)){error="Phase 6: cannot load Phase 5 CLO: "+error;return false;}
 
     std::vector<float>in;std::uint32_t sr=0;
-    if(!readPcm16Mono(diPath,in,sr,error))return false;
+    if(!readPcmIntegerMonoDiagnostic(diPath,in,sr,error))return false;
     if(sr!=44100){in=resampleR8Brain24(in,static_cast<double>(sr),44100.0);sr=44100;}
     if(in.empty()){error="Phase 6: DI WAV is empty.";return false;}
 
@@ -2694,7 +2737,7 @@ bool runPhase4Diagnostic(const fs::path&inputNam,const fs::path&modelPath,const 
     Model clo;if(!loadGp200ModelForAnalysis(referenceClo,clo,error))return false;const auto stem=inputNam.stem().wstring();
     const fs::path levelP=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_LEVEL_CURVE.csv"),imdP=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_IMD.csv");
     if(!writePhase4LevelCurve(modelPath,clo,levelP,error,status))return false;if(!writePhase4Imd(modelPath,clo,imdP,error,status))return false;report(status,L"Experimental phase 4 level curve: "+levelP.filename().wstring());report(status,L"Experimental phase 4 IMD: "+imdP.filename().wstring());
-    fs::path di;if(findOptionalDi(inputNam,di)){report(status,L"Experimental phase 4: found DI "+di.filename().wstring());if(!writePhase4DiDiagnostic(modelPath,clo,di,outDir,stem,error,status))return false;}else report(status,L"Experimental phase 4: optional DI not found. Put <NAM stem>_DI.wav next to the NAM (mono PCM16). Sine/IMD diagnostics were still generated.");
+    fs::path di;if(findOptionalDi(inputNam,di)){report(status,L"Experimental phase 4: found DI "+di.filename().wstring());if(!writePhase4DiDiagnostic(modelPath,clo,di,outDir,stem,error,status))return false;}else report(status,L"Experimental phase 4: optional DI not found. Put <NAM stem>_DI.wav next to the NAM (mono PCM16/24/32). Sine/IMD diagnostics were still generated.");
     return true;
 }
 
@@ -2789,7 +2832,7 @@ ConversionResult convertNamToBothIndependent(const fs::path& inputNam,const fs::
                 if(!writePhase6DiDiagnostic(modelPath,phase3Start,phase5Clo,di,outputDirectory,inputNam.stem().wstring(),phase6Error,status))
                     report(status,L"Experimental phase 6 DI WARNING: "+std::wstring(phase6Error.begin(),phase6Error.end()));
             }else report(status,L"Experimental phase 6 DI skipped because Phase 5 did not produce a candidate CLO.");
-        }else report(status,L"Experimental phase 6 DI not run. Put <NAM stem>_DI.wav next to the NAM (mono PCM16) and convert again.");
+        }else report(status,L"Experimental phase 6 DI not run. Put <NAM stem>_DI.wav next to the NAM (mono PCM16/24/32) and convert again.");
     }
 
     if(trainer.generateHarmonicReport){
