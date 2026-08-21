@@ -140,21 +140,21 @@ bool readPcm16Mono(const fs::path& path, std::vector<float>& x, std::uint32_t& s
 bool readPcmIntegerMonoDiagnostic(const fs::path& path, std::vector<float>& x, std::uint32_t& sr, std::string& error) {
     std::ifstream f(path, std::ios::binary); if(!f){error="Cannot open diagnostic DI WAV: "+pathToUtf8(path);return false;}
     std::array<std::uint8_t,12> h{}; f.read(reinterpret_cast<char*>(h.data()),12);
-    if(f.gcount()!=12 || std::memcmp(h.data(),"RIFF",4)||std::memcmp(h.data()+8,"WAVE",4)){error="Phase 6: invalid DI WAV (expected RIFF/WAVE).";return false;}
+    if(f.gcount()!=12 || std::memcmp(h.data(),"RIFF",4)||std::memcmp(h.data()+8,"WAVE",4)){error="DI: invalid WAV (expected RIFF/WAVE).";return false;}
     std::uint16_t fmt=0,ch=0,bits=0,align=0; std::vector<std::uint8_t> data;
     while(f){
         std::array<std::uint8_t,8> c{};f.read(reinterpret_cast<char*>(c.data()),8);if(f.gcount()!=8)break;
         const auto n=le32(c.data()+4);std::vector<std::uint8_t>b(n);
-        if(n){f.read(reinterpret_cast<char*>(b.data()),n);if(static_cast<std::uint32_t>(f.gcount())!=n){error="Phase 6: truncated DI WAV.";return false;}}
+        if(n){f.read(reinterpret_cast<char*>(b.data()),n);if(static_cast<std::uint32_t>(f.gcount())!=n){error="DI: truncated WAV.";return false;}}
         if(n&1)f.seekg(1,std::ios::cur);
         if(!std::memcmp(c.data(),"fmt ",4)&&n>=16){fmt=le16(b.data());ch=le16(b.data()+2);sr=le32(b.data()+4);align=le16(b.data()+12);bits=le16(b.data()+14);}
         else if(!std::memcmp(c.data(),"data",4))data=std::move(b);
     }
     const std::uint16_t expectedAlign=static_cast<std::uint16_t>(bits/8u);
     if(fmt!=1||ch!=1||sr==0||data.empty()||(bits!=16&&bits!=24&&bits!=32)||align!=expectedAlign){
-        error="Phase 6: DI WAV must be mono integer PCM16, PCM24 or PCM32.";return false;
+        error="DI WAV must be mono integer PCM16, PCM24 or PCM32.";return false;
     }
-    if(data.size()%align!=0){error="Phase 6: DI WAV data size is not aligned to complete samples.";return false;}
+    if(data.size()%align!=0){error="DI WAV data size is not aligned to complete samples.";return false;}
     x.resize(data.size()/align);
     if(bits==16){
         for(std::size_t i=0;i<x.size();++i)x[i]=static_cast<std::int16_t>(le16(data.data()+2*i))/32768.0f;
@@ -1653,12 +1653,10 @@ bool serialize2048(const fs::path&path,const Model&m,double trainerRate,std::str
     auto A44=resampleFirOfficial(m.A,trainerRate,128);auto Bscaled=m.B;for(auto&v:Bscaled)v*=4.0f;auto B44=resampleFirOfficial(Bscaled,trainerRate,2048);for(std::size_t i=0;i<A44.size();++i)putFloat(d,0x88+4*i,A44[i]);for(std::size_t i=0;i<B44.size();++i)putFloat(d,0x88+4*(128+i),B44[i]);const auto crc=crc16Official(d.data()+0x0c,d.size()-0x0c);d[8]=static_cast<std::uint8_t>(crc);d[9]=static_cast<std::uint8_t>(crc>>8);return writeFileBytes(path,d.data(),d.size(),error);}
 
 // -----------------------------------------------------------------------------
-// Experimental phase 1: harmonic fingerprint
+// Shared GP-200 analysis helpers
 // -----------------------------------------------------------------------------
-// This layer is deliberately diagnostic-only.  NATIVE15 remains untouched:
-// the CLO is generated first, then the exact serialized GP-200 B1024 file is
-// loaded back and compared with the NAM target on a deterministic sine matrix.
-// The report is the measurement baseline for later P/K, A and B experiments.
+// Shared helpers used by the retained Phase 2 reference fit and Phase 7 diagnostics.
+// They do not generate standalone Phase-1/Phase-1B result files.
 
 float readFloatLe(const std::vector<std::uint8_t>&d,std::size_t o){
     const std::uint32_t u=le32(d.data()+o);float v{};std::memcpy(&v,&u,sizeof(v));return v;
@@ -1670,9 +1668,9 @@ double readDoubleLe(const std::vector<std::uint8_t>&d,std::size_t o){
 
 bool loadGp200ModelForAnalysis(const fs::path&path,Model&m,std::string&error){
     std::vector<std::uint8_t>d;if(!readFileBytes(path,d,error))return false;
-    if(d.size()<0x1288||std::memcmp(d.data(),"VTSI",4)!=0){error="Phase 1: invalid GP-200 CLO.";return false;}
+    if(d.size()<0x1288||std::memcmp(d.data(),"VTSI",4)!=0){error="Invalid GP-200 CLO.";return false;}
     if(le32(d.data()+0x78)!=0||le32(d.data()+0x7c)!=128||le32(d.data()+0x80)!=128||le32(d.data()+0x84)!=1024){
-        error="Phase 1: expected GP-200 A128/B1024 layout.";return false;
+        error="Expected GP-200 A128/B1024 layout.";return false;
     }
     m.pre={readDoubleLe(d,0x18),readDoubleLe(d,0x20),readDoubleLe(d,0x28),readDoubleLe(d,0x30),readDoubleLe(d,0x38),0.0,0.0};
     m.post={readDoubleLe(d,0x40),readDoubleLe(d,0x48),readDoubleLe(d,0x50),readDoubleLe(d,0x58),readDoubleLe(d,0x60),0.0,0.0};
@@ -1714,9 +1712,9 @@ std::vector<float> buildHarmonicMatrix(std::vector<HarmonicCase>&cases){
 bool renderNamTarget44100(const fs::path&modelPath,const std::vector<float>&input44100,std::vector<float>&output44100,
                           std::string&error,const StatusCallback&status){
     try{
-        auto dsp=nam::get_dsp(modelPath);if(!dsp){error="Phase 1: NeuralAmpModelerCore could not load the NAM.";return false;}
+        auto dsp=nam::get_dsp(modelPath);if(!dsp){error="NeuralAmpModelerCore could not load the NAM.";return false;}
         double rate=dsp->GetExpectedSampleRate();if(!(rate>1000.0&&rate<384000.0))rate=48000.0;
-        report(status,L"Experimental phase 1: rendering harmonic NAM reference...");
+        report(status,L"Experimental: rendering NAM reference...");
         auto inModel=resampleR8Brain24(input44100,44100.0,rate);
         std::vector<float>outModel(inModel.size(),0.0f);
         constexpr int block=1024;dsp->Reset(rate,block);
@@ -1730,7 +1728,7 @@ bool renderNamTarget44100(const fs::path&modelPath,const std::vector<float>&inpu
         output44100=resampleR8Brain24(outModel,rate,44100.0);
         output44100.resize(input44100.size(),0.0f);
         return true;
-    }catch(const std::exception&e){error=std::string("Phase 1 NAM render: ")+e.what();return false;}
+    }catch(const std::exception&e){error=std::string("NAM reference render: ")+e.what();return false;}
 }
 
 double goertzelAmplitude(const std::vector<float>&x,std::size_t start,std::size_t count,double frequency,double sr){
@@ -1754,175 +1752,6 @@ HarmonicSet measureHarmonics(const std::vector<float>&x,const HarmonicCase&c){
     h.evenDbc=ratioDb(std::sqrt(even2),fundamental);h.oddDbc=ratioDb(std::sqrt(odd2),fundamental);h.thdDbc=ratioDb(std::sqrt(all2),fundamental);
     return h;
 }
-
-bool writeHarmonicFingerprint(const fs::path&modelPath,const fs::path&gp200Clo,const fs::path&reportPath,
-                              std::string&error,const StatusCallback&status){
-    Model gp;if(!loadGp200ModelForAnalysis(gp200Clo,gp,error))return false;
-    std::vector<HarmonicCase>cases;const auto testInput=buildHarmonicMatrix(cases);
-    std::vector<float>namOut;if(!renderNamTarget44100(modelPath,testInput,namOut,error,status))return false;
-    report(status,L"Experimental phase 1: rendering serialized GP-200 CLO...");
-    std::vector<float>cloOut;renderModel(gp,testInput,cloOut,true);
-    if(cloOut.size()!=testInput.size()){error="Phase 1: CLO renderer returned unexpected length.";return false;}
-
-    std::ofstream out(reportPath,std::ios::binary|std::ios::trunc);if(!out){error="Cannot create harmonic report: "+pathToUtf8(reportPath);return false;}
-    out<<"# Experimental Phase 1 harmonic fingerprint\n";
-    out<<"# NATIVE15 CLO generation is unchanged; this CSV is diagnostic only.\n";
-    out<<"# NAM reference path: 44.1k input -> r8brain -> NAM expected rate -> NAM * 0.31 -> r8brain -> 44.1k.\n";
-    out<<"# CLO path: exact serialized GP-200 A128/B1024 model at 44.1k.\n";
-    out<<"frequency_hz,input_dbfs,nam_h1_dbfs,clo_h1_dbfs,h1_delta_db";
-    for(int h=2;h<=8;++h)out<<",nam_h"<<h<<"_dbc,clo_h"<<h<<"_dbc,h"<<h<<"_delta_db";
-    out<<",nam_even_dbc,clo_even_dbc,even_delta_db,nam_odd_dbc,clo_odd_dbc,odd_delta_db,nam_thd_dbc,clo_thd_dbc,thd_delta_db\n";
-    out<<std::fixed<<std::setprecision(6);
-
-    double h1Abs=0.0,evenAbs=0.0,oddAbs=0.0,thdAbs=0.0;std::size_t n=0;
-    for(const auto&c:cases){
-        const auto nh=measureHarmonics(namOut,c),ch=measureHarmonics(cloOut,c);
-        out<<c.frequencyHz<<','<<c.inputDbfs<<','<<nh.fundamentalDbfs<<','<<ch.fundamentalDbfs<<','<<(ch.fundamentalDbfs-nh.fundamentalDbfs);
-        for(int h=2;h<=8;++h){
-            const double nd=ratioDb(nh.amp[static_cast<std::size_t>(h-1)],nh.amp[0]);
-            const double cd=ratioDb(ch.amp[static_cast<std::size_t>(h-1)],ch.amp[0]);
-            out<<','<<nd<<','<<cd<<','<<(cd-nd);
-        }
-        out<<','<<nh.evenDbc<<','<<ch.evenDbc<<','<<(ch.evenDbc-nh.evenDbc)
-           <<','<<nh.oddDbc<<','<<ch.oddDbc<<','<<(ch.oddDbc-nh.oddDbc)
-           <<','<<nh.thdDbc<<','<<ch.thdDbc<<','<<(ch.thdDbc-nh.thdDbc)<<'\n';
-        h1Abs+=std::fabs(ch.fundamentalDbfs-nh.fundamentalDbfs);evenAbs+=std::fabs(ch.evenDbc-nh.evenDbc);oddAbs+=std::fabs(ch.oddDbc-nh.oddDbc);thdAbs+=std::fabs(ch.thdDbc-nh.thdDbc);++n;
-    }
-    if(!out){error="Failed writing harmonic report: "+pathToUtf8(reportPath);return false;}
-    const double inv=n?1.0/static_cast<double>(n):0.0;
-    std::wostringstream os;os<<std::fixed<<std::setprecision(3)
-        <<L"Experimental phase 1: H1 MAE "<<(h1Abs*inv)<<L" dB, even MAE "<<(evenAbs*inv)
-        <<L" dB, odd MAE "<<(oddAbs*inv)<<L" dB, THD MAE "<<(thdAbs*inv)<<L" dB.";report(status,os.str());
-    return true;
-}
-
-
-// -----------------------------------------------------------------------------
-// Experimental phase 1B: gain-convention / drive calibration diagnostic
-// -----------------------------------------------------------------------------
-// The serialized CLO is NOT modified. We sweep a scalar drive trim before the
-// GP-200 model and, for every trim, fit a scalar output trim from the low-level
-// fundamental measurements. Output trim cannot change harmonic dBc, so this
-// cleanly separates an output-level convention from a drive/nonlinearity issue.
-
-struct Phase1BCalibrationRow {
-    double inputTrimDb=0.0;
-    double fittedOutputTrimDb=0.0;
-    double h1MaeDb=0.0;
-    double h2to8MaeDb=0.0;
-    double evenMaeDb=0.0;
-    double oddMaeDb=0.0;
-    double thdMaeDb=0.0;
-    double score=0.0;
-};
-
-double medianValue(std::vector<double> v){
-    if(v.empty())return 0.0;
-    const std::size_t mid=v.size()/2;
-    std::nth_element(v.begin(),v.begin()+static_cast<std::ptrdiff_t>(mid),v.end());
-    double m=v[mid];
-    if((v.size()&1u)==0u){
-        const auto it=std::max_element(v.begin(),v.begin()+static_cast<std::ptrdiff_t>(mid));
-        if(it!=v.begin()+static_cast<std::ptrdiff_t>(mid))m=0.5*(m+*it);
-    }
-    return m;
-}
-
-bool writePhase1BCalibration(const fs::path&modelPath,const fs::path&gp200Clo,const fs::path&summaryPath,
-                             const fs::path&bestDetailPath,std::string&error,const StatusCallback&status){
-    Model gp;if(!loadGp200ModelForAnalysis(gp200Clo,gp,error))return false;
-    std::vector<HarmonicCase>cases;const auto baseInput=buildHarmonicMatrix(cases);
-    std::vector<float>namOut;if(!renderNamTarget44100(modelPath,baseInput,namOut,error,status))return false;
-
-    std::vector<HarmonicSet> namH;namH.reserve(cases.size());
-    for(const auto&c:cases)namH.push_back(measureHarmonics(namOut,c));
-
-    constexpr std::array<double,25> trims={
-        -18.0,-16.5,-15.0,-13.5,-12.0,-10.5,-9.0,-7.5,-6.0,-4.5,-3.0,-1.5,0.0,
-         1.5,  3.0,  4.5,  6.0, 7.5, 9.0,10.5,12.0,13.5,15.0,16.5,18.0};
-    std::vector<Phase1BCalibrationRow> rows;rows.reserve(trims.size());
-    double bestScore=std::numeric_limits<double>::infinity();
-    double bestInputTrim=0.0,bestOutputTrim=0.0;
-    std::vector<float>bestCloOut;
-
-    for(double trimDb:trims){
-        report(status,L"Experimental phase 1B: testing CLO drive trim "+std::to_wstring(trimDb)+L" dB...");
-        const float g=static_cast<float>(std::pow(10.0,trimDb/20.0));
-        std::vector<float>driven(baseInput.size());
-        for(std::size_t i=0;i<baseInput.size();++i)driven[i]=baseInput[i]*g;
-        std::vector<float>cloOut;renderModel(gp,driven,cloOut,true);
-        if(cloOut.size()!=baseInput.size()){error="Phase 1B: CLO renderer returned unexpected length.";return false;}
-
-        std::vector<HarmonicSet> cloH;cloH.reserve(cases.size());
-        std::vector<double> lowLevelH1Delta;
-        for(std::size_t i=0;i<cases.size();++i){
-            auto ch=measureHarmonics(cloOut,cases[i]);cloH.push_back(ch);
-            if(cases[i].inputDbfs<=-18.0f)lowLevelH1Delta.push_back(ch.fundamentalDbfs-namH[i].fundamentalDbfs);
-        }
-        // Robust scalar output correction. This is diagnostic only and never
-        // written to the CLO. A pure output correction leaves all dBc values unchanged.
-        const double outTrim=-medianValue(lowLevelH1Delta);
-        double h1=0.0,harm=0.0,even=0.0,odd=0.0,thd=0.0;std::size_t harmN=0;
-        for(std::size_t i=0;i<cases.size();++i){
-            h1+=std::fabs((cloH[i].fundamentalDbfs+outTrim)-namH[i].fundamentalDbfs);
-            for(int h=2;h<=8;++h){
-                const auto hi=static_cast<std::size_t>(h-1);
-                const double nd=ratioDb(namH[i].amp[hi],namH[i].amp[0]);
-                const double cd=ratioDb(cloH[i].amp[hi],cloH[i].amp[0]);
-                harm+=std::fabs(cd-nd);++harmN;
-            }
-            even+=std::fabs(cloH[i].evenDbc-namH[i].evenDbc);
-            odd +=std::fabs(cloH[i].oddDbc -namH[i].oddDbc);
-            thd +=std::fabs(cloH[i].thdDbc -namH[i].thdDbc);
-        }
-        const double inv=cases.empty()?0.0:1.0/static_cast<double>(cases.size());
-        Phase1BCalibrationRow row;
-        row.inputTrimDb=trimDb;row.fittedOutputTrimDb=outTrim;row.h1MaeDb=h1*inv;
-        row.h2to8MaeDb=harmN?harm/static_cast<double>(harmN):0.0;
-        row.evenMaeDb=even*inv;row.oddMaeDb=odd*inv;row.thdMaeDb=thd*inv;
-        // Diagnostic ranking: harmonic structure dominates; H1 only breaks ties.
-        row.score=row.h2to8MaeDb+0.25*row.h1MaeDb;
-        rows.push_back(row);
-        if(row.score<bestScore){bestScore=row.score;bestInputTrim=trimDb;bestOutputTrim=outTrim;bestCloOut=std::move(cloOut);}
-    }
-
-    std::ofstream out(summaryPath,std::ios::binary|std::ios::trunc);if(!out){error="Cannot create phase 1B calibration report: "+pathToUtf8(summaryPath);return false;}
-    out<<"# Experimental Phase 1B calibration sweep\n";
-    out<<"# Diagnostic only: serialized CLO is never modified.\n";
-    out<<"# input_trim_db is applied before the CLO; fitted_output_trim_db is a scalar post gain fitted from <= -18 dBFS H1.\n";
-    out<<"# Output trim cannot alter harmonic dBc; changes in H2-H8/even/odd therefore come only from CLO drive.\n";
-    out<<"input_trim_db,fitted_output_trim_db,h1_mae_db,h2_to_h8_mae_db,even_mae_db,odd_mae_db,thd_mae_db,score\n";
-    out<<std::fixed<<std::setprecision(6);
-    for(const auto&r:rows)out<<r.inputTrimDb<<','<<r.fittedOutputTrimDb<<','<<r.h1MaeDb<<','<<r.h2to8MaeDb<<','<<r.evenMaeDb<<','<<r.oddMaeDb<<','<<r.thdMaeDb<<','<<r.score<<'\n';
-    if(!out){error="Failed writing phase 1B calibration report: "+pathToUtf8(summaryPath);return false;}
-
-    // Detailed harmonic table for the best diagnostic drive trim.
-    const double bestGain=std::pow(10.0,bestOutputTrim/20.0);
-    std::ofstream det(bestDetailPath,std::ios::binary|std::ios::trunc);if(!det){error="Cannot create phase 1B best-detail report: "+pathToUtf8(bestDetailPath);return false;}
-    det<<"# Experimental Phase 1B best calibrated harmonic fingerprint\n";
-    det<<"# best_input_trim_db="<<std::fixed<<std::setprecision(6)<<bestInputTrim<<"\n";
-    det<<"# fitted_output_trim_db="<<bestOutputTrim<<"\n";
-    det<<"frequency_hz,input_dbfs,nam_h1_dbfs,clo_h1_dbfs_cal,h1_delta_db";
-    for(int h=2;h<=8;++h)det<<",nam_h"<<h<<"_dbc,clo_h"<<h<<"_dbc,h"<<h<<"_delta_db";
-    det<<",nam_even_dbc,clo_even_dbc,even_delta_db,nam_odd_dbc,clo_odd_dbc,odd_delta_db,nam_thd_dbc,clo_thd_dbc,thd_delta_db\n";
-    det<<std::fixed<<std::setprecision(6);
-    (void)bestGain; // dBc is invariant to the fitted scalar output trim.
-    for(std::size_t i=0;i<cases.size();++i){
-        const auto ch=measureHarmonics(bestCloOut,cases[i]);const auto&nh=namH[i];
-        det<<cases[i].frequencyHz<<','<<cases[i].inputDbfs<<','<<nh.fundamentalDbfs<<','<<(ch.fundamentalDbfs+bestOutputTrim)<<','<<((ch.fundamentalDbfs+bestOutputTrim)-nh.fundamentalDbfs);
-        for(int h=2;h<=8;++h){const auto hi=static_cast<std::size_t>(h-1);const double nd=ratioDb(nh.amp[hi],nh.amp[0]),cd=ratioDb(ch.amp[hi],ch.amp[0]);det<<','<<nd<<','<<cd<<','<<(cd-nd);}
-        det<<','<<nh.evenDbc<<','<<ch.evenDbc<<','<<(ch.evenDbc-nh.evenDbc)
-           <<','<<nh.oddDbc<<','<<ch.oddDbc<<','<<(ch.oddDbc-nh.oddDbc)
-           <<','<<nh.thdDbc<<','<<ch.thdDbc<<','<<(ch.thdDbc-nh.thdDbc)<<'\n';
-    }
-    if(!det){error="Failed writing phase 1B best-detail report: "+pathToUtf8(bestDetailPath);return false;}
-
-    std::wostringstream os;os<<std::fixed<<std::setprecision(2)
-        <<L"Experimental phase 1B best diagnostic drive trim "<<bestInputTrim<<L" dB; fitted output trim "<<bestOutputTrim
-        <<L" dB; score "<<bestScore<<L".";report(status,os.str());
-    return true;
-}
-
 
 // -----------------------------------------------------------------------------
 // Experimental phase 2: direct P/K asymmetry optimization
@@ -2104,261 +1933,7 @@ bool optimizePkExperimental(const fs::path&modelPath,const fs::path&baselineClo,
 
 
 // -----------------------------------------------------------------------------
-// Experimental phase 3B: drive-guarded joint A128 spectral-shape + P/K search
-// -----------------------------------------------------------------------------
-// Phase 3 proved that A can improve the harmonic match, but listening tests
-// exposed an unwanted reduction of effective gain/distortion because the search
-// could lower A broadly before the waveshaper. Phase 3B therefore restarts from
-// the Phase-2 P/K model and keeps the *actual 4x pre-waveshaper RMS drive* within
-// +/-0.5 dB of Phase 2. It also adds an absolute-harmonic term (H2..H8 in dBFS)
-// after one fixed output-convention trim derived from the Phase-2 baseline.
-// B1024, PRE and POST remain frozen. Every candidate is still a normal GP-200
-// A128/P/K/B1024 model.
-
-struct Phase3Metrics{
-    double evenMaeDb=0.0,oddMaeDb=0.0,h1DriftDb=0.0,absoluteHarmonicMaeDb=0.0;
-    double driveDeltaDb=0.0,score=0.0,areg=0.0;
-};
-
-std::vector<float> aPositiveMagnitude128(const std::vector<float>&a){
-    constexpr std::size_t posN=128,fullN=2*posN-2;
-    std::vector<ComplexF>x(fullN,{0.0f,0.0f});
-    for(std::size_t i=0;i<std::min(a.size(),fullN);++i)x[i].re=a[i];
-    const auto trig=makeDirectTrigOfficial(fullN);
-    const auto z=directDftOfficial(x,false,trig);
-    std::vector<float>m(posN,0.0f);
-    for(std::size_t k=0;k<posN;++k)m[k]=std::sqrt(z[k].re*z[k].re+z[k].im*z[k].im);
-    return m;
-}
-
-float phase3InterpolatedGainDb(float f,const std::array<double,8>&g){
-    constexpr std::array<float,8> fc={80.0f,160.0f,320.0f,640.0f,1250.0f,2500.0f,5000.0f,10000.0f};
-    if(f<=fc.front())return static_cast<float>(g.front());
-    if(f>=fc.back())return static_cast<float>(g.back());
-    const double lf=std::log(std::max(1.0f,f));
-    for(std::size_t i=0;i+1<fc.size();++i){
-        if(f<=fc[i+1]){
-            const double a=std::log(static_cast<double>(fc[i])),b=std::log(static_cast<double>(fc[i+1]));
-            const double t=(lf-a)/(b-a);
-            return static_cast<float>(g[i]+(g[i+1]-g[i])*t);
-        }
-    }
-    return static_cast<float>(g.back());
-}
-
-std::vector<float> makePhase3A(const std::vector<float>&baseMag,const std::array<double,8>&gainDb){
-    constexpr std::size_t posN=128,fullN=2*posN-2;
-    std::vector<float>m=baseMag;
-    for(std::size_t k=0;k<m.size();++k){
-        const float f=static_cast<float>(static_cast<double>(k)*44100.0/static_cast<double>(fullN));
-        const float db=phase3InterpolatedGainDb(f,gainDb);
-        m[k]*=static_cast<float>(std::pow(10.0,static_cast<double>(db)/20.0));
-    }
-    return minimumPhaseF(m,128);
-}
-
-// RMS of the four oversampled samples immediately before the P/K waveshaper.
-// This is the quantity that determines nonlinear excitation, rather than the
-// average dB of the eight A controls.
-double preWaveshaperRms(const Model&m,const std::vector<float>&in){
-    if(in.empty())return 0.0;
-    Biquad preBq=m.pre;
-    std::vector<float>preIn(in.size());
-    for(std::size_t i=0;i<in.size();++i)preIn[i]=preBq.p(in[i]);
-    FirPlan ap(m.A);std::vector<float>a;ap.run(preIn,a);
-    Poly u1({.045728147029876709f,.3325011134147644f,.66320204734802246f,.93385583162307739f},{.16808754205703735f,.50448572635650635f,.80378085374832153f});
-    Poly u2({.054230779409408569f,.39879697561264038f,.86291784048080444f},{.19969958066940308f,.62109684944152832f});
-    long double sum=0.0L;std::uint64_t n=0;
-    for(float v:a){
-        float e,o,q0,q1;u1.up(v,e,o);u2.up(e,q0,q1);
-        sum+=static_cast<long double>(q0)*q0+static_cast<long double>(q1)*q1;n+=2;
-        u2.up(o,q0,q1);sum+=static_cast<long double>(q0)*q0+static_cast<long double>(q1)*q1;n+=2;
-    }
-    return n?std::sqrt(static_cast<double>(sum/static_cast<long double>(n))):0.0;
-}
-
-Phase3Metrics evaluatePhase3Candidate(const Model&candidate,const std::vector<float>&testInput,
-                                      const std::vector<HarmonicCase>&cases,
-                                      const std::vector<HarmonicSet>&namH,
-                                      const std::vector<HarmonicSet>&referenceH,
-                                      const std::array<double,8>&gainDb,
-                                      double referenceDriveRms,double fixedOutputTrimDb){
-    std::vector<float>out;renderModel(candidate,testInput,out,true);
-    Phase3Metrics m;double evenSum=0.0,evenW=0.0,oddSum=0.0,oddW=0.0,h1=0.0,absHarm=0.0,absW=0.0;
-    constexpr std::array<double,4> evenWeight={1.0,1.0,0.5,0.25};
-    constexpr std::array<int,4> evenH={2,4,6,8};
-    constexpr std::array<double,3> oddWeight={1.0,0.75,0.5};
-    constexpr std::array<int,3> oddH={3,5,7};
-    constexpr std::array<double,7> absWeight={1.0,1.0,0.75,0.75,0.5,0.5,0.35};
-    for(std::size_t i=0;i<cases.size();++i){
-        const auto ch=measureHarmonics(out,cases[i]);
-        h1+=std::fabs(ch.fundamentalDbfs-referenceH[i].fundamentalDbfs);
-        for(std::size_t j=0;j<evenH.size();++j){
-            const auto hi=static_cast<std::size_t>(evenH[j]-1);
-            const double nd=ratioDb(namH[i].amp[hi],namH[i].amp[0]);
-            const double cd=ratioDb(ch.amp[hi],ch.amp[0]);
-            evenSum+=evenWeight[j]*std::fabs(cd-nd);evenW+=evenWeight[j];
-        }
-        for(std::size_t j=0;j<oddH.size();++j){
-            const auto hi=static_cast<std::size_t>(oddH[j]-1);
-            const double nd=ratioDb(namH[i].amp[hi],namH[i].amp[0]);
-            const double cd=ratioDb(ch.amp[hi],ch.amp[0]);
-            oddSum+=oddWeight[j]*std::fabs(cd-nd);oddW+=oddWeight[j];
-        }
-        // Absolute H2..H8 level after one fixed Phase-2-derived output trim.
-        // The trim is not re-fitted per candidate, so lowering the whole model
-        // cannot improve this term for free.
-        for(std::size_t hi=1;hi<8;++hi){
-            const double nd=db20(namH[i].amp[hi]);
-            const double cd=db20(ch.amp[hi])+fixedOutputTrimDb;
-            absHarm+=absWeight[hi-1]*std::min(30.0,std::fabs(cd-nd));absW+=absWeight[hi-1];
-        }
-    }
-    m.evenMaeDb=evenW>0.0?evenSum/evenW:0.0;
-    m.oddMaeDb=oddW>0.0?oddSum/oddW:0.0;
-    m.h1DriftDb=cases.empty()?0.0:h1/static_cast<double>(cases.size());
-    m.absoluteHarmonicMaeDb=absW>0.0?absHarm/absW:0.0;
-    const double drive=preWaveshaperRms(candidate,testInput);
-    m.driveDeltaDb=ratioDb(std::max(drive,1.0e-15),std::max(referenceDriveRms,1.0e-15));
-    double e=0.0;for(double v:gainDb)e+=v*v;m.areg=std::sqrt(e/static_cast<double>(gainDb.size()));
-    // Relative harmonic structure remains the primary target. The absolute term
-    // and drive term prevent the broad-gain reduction heard in Phase 3.
-    m.score=m.evenMaeDb+0.50*m.oddMaeDb+0.20*m.absoluteHarmonicMaeDb+0.25*m.h1DriftDb
-           +0.25*std::fabs(m.driveDeltaDb)+0.05*m.areg;
-    return m;
-}
-
-bool writeGp200APkVariant(const fs::path&sourcePath,const fs::path&outPath,const Model&m,std::string&error){
-    std::vector<std::uint8_t>d;if(!readFileBytes(sourcePath,d,error))return false;
-    if(d.size()<0x1288||std::memcmp(d.data(),"VTSI",4)!=0||m.A.size()!=128){error="Phase 3B: invalid GP-200 source CLO or A128.";return false;}
-    putFloat(d,0x68,m.pk.pp);putFloat(d,0x6c,m.pk.pn);putFloat(d,0x70,m.pk.kp);putFloat(d,0x74,m.pk.kn);
-    for(std::size_t i=0;i<128;++i)putFloat(d,0x88+4*i,m.A[i]);
-    const auto crc=crc16Official(d.data()+0x0c,d.size()-0x0c);d[8]=static_cast<std::uint8_t>(crc);d[9]=static_cast<std::uint8_t>(crc>>8);
-    return writeFileBytes(outPath,d.data(),d.size(),error);
-}
-
-bool optimizeAPkExperimental(const fs::path&modelPath,const fs::path&phase2Clo,const fs::path&experimentalClo,
-                             const fs::path&summaryPath,const fs::path&detailPath,
-                             std::string&error,const StatusCallback&status){
-    Model base;if(!loadGp200ModelForAnalysis(phase2Clo,base,error))return false;
-    const auto baseMag=aPositiveMagnitude128(base.A);
-    std::vector<HarmonicCase>cases;const auto testInput=buildPkOptimizationMatrix(cases);
-    std::vector<float>namOut;if(!renderNamTarget44100(modelPath,testInput,namOut,error,status))return false;
-    std::vector<float>baseOut;renderModel(base,testInput,baseOut,true);
-    std::vector<HarmonicSet>namH,baseH;namH.reserve(cases.size());baseH.reserve(cases.size());
-    std::vector<double>outputTrimSamples;
-    for(const auto&c:cases){
-        const auto nh=measureHarmonics(namOut,c),bh=measureHarmonics(baseOut,c);
-        namH.push_back(nh);baseH.push_back(bh);outputTrimSamples.push_back(nh.fundamentalDbfs-bh.fundamentalDbfs);
-    }
-    const double fixedOutputTrimDb=medianValue(outputTrimSamples);
-    const double referenceDriveRms=preWaveshaperRms(base,testInput);
-    if(!(referenceDriveRms>0.0)){error="Phase 3B: invalid Phase-2 pre-waveshaper RMS.";return false;}
-    std::array<double,8>gains{};
-    const auto baseMetrics=evaluatePhase3Candidate(base,testInput,cases,namH,baseH,gains,referenceDriveRms,fixedOutputTrimDb);
-    Model bestModel=base;Phase3Metrics best=baseMetrics;std::array<double,8>bestG=gains;
-    std::array<double,4> bestPk={std::log(std::max(1.0e-9f,base.pk.pp)),std::log(std::max(1.0e-9f,base.pk.pn)),
-                                 std::log(std::max(1.0e-9f,base.pk.kp)),std::log(std::max(1.0e-9f,base.pk.kn))};
-    const std::array<double,4> pk0=bestPk;
-    constexpr double pkRange=0.6931471805599453; // 0.5x..2x relative to Phase 2.
-    constexpr std::array<double,3> aStepsDb={1.5,0.75,0.375};
-    constexpr std::array<double,3> pkSteps={0.11332868530700327,0.058268908123975824,0.029558802241544398};
-    const std::array<std::array<int,4>,6> pkAxes={{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1},{1,-1,0,0},{0,0,1,-1}}};
-    constexpr double maxAGainDb=6.0;
-    constexpr double maxDriveDeltaDb=0.5; // Experimental guard derived from listening feedback.
-    std::ofstream log(summaryPath,std::ios::binary|std::ios::trunc);if(!log){error="Cannot create phase 3B A/P/K summary: "+pathToUtf8(summaryPath);return false;}
-    log<<"# Experimental Phase 3B drive-guarded A128 + P/K optimization\n";
-    log<<"# Restart baseline: Phase 2. Frozen: B1024, PRE, POST.\n";
-    log<<"# Hard constraints: odd MAE <= Phase2+0.75 dB, H1 drift <=1.5 dB, |pre-waveshaper drive delta| <=0.5 dB.\n";
-    log<<"# Absolute H2..H8 term uses fixed Phase-2 output trim dB,"<<fixedOutputTrimDb<<"\n";
-    log<<"stage,type,index,sign,pp,pn,kp,kn,a80,a160,a320,a640,a1250,a2500,a5000,a10000,even_mae_db,odd_mae_db,absolute_h2_h8_mae_db,h1_drift_db,drive_delta_db,a_rms_db,score,accepted\n";
-    log<<std::fixed<<std::setprecision(9);
-    auto row=[&](int stage,const char*type,int index,int sign,const Model&m,const std::array<double,8>&g,const Phase3Metrics&met,bool accepted){
-        log<<stage<<','<<type<<','<<index<<','<<sign<<','<<m.pk.pp<<','<<m.pk.pn<<','<<m.pk.kp<<','<<m.pk.kn;
-        for(double v:g)log<<','<<v;
-        log<<','<<met.evenMaeDb<<','<<met.oddMaeDb<<','<<met.absoluteHarmonicMaeDb<<','<<met.h1DriftDb<<','<<met.driveDeltaDb<<','<<met.areg<<','<<met.score<<','<<(accepted?1:0)<<'\n';
-    };
-    row(-1,"baseline",-1,0,base,bestG,baseMetrics,true);
-
-    for(std::size_t si=0;si<aStepsDb.size();++si){
-        bool changed=true;int rounds=0;
-        while(changed&&rounds<2){
-            changed=false;++rounds;
-            for(std::size_t bi=0;bi<bestG.size();++bi){
-                Phase3Metrics localBest=best;Model localModel=bestModel;auto localG=bestG;
-                for(int sign:{-1,1}){
-                    auto tg=bestG;tg[bi]=std::clamp(tg[bi]+sign*aStepsDb[si],-maxAGainDb,maxAGainDb);
-                    Model cand=bestModel;cand.A=makePhase3A(baseMag,tg);
-                    const auto met=evaluatePhase3Candidate(cand,testInput,cases,namH,baseH,tg,referenceDriveRms,fixedOutputTrimDb);
-                    const bool constraints=(met.oddMaeDb<=baseMetrics.oddMaeDb+0.75)&&(met.h1DriftDb<=1.5)&&(std::fabs(met.driveDeltaDb)<=maxDriveDeltaDb);
-                    const bool accept=constraints&&(met.score+1.0e-9<localBest.score);
-                    row(static_cast<int>(si),"A",static_cast<int>(bi),sign,cand,tg,met,accept);
-                    if(accept){localBest=met;localModel=cand;localG=tg;}
-                }
-                if(localBest.score+1.0e-9<best.score){best=localBest;bestModel=localModel;bestG=localG;changed=true;}
-            }
-            for(std::size_t ai=0;ai<pkAxes.size();++ai){
-                Phase3Metrics localBest=best;Model localModel=bestModel;auto localPk=bestPk;
-                for(int sign:{-1,1}){
-                    auto tq=bestPk;for(std::size_t j=0;j<4;++j)tq[j]=std::clamp(tq[j]+sign*pkAxes[ai][j]*pkSteps[si],pk0[j]-pkRange,pk0[j]+pkRange);
-                    Model cand=bestModel;cand.pk.pp=static_cast<float>(std::exp(tq[0]));cand.pk.pn=static_cast<float>(std::exp(tq[1]));
-                    cand.pk.kp=static_cast<float>(std::exp(tq[2]));cand.pk.kn=static_cast<float>(std::exp(tq[3]));
-                    const auto met=evaluatePhase3Candidate(cand,testInput,cases,namH,baseH,bestG,referenceDriveRms,fixedOutputTrimDb);
-                    const bool constraints=(met.oddMaeDb<=baseMetrics.oddMaeDb+0.75)&&(met.h1DriftDb<=1.5)&&(std::fabs(met.driveDeltaDb)<=maxDriveDeltaDb);
-                    const bool accept=constraints&&(met.score+1.0e-9<localBest.score);
-                    row(static_cast<int>(si),"PK",static_cast<int>(ai),sign,cand,bestG,met,accept);
-                    if(accept){localBest=met;localModel=cand;localPk=tq;}
-                }
-                if(localBest.score+1.0e-9<best.score){best=localBest;bestModel=localModel;bestPk=localPk;changed=true;}
-            }
-        }
-        std::wostringstream os;os<<std::fixed<<std::setprecision(3)<<L"Experimental phase 3B stage "<<(si+1)<<L"/"<<aStepsDb.size()
-            <<L": even "<<best.evenMaeDb<<L" dB, odd "<<best.oddMaeDb<<L" dB, abs H2-H8 "<<best.absoluteHarmonicMaeDb
-            <<L" dB, drive "<<best.driveDeltaDb<<L" dB.";report(status,os.str());
-    }
-    row(99,"best",-1,0,bestModel,bestG,best,true);
-    if(!log){error="Failed writing phase 3B A/P/K summary: "+pathToUtf8(summaryPath);return false;}
-    if(!writeGp200APkVariant(phase2Clo,experimentalClo,bestModel,error))return false;
-
-    Model serialized;if(!loadGp200ModelForAnalysis(experimentalClo,serialized,error))return false;
-    if(serialized.A.size()!=128){error="Phase 3B: serialized A128 verification failed.";return false;}
-    double aMax=0.0;for(std::size_t i=0;i<128;++i)aMax=std::max(aMax,std::fabs(static_cast<double>(serialized.A[i])-bestModel.A[i]));
-    const auto pkNear=[](float a,float b){const double da=std::fabs(static_cast<double>(a)-b),sc=std::max({1.0,std::fabs(static_cast<double>(a)),std::fabs(static_cast<double>(b))});return da<=1.0e-6*sc;};
-    if(aMax>1.0e-6||!pkNear(serialized.pk.pp,bestModel.pk.pp)||!pkNear(serialized.pk.pn,bestModel.pk.pn)||!pkNear(serialized.pk.kp,bestModel.pk.kp)||!pkNear(serialized.pk.kn,bestModel.pk.kn)){
-        error="Phase 3B: serialized GP-200 A/P/K verification failed.";return false;
-    }
-
-    std::vector<HarmonicCase>fullCases;const auto fullInput=buildHarmonicMatrix(fullCases);
-    std::vector<float>fullNam;if(!renderNamTarget44100(modelPath,fullInput,fullNam,error,status))return false;
-    std::vector<float>fullClo;renderModel(serialized,fullInput,fullClo,true);
-    std::ofstream det(detailPath,std::ios::binary|std::ios::trunc);if(!det){error="Cannot create phase 3B harmonic report: "+pathToUtf8(detailPath);return false;}
-    det<<"# Experimental Phase 3B drive-guarded A128 + P/K harmonic fingerprint\n";
-    det<<"# pp="<<serialized.pk.pp<<" pn="<<serialized.pk.pn<<" kp="<<serialized.pk.kp<<" kn="<<serialized.pk.kn<<"\n";
-    det<<"# A_control_db";for(double v:bestG)det<<','<<v;det<<"\n";
-    det<<"# training_drive_delta_db="<<best.driveDeltaDb<<" fixed_output_trim_db="<<fixedOutputTrimDb<<"\n";
-    det<<"frequency_hz,input_dbfs,nam_h1_dbfs,clo_h1_dbfs,h1_delta_db";
-    for(int h=2;h<=8;++h)det<<",nam_h"<<h<<"_dbc,clo_h"<<h<<"_dbc,h"<<h<<"_delta_db,nam_h"<<h<<"_dbfs,clo_h"<<h<<"_dbfs_cal,h"<<h<<"_abs_delta_db";
-    det<<",nam_even_dbc,clo_even_dbc,even_delta_db,nam_odd_dbc,clo_odd_dbc,odd_delta_db,nam_thd_dbc,clo_thd_dbc,thd_delta_db\n";
-    det<<std::fixed<<std::setprecision(6);
-    for(std::size_t i=0;i<fullCases.size();++i){
-        const auto nh=measureHarmonics(fullNam,fullCases[i]),ch=measureHarmonics(fullClo,fullCases[i]);
-        det<<fullCases[i].frequencyHz<<','<<fullCases[i].inputDbfs<<','<<nh.fundamentalDbfs<<','<<ch.fundamentalDbfs<<','<<(ch.fundamentalDbfs-nh.fundamentalDbfs);
-        for(int h=2;h<=8;++h){const auto hi=static_cast<std::size_t>(h-1);const double nd=ratioDb(nh.amp[hi],nh.amp[0]),cd=ratioDb(ch.amp[hi],ch.amp[0]);const double na=db20(nh.amp[hi]),ca=db20(ch.amp[hi])+fixedOutputTrimDb;det<<','<<nd<<','<<cd<<','<<(cd-nd)<<','<<na<<','<<ca<<','<<(ca-na);}
-        det<<','<<nh.evenDbc<<','<<ch.evenDbc<<','<<(ch.evenDbc-nh.evenDbc)<<','<<nh.oddDbc<<','<<ch.oddDbc<<','<<(ch.oddDbc-nh.oddDbc)
-           <<','<<nh.thdDbc<<','<<ch.thdDbc<<','<<(ch.thdDbc-nh.thdDbc)<<'\n';
-    }
-    if(!det){error="Failed writing phase 3B harmonic report: "+pathToUtf8(detailPath);return false;}
-    std::wostringstream os;os<<std::fixed<<std::setprecision(3)<<L"Experimental phase 3B selected: even "<<best.evenMaeDb
-        <<L" dB (Phase2 "<<baseMetrics.evenMaeDb<<L"), odd "<<best.oddMaeDb<<L" dB, abs H2-H8 "<<best.absoluteHarmonicMaeDb
-        <<L" dB, drive "<<best.driveDeltaDb<<L" dB.";report(status,os.str());
-    return true;
-}
-
-fs::path uniqueOutput(const fs::path&dir,const std::wstring&stem,const wchar_t*suffix);
-
-
-// -----------------------------------------------------------------------------
-// Experimental phase 4 diagnostic: real-signal gain / dynamics / IMD
+// Reusable level-curve / IMD diagnostics
 // -----------------------------------------------------------------------------
 // Diagnostic only.  It does not modify or serialize any CLO parameter.  The
 // reference CLO is the Phase-2 P/K result (or frozen NATIVE15 if Phase 2 could
@@ -2386,14 +1961,14 @@ bool writePcm16MonoDiagnostic(const fs::path&path,const std::vector<float>&x,std
 }
 
 struct LevelDiagCase{float db=0.0f;std::size_t start=0,count=0;};
-std::vector<float> buildPhase4LevelCurve(std::vector<LevelDiagCase>&cases){
+std::vector<float> buildLevelCurveDiagnostic(std::vector<LevelDiagCase>&cases){
     constexpr std::size_t sr=44100,silence=sr/4,warmup=sr/2,measure=sr;constexpr float f=250.0f;
     constexpr std::array<float,9> levels={-36.0f,-30.0f,-24.0f,-18.0f,-15.0f,-12.0f,-9.0f,-6.0f,-3.0f};
     std::vector<float>x;for(float db:levels){x.insert(x.end(),silence,0.0f);const std::size_t tone=x.size();const float g=static_cast<float>(std::pow(10.0,db/20.0));for(std::size_t n=0;n<warmup+measure;++n)x.push_back(g*static_cast<float>(std::sin(2.0*kPi*250.0*static_cast<double>(n)/44100.0)));cases.push_back({db,tone+warmup,measure});}return x;
 }
 
-bool writePhase4LevelCurve(const fs::path&modelPath,const Model&clo,const fs::path&path,std::string&error,const StatusCallback&status){
-    std::vector<LevelDiagCase>cases;const auto in=buildPhase4LevelCurve(cases);std::vector<float>nam,co;if(!renderNamTarget44100(modelPath,in,nam,error,status))return false;renderModel(clo,in,co,true);
+bool writeLevelCurveDiagnostic(const fs::path&modelPath,const Model&clo,const fs::path&path,std::string&error,const StatusCallback&status){
+    std::vector<LevelDiagCase>cases;const auto in=buildLevelCurveDiagnostic(cases);std::vector<float>nam,co;if(!renderNamTarget44100(modelPath,in,nam,error,status))return false;renderModel(clo,in,co,true);
     std::ofstream f(path,std::ios::binary|std::ios::trunc);if(!f){error="Phase 4: cannot create level-curve CSV.";return false;}
     f<<"# Experimental Phase 4 diagnostic: 250 Hz level curve. Diagnostic only; CLO unchanged.\n";
     f<<"input_dbfs,input_rms_dbfs,nam_rms_dbfs,clo_rms_dbfs,nam_gain_db,clo_gain_db,gain_delta_db,nam_peak_dbfs,clo_peak_dbfs,nam_crest_db,clo_crest_db,nam_thd_dbc,clo_thd_dbc,thd_delta_db\n"<<std::fixed<<std::setprecision(6);
@@ -2402,343 +1977,97 @@ bool writePhase4LevelCurve(const fs::path&modelPath,const Model&clo,const fs::pa
 }
 
 struct ImdCase{float db=0.0f;std::size_t start=0,count=0;};
-std::vector<float> buildPhase4Imd(std::vector<ImdCase>&cases){
+std::vector<float> buildImdDiagnostic(std::vector<ImdCase>&cases){
     constexpr std::size_t sr=44100,silence=sr/4,warmup=sr/2,measure=sr;constexpr std::array<float,5> levels={-30.0f,-24.0f,-18.0f,-12.0f,-6.0f};
     std::vector<float>x;for(float db:levels){x.insert(x.end(),silence,0.0f);const std::size_t st=x.size();const float total=static_cast<float>(std::pow(10.0,db/20.0));const float each=total*0.5f;for(std::size_t n=0;n<warmup+measure;++n){const double t=static_cast<double>(n)/44100.0;x.push_back(each*static_cast<float>(std::sin(2.0*kPi*220.0*t)+std::sin(2.0*kPi*330.0*t)));}cases.push_back({db,st+warmup,measure});}return x;
 }
 
-bool writePhase4Imd(const fs::path&modelPath,const Model&clo,const fs::path&path,std::string&error,const StatusCallback&status){
-    std::vector<ImdCase>cases;const auto in=buildPhase4Imd(cases);std::vector<float>nam,co;if(!renderNamTarget44100(modelPath,in,nam,error,status))return false;renderModel(clo,in,co,true);
+bool writeImdDiagnostic(const fs::path&modelPath,const Model&clo,const fs::path&path,std::string&error,const StatusCallback&status){
+    std::vector<ImdCase>cases;const auto in=buildImdDiagnostic(cases);std::vector<float>nam,co;if(!renderNamTarget44100(modelPath,in,nam,error,status))return false;renderModel(clo,in,co,true);
     constexpr std::array<double,7> probe={110.0,220.0,330.0,440.0,550.0,660.0,770.0};
     std::ofstream f(path,std::ios::binary|std::ios::trunc);if(!f){error="Phase 4: cannot create IMD CSV.";return false;}f<<"# Experimental Phase 4 diagnostic: 220+330 Hz two-tone. Diagnostic only.\ninput_dbfs";for(double hz:probe)f<<",nam_"<<static_cast<int>(hz)<<"_dbfs,clo_"<<static_cast<int>(hz)<<"_dbfs,delta_"<<static_cast<int>(hz)<<"_db";f<<"\n"<<std::fixed<<std::setprecision(6);
     for(const auto&c:cases){f<<c.db;for(double hz:probe){const double na=goertzelAmplitude(nam,c.start,c.count,hz,44100.0),ca=goertzelAmplitude(co,c.start,c.count,hz,44100.0);const double nd=db20(na),cd=db20(ca);f<<','<<nd<<','<<cd<<','<<(cd-nd);}f<<'\n';}return static_cast<bool>(f);
 }
 
 
-// -----------------------------------------------------------------------------
-// Experimental phase 4C: P/K fit with hard THD + IMD guards
-// -----------------------------------------------------------------------------
-// Starts from the accepted Phase-2 P/K CLO. A128, B1024, PRE and POST remain
-// byte-identical to Phase 2. The new objective adds the two behaviours that the
-// Phase-4 diagnostic showed were not captured by single-tone H2-H8 alone:
-//  (1) THD as a function of input level at 250 Hz
-//  (2) relative two-tone IMD products for 220+330 Hz.
-// All weights and search bounds below are experimental trainer choices.
-
-struct Phase4CMetrics{
-    double evenMaeDb=0.0,oddMaeDb=0.0,h1DriftDb=0.0,thdCurveMaeDb=0.0,imdMaeDb=0.0,score=0.0;
-};
-
-Phase4CMetrics evaluatePhase4CCandidate(const Model&candidate,
-                                         const std::vector<float>&harmInput,const std::vector<HarmonicCase>&harmCases,
-                                         const std::vector<HarmonicSet>&namH,const std::vector<HarmonicSet>&baseH,
-                                         const std::vector<float>&levelInput,const std::vector<LevelDiagCase>&levelCases,
-                                         const std::vector<HarmonicSet>&namLevelH,
-                                         const std::vector<float>&imdInput,const std::vector<ImdCase>&imdCases,
-                                         const std::vector<std::array<double,7>>&namImd){
-    Phase4CMetrics m;
-    std::vector<float>out;renderModel(candidate,harmInput,out,true);
-    constexpr std::array<int,4> evenH={2,4,6,8};
-    constexpr std::array<double,4> evenW={1.0,1.0,0.5,0.25};
-    constexpr std::array<int,3> oddH={3,5,7};
-    constexpr std::array<double,3> oddW={1.0,0.75,0.5};
-    double es=0.0,ew=0.0,os=0.0,ow=0.0,h1=0.0;
-    for(std::size_t i=0;i<harmCases.size();++i){
-        const auto ch=measureHarmonics(out,harmCases[i]);
-        h1+=std::fabs(ch.fundamentalDbfs-baseH[i].fundamentalDbfs);
-        for(std::size_t j=0;j<evenH.size();++j){const auto hi=static_cast<std::size_t>(evenH[j]-1);const double nd=ratioDb(namH[i].amp[hi],namH[i].amp[0]),cd=ratioDb(ch.amp[hi],ch.amp[0]);es+=evenW[j]*std::fabs(cd-nd);ew+=evenW[j];}
-        for(std::size_t j=0;j<oddH.size();++j){const auto hi=static_cast<std::size_t>(oddH[j]-1);const double nd=ratioDb(namH[i].amp[hi],namH[i].amp[0]),cd=ratioDb(ch.amp[hi],ch.amp[0]);os+=oddW[j]*std::fabs(cd-nd);ow+=oddW[j];}
-    }
-    m.evenMaeDb=ew>0.0?es/ew:0.0;m.oddMaeDb=ow>0.0?os/ow:0.0;m.h1DriftDb=harmCases.empty()?0.0:h1/static_cast<double>(harmCases.size());
-
-    std::vector<float>levelOut;renderModel(candidate,levelInput,levelOut,true);double thd=0.0;
-    for(std::size_t i=0;i<levelCases.size();++i){HarmonicCase hc{250.0f,levelCases[i].db,levelCases[i].start,levelCases[i].count};const auto ch=measureHarmonics(levelOut,hc);thd+=std::fabs(ch.thdDbc-namLevelH[i].thdDbc);}
-    m.thdCurveMaeDb=levelCases.empty()?0.0:thd/static_cast<double>(levelCases.size());
-
-    std::vector<float>imdOut;renderModel(candidate,imdInput,imdOut,true);
-    constexpr std::array<double,7> probe={110.0,220.0,330.0,440.0,550.0,660.0,770.0};
-    constexpr std::array<int,5> products={0,3,4,5,6}; // exclude the two fundamentals 220/330
-    double imd=0.0;std::size_t imdN=0;
-    for(std::size_t i=0;i<imdCases.size();++i){
-        std::array<double,7> ca{};for(std::size_t j=0;j<probe.size();++j)ca[j]=goertzelAmplitude(imdOut,imdCases[i].start,imdCases[i].count,probe[j],44100.0);
-        const double nref=std::sqrt(namImd[i][1]*namImd[i][1]+namImd[i][2]*namImd[i][2]);
-        const double cref=std::sqrt(ca[1]*ca[1]+ca[2]*ca[2]);
-        for(int idx:products){const auto j=static_cast<std::size_t>(idx);const double nd=ratioDb(namImd[i][j],nref),cd=ratioDb(ca[j],cref);imd+=std::fabs(cd-nd);++imdN;}
-    }
-    m.imdMaeDb=imdN?imd/static_cast<double>(imdN):0.0;
-    // Dynamic/IMD terms now dominate. Harmonic parity remains present but can no
-    // longer win by itself. These weights are experimental, not hardware facts.
-    m.score=0.25*m.evenMaeDb+0.25*m.oddMaeDb+1.00*m.thdCurveMaeDb+0.75*m.imdMaeDb+0.10*m.h1DriftDb;
-    return m;
-}
-
-bool optimizePkDynamicImdGuardedExperimental(const fs::path&modelPath,const fs::path&phase2Clo,const fs::path&outClo,
-                                      const fs::path&summaryPath,const fs::path&harmonicPath,
-                                      std::string&error,const StatusCallback&status){
-    Model base;if(!loadGp200ModelForAnalysis(phase2Clo,base,error))return false;
-
-    std::vector<HarmonicCase>harmCases;const auto harmInput=buildPkOptimizationMatrix(harmCases);
-    std::vector<float>namHOut;if(!renderNamTarget44100(modelPath,harmInput,namHOut,error,status))return false;
-    std::vector<float>baseHOut;renderModel(base,harmInput,baseHOut,true);
-    std::vector<HarmonicSet>namH,baseH;for(const auto&c:harmCases){namH.push_back(measureHarmonics(namHOut,c));baseH.push_back(measureHarmonics(baseHOut,c));}
-
-    std::vector<LevelDiagCase>levelCases;const auto levelInput=buildPhase4LevelCurve(levelCases);
-    std::vector<float>namLevel;if(!renderNamTarget44100(modelPath,levelInput,namLevel,error,status))return false;
-    std::vector<HarmonicSet>namLevelH;for(const auto&c:levelCases){HarmonicCase hc{250.0f,c.db,c.start,c.count};namLevelH.push_back(measureHarmonics(namLevel,hc));}
-
-    std::vector<ImdCase>imdCases;const auto imdInput=buildPhase4Imd(imdCases);
-    std::vector<float>namImdOut;if(!renderNamTarget44100(modelPath,imdInput,namImdOut,error,status))return false;
-    constexpr std::array<double,7> probe={110.0,220.0,330.0,440.0,550.0,660.0,770.0};
-    std::vector<std::array<double,7>>namImd;for(const auto&c:imdCases){std::array<double,7>a{};for(std::size_t j=0;j<probe.size();++j)a[j]=goertzelAmplitude(namImdOut,c.start,c.count,probe[j],44100.0);namImd.push_back(a);}
-
-    const auto baseMetrics=evaluatePhase4CCandidate(base,harmInput,harmCases,namH,baseH,levelInput,levelCases,namLevelH,imdInput,imdCases,namImd);
-    const std::array<double,4> p0={std::log(std::max(1.0e-9f,base.pk.pp)),std::log(std::max(1.0e-9f,base.pk.pn)),std::log(std::max(1.0e-9f,base.pk.kp)),std::log(std::max(1.0e-9f,base.pk.kn))};
-    std::array<double,4>bestQ=p0;Model bestModel=base;Phase4CMetrics best=baseMetrics;
-    constexpr double maxLog=0.6931471805599453; // 0.5x .. 2x around Phase 2
-    constexpr std::array<double,5>steps={0.22314355131420976,0.11332868530700327,0.058268908123975824,0.029558802241544398,0.014888612493750559};
-    const std::array<std::array<int,4>,6>axes={{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1},{1,-1,0,0},{0,0,1,-1}}};
-    std::ofstream log(summaryPath,std::ios::binary|std::ios::trunc);if(!log){error="Phase 4C: cannot create summary CSV.";return false;}
-    log<<"# Experimental Phase 4C P/K Dynamic + IMD guarded fit\n# Frozen: Phase-2 A128/B1024/PRE/POST. Search only P+/P-/K+/K-.\n# Score ranks candidates, but THD and IMD are HARD guards relative to Phase 2.\n# Constraints: THD <= Phase2; IMD <= Phase2; odd <= Phase2+1 dB; H1 drift <=1.5 dB. P/K limited to 0.5x..2x Phase2.\n";
-    log<<"stage,trial,pp,pn,kp,kn,even_mae_db,odd_mae_db,h1_drift_db,thd_curve_mae_db,imd_mae_db,score,accepted\n"<<std::fixed<<std::setprecision(9);
-    auto row=[&](const char*stage,int trial,const Model&m,const Phase4CMetrics&v,bool a){log<<stage<<','<<trial<<','<<m.pk.pp<<','<<m.pk.pn<<','<<m.pk.kp<<','<<m.pk.kn<<','<<v.evenMaeDb<<','<<v.oddMaeDb<<','<<v.h1DriftDb<<','<<v.thdCurveMaeDb<<','<<v.imdMaeDb<<','<<v.score<<','<<(a?1:0)<<'\n';};
-    row("baseline",0,base,baseMetrics,true);int trial=0;
-    for(std::size_t si=0;si<steps.size();++si){bool improved=true;int rounds=0;while(improved&&rounds<3){improved=false;++rounds;auto roundBest=best;auto roundQ=bestQ;auto roundModel=bestModel;
-        for(const auto&axis:axes)for(int sign:{-1,1}){auto tq=bestQ;for(std::size_t j=0;j<4;++j)tq[j]=std::clamp(tq[j]+static_cast<double>(sign*axis[j])*steps[si],p0[j]-maxLog,p0[j]+maxLog);Model cand=base;cand.pk.pp=static_cast<float>(std::exp(tq[0]));cand.pk.pn=static_cast<float>(std::exp(tq[1]));cand.pk.kp=static_cast<float>(std::exp(tq[2]));cand.pk.kn=static_cast<float>(std::exp(tq[3]));const auto met=evaluatePhase4CCandidate(cand,harmInput,harmCases,namH,baseH,levelInput,levelCases,namLevelH,imdInput,imdCases,namImd);const bool constraints=met.thdCurveMaeDb<=baseMetrics.thdCurveMaeDb+1.0e-9&&met.imdMaeDb<=baseMetrics.imdMaeDb+1.0e-9&&met.oddMaeDb<=baseMetrics.oddMaeDb+1.0&&met.h1DriftDb<=1.5;const bool accept=constraints&&met.score+1.0e-9<roundBest.score;++trial;row(std::to_string(si).c_str(),trial,cand,met,accept);if(accept){roundBest=met;roundQ=tq;roundModel=cand;improved=true;}}
-        if(improved){best=roundBest;bestQ=roundQ;bestModel=roundModel;}}
-        std::wostringstream os;os<<std::fixed<<std::setprecision(3)<<L"Experimental phase 4C stage "<<(si+1)<<L"/"<<steps.size()<<L": THD "<<best.thdCurveMaeDb<<L" dB, IMD "<<best.imdMaeDb<<L" dB, even "<<best.evenMaeDb<<L" dB.";report(status,os.str());}
-    row("best",trial+1,bestModel,best,true);if(!log){error="Phase 4C: failed writing summary.";return false;}
-    if(!writeGp200PkVariant(phase2Clo,outClo,bestModel.pk,error))return false;
-    Model serialized;if(!loadGp200ModelForAnalysis(outClo,serialized,error))return false;
-    const auto pkNear=[](float a,float b){const double da=std::fabs(static_cast<double>(a)-b),sc=std::max({1.0,std::fabs(static_cast<double>(a)),std::fabs(static_cast<double>(b))});return da<=1e-6*sc;};
-    if(!pkNear(serialized.pk.pp,bestModel.pk.pp)||!pkNear(serialized.pk.pn,bestModel.pk.pn)||!pkNear(serialized.pk.kp,bestModel.pk.kp)||!pkNear(serialized.pk.kn,bestModel.pk.kn)){error="Phase 4C: serialized P/K verification failed.";return false;}
-
-    std::vector<HarmonicCase>fullCases;const auto fullInput=buildHarmonicMatrix(fullCases);std::vector<float>fullNam;if(!renderNamTarget44100(modelPath,fullInput,fullNam,error,status))return false;std::vector<float>fullClo;renderModel(bestModel,fullInput,fullClo,true);
-    std::ofstream det(harmonicPath,std::ios::binary|std::ios::trunc);if(!det){error="Phase 4C: cannot create harmonic CSV.";return false;}det<<"# Experimental Phase 4C selected P/K harmonic validation\n# pp="<<bestModel.pk.pp<<" pn="<<bestModel.pk.pn<<" kp="<<bestModel.pk.kp<<" kn="<<bestModel.pk.kn<<"\nfrequency_hz,input_dbfs,nam_h1_dbfs,clo_h1_dbfs,h1_delta_db";for(int h=2;h<=8;++h)det<<",nam_h"<<h<<"_dbc,clo_h"<<h<<"_dbc,h"<<h<<"_delta_db";det<<",nam_even_dbc,clo_even_dbc,even_delta_db,nam_odd_dbc,clo_odd_dbc,odd_delta_db,nam_thd_dbc,clo_thd_dbc,thd_delta_db\n"<<std::fixed<<std::setprecision(6);
-    for(std::size_t i=0;i<fullCases.size();++i){const auto nh=measureHarmonics(fullNam,fullCases[i]),ch=measureHarmonics(fullClo,fullCases[i]);det<<fullCases[i].frequencyHz<<','<<fullCases[i].inputDbfs<<','<<nh.fundamentalDbfs<<','<<ch.fundamentalDbfs<<','<<(ch.fundamentalDbfs-nh.fundamentalDbfs);for(int h=2;h<=8;++h){const auto hi=static_cast<std::size_t>(h-1);const double nd=ratioDb(nh.amp[hi],nh.amp[0]),cd=ratioDb(ch.amp[hi],ch.amp[0]);det<<','<<nd<<','<<cd<<','<<(cd-nd);}det<<','<<nh.evenDbc<<','<<ch.evenDbc<<','<<(ch.evenDbc-nh.evenDbc)<<','<<nh.oddDbc<<','<<ch.oddDbc<<','<<(ch.oddDbc-nh.oddDbc)<<','<<nh.thdDbc<<','<<ch.thdDbc<<','<<(ch.thdDbc-nh.thdDbc)<<'\n';}
-    report(status,L"Experimental phase 4C CLO: "+outClo.filename().wstring());return static_cast<bool>(det);
-}
-
-
-
-// -----------------------------------------------------------------------------
-// Experimental phase 5: joint A128 + P/K fit guided by THD + IMD
-// -----------------------------------------------------------------------------
-// Starts again from Phase 2. B1024, PRE and POST remain frozen. Unlike Phase 3,
-// A is no longer driven mainly by single-tone parity: candidate acceptance is
-// guarded by the Phase-2 THD-vs-level and two-tone IMD errors measured in Phase
-// 4. A is limited to +/-3 dB at eight log-frequency control points to keep it a
-// spectral excitation correction rather than a broad gain escape route.
-
-struct Phase5Metrics{
-    double evenMaeDb=0.0,oddMaeDb=0.0,h1DriftDb=0.0,thdCurveMaeDb=0.0,imdMaeDb=0.0,aRmsDb=0.0,score=0.0;
-};
-
-Phase5Metrics evaluatePhase5Candidate(const Model&candidate,
-                                      const std::vector<float>&harmInput,const std::vector<HarmonicCase>&harmCases,
-                                      const std::vector<HarmonicSet>&namH,const std::vector<HarmonicSet>&baseH,
-                                      const std::vector<float>&levelInput,const std::vector<LevelDiagCase>&levelCases,
-                                      const std::vector<HarmonicSet>&namLevelH,
-                                      const std::vector<float>&imdInput,const std::vector<ImdCase>&imdCases,
-                                      const std::vector<std::array<double,7>>&namImd,
-                                      const std::array<double,8>&aGainDb){
-    const auto q=evaluatePhase4CCandidate(candidate,harmInput,harmCases,namH,baseH,levelInput,levelCases,namLevelH,imdInput,imdCases,namImd);
-    Phase5Metrics m;m.evenMaeDb=q.evenMaeDb;m.oddMaeDb=q.oddMaeDb;m.h1DriftDb=q.h1DriftDb;m.thdCurveMaeDb=q.thdCurveMaeDb;m.imdMaeDb=q.imdMaeDb;
-    double e=0.0;for(double v:aGainDb)e+=v*v;m.aRmsDb=std::sqrt(e/static_cast<double>(aGainDb.size()));
-    // Dynamic behaviour dominates. Parity remains useful, while a small A
-    // regularizer discourages unnecessary spectral drive changes.
-    m.score=0.20*m.evenMaeDb+0.20*m.oddMaeDb+1.20*m.thdCurveMaeDb+0.90*m.imdMaeDb+0.15*m.h1DriftDb+0.08*m.aRmsDb;
-    return m;
-}
-
-bool optimizeAPkDynamicImdExperimental(const fs::path&modelPath,const fs::path&phase2Clo,const fs::path&outClo,
-                                       const fs::path&summaryPath,const fs::path&harmonicPath,
-                                       std::string&error,const StatusCallback&status){
-    Model base;if(!loadGp200ModelForAnalysis(phase2Clo,base,error))return false;
-    const auto baseMag=aPositiveMagnitude128(base.A);
-
-    std::vector<HarmonicCase>harmCases;const auto harmInput=buildPkOptimizationMatrix(harmCases);
-    std::vector<float>namHOut;if(!renderNamTarget44100(modelPath,harmInput,namHOut,error,status))return false;
-    std::vector<float>baseHOut;renderModel(base,harmInput,baseHOut,true);
-    std::vector<HarmonicSet>namH,baseH;for(const auto&c:harmCases){namH.push_back(measureHarmonics(namHOut,c));baseH.push_back(measureHarmonics(baseHOut,c));}
-
-    std::vector<LevelDiagCase>levelCases;const auto levelInput=buildPhase4LevelCurve(levelCases);
-    std::vector<float>namLevel;if(!renderNamTarget44100(modelPath,levelInput,namLevel,error,status))return false;
-    std::vector<HarmonicSet>namLevelH;for(const auto&c:levelCases){HarmonicCase hc{250.0f,c.db,c.start,c.count};namLevelH.push_back(measureHarmonics(namLevel,hc));}
-
-    std::vector<ImdCase>imdCases;const auto imdInput=buildPhase4Imd(imdCases);
-    std::vector<float>namImdOut;if(!renderNamTarget44100(modelPath,imdInput,namImdOut,error,status))return false;
-    constexpr std::array<double,7> probe={110.0,220.0,330.0,440.0,550.0,660.0,770.0};
-    std::vector<std::array<double,7>>namImd;for(const auto&c:imdCases){std::array<double,7>a{};for(std::size_t j=0;j<probe.size();++j)a[j]=goertzelAmplitude(namImdOut,c.start,c.count,probe[j],44100.0);namImd.push_back(a);}
-
-    std::array<double,8>bestG{};
-    auto best=evaluatePhase5Candidate(base,harmInput,harmCases,namH,baseH,levelInput,levelCases,namLevelH,imdInput,imdCases,namImd,bestG);
-    const auto baseline=best;Model bestModel=base;
-    std::array<double,4>bestPk={std::log(std::max(1.0e-9f,base.pk.pp)),std::log(std::max(1.0e-9f,base.pk.pn)),std::log(std::max(1.0e-9f,base.pk.kp)),std::log(std::max(1.0e-9f,base.pk.kn))};
-    const auto pk0=bestPk;constexpr double pkRange=0.6931471805599453;
-    constexpr std::array<double,3>aSteps={0.75,0.375,0.1875};
-    constexpr std::array<double,3>pkSteps={0.11332868530700327,0.058268908123975824,0.029558802241544398};
-    const std::array<std::array<int,4>,6>pkAxes={{{1,0,0,0},{0,1,0,0},{0,0,1,0},{0,0,0,1},{1,-1,0,0},{0,0,1,-1}}};
-    constexpr double maxAGainDb=3.0;
-
-    std::ofstream log(summaryPath,std::ios::binary|std::ios::trunc);if(!log){error="Phase 5: cannot create summary CSV.";return false;}
-    log<<"# Experimental Phase 5 joint A128 + P/K Dynamic + IMD fit\n";
-    log<<"# Restart baseline: Phase 2. Frozen: B1024, PRE, POST. A controls limited to +/-3 dB.\n";
-    log<<"# Hard guards: THD <= Phase2; IMD <= Phase2; odd <= Phase2+0.75 dB; H1 drift <=1.5 dB. P/K 0.5x..2x Phase2.\n";
-    log<<"stage,type,index,sign,pp,pn,kp,kn,a80,a160,a320,a640,a1250,a2500,a5000,a10000,even_mae_db,odd_mae_db,h1_drift_db,thd_curve_mae_db,imd_mae_db,a_rms_db,score,accepted\n"<<std::fixed<<std::setprecision(9);
-    auto row=[&](int stage,const char*type,int index,int sign,const Model&m,const std::array<double,8>&g,const Phase5Metrics&v,bool a){log<<stage<<','<<type<<','<<index<<','<<sign<<','<<m.pk.pp<<','<<m.pk.pn<<','<<m.pk.kp<<','<<m.pk.kn;for(double x:g)log<<','<<x;log<<','<<v.evenMaeDb<<','<<v.oddMaeDb<<','<<v.h1DriftDb<<','<<v.thdCurveMaeDb<<','<<v.imdMaeDb<<','<<v.aRmsDb<<','<<v.score<<','<<(a?1:0)<<'\n';};
-    row(-1,"baseline",-1,0,base,bestG,baseline,true);
-    auto allowed=[&](const Phase5Metrics&m){return m.thdCurveMaeDb<=baseline.thdCurveMaeDb+1e-9&&m.imdMaeDb<=baseline.imdMaeDb+1e-9&&m.oddMaeDb<=baseline.oddMaeDb+0.75&&m.h1DriftDb<=1.5;};
-
-    for(std::size_t si=0;si<aSteps.size();++si){bool changed=true;int rounds=0;while(changed&&rounds<2){changed=false;++rounds;
-        for(std::size_t bi=0;bi<bestG.size();++bi){auto localBest=best;auto localModel=bestModel;auto localG=bestG;
-            for(int sign:{-1,1}){auto tg=bestG;tg[bi]=std::clamp(tg[bi]+sign*aSteps[si],-maxAGainDb,maxAGainDb);Model cand=bestModel;cand.A=makePhase3A(baseMag,tg);const auto met=evaluatePhase5Candidate(cand,harmInput,harmCases,namH,baseH,levelInput,levelCases,namLevelH,imdInput,imdCases,namImd,tg);const bool accept=allowed(met)&&met.score+1e-9<localBest.score;row(static_cast<int>(si),"A",static_cast<int>(bi),sign,cand,tg,met,accept);if(accept){localBest=met;localModel=cand;localG=tg;}}
-            if(localBest.score+1e-9<best.score){best=localBest;bestModel=localModel;bestG=localG;changed=true;}}
-        for(std::size_t ai=0;ai<pkAxes.size();++ai){auto localBest=best;auto localModel=bestModel;auto localPk=bestPk;
-            for(int sign:{-1,1}){auto tq=bestPk;for(std::size_t j=0;j<4;++j)tq[j]=std::clamp(tq[j]+sign*pkAxes[ai][j]*pkSteps[si],pk0[j]-pkRange,pk0[j]+pkRange);Model cand=bestModel;cand.pk.pp=static_cast<float>(std::exp(tq[0]));cand.pk.pn=static_cast<float>(std::exp(tq[1]));cand.pk.kp=static_cast<float>(std::exp(tq[2]));cand.pk.kn=static_cast<float>(std::exp(tq[3]));const auto met=evaluatePhase5Candidate(cand,harmInput,harmCases,namH,baseH,levelInput,levelCases,namLevelH,imdInput,imdCases,namImd,bestG);const bool accept=allowed(met)&&met.score+1e-9<localBest.score;row(static_cast<int>(si),"PK",static_cast<int>(ai),sign,cand,bestG,met,accept);if(accept){localBest=met;localModel=cand;localPk=tq;}}
-            if(localBest.score+1e-9<best.score){best=localBest;bestModel=localModel;bestPk=localPk;changed=true;}}
-    }
-        std::wostringstream os;os<<std::fixed<<std::setprecision(3)<<L"Experimental phase 5 stage "<<(si+1)<<L"/"<<aSteps.size()<<L": THD "<<best.thdCurveMaeDb<<L" dB, IMD "<<best.imdMaeDb<<L" dB, even "<<best.evenMaeDb<<L" dB, A rms "<<best.aRmsDb<<L" dB.";report(status,os.str());
-    }
-    row(99,"best",-1,0,bestModel,bestG,best,true);if(!log){error="Phase 5: failed writing summary.";return false;}
-    if(!writeGp200APkVariant(phase2Clo,outClo,bestModel,error))return false;
-    Model serialized;if(!loadGp200ModelForAnalysis(outClo,serialized,error))return false;double aMax=0.0;for(std::size_t i=0;i<128;++i)aMax=std::max(aMax,std::fabs(static_cast<double>(serialized.A[i])-bestModel.A[i]));
-    const auto pkNear=[](float a,float b){const double da=std::fabs(static_cast<double>(a)-b),sc=std::max({1.0,std::fabs(static_cast<double>(a)),std::fabs(static_cast<double>(b))});return da<=1e-6*sc;};
-    if(aMax>1e-6||!pkNear(serialized.pk.pp,bestModel.pk.pp)||!pkNear(serialized.pk.pn,bestModel.pk.pn)||!pkNear(serialized.pk.kp,bestModel.pk.kp)||!pkNear(serialized.pk.kn,bestModel.pk.kn)){error="Phase 5: serialized A/P/K verification failed.";return false;}
-
-    std::vector<HarmonicCase>fullCases;const auto fullInput=buildHarmonicMatrix(fullCases);std::vector<float>fullNam;if(!renderNamTarget44100(modelPath,fullInput,fullNam,error,status))return false;std::vector<float>fullClo;renderModel(serialized,fullInput,fullClo,true);
-    std::ofstream det(harmonicPath,std::ios::binary|std::ios::trunc);if(!det){error="Phase 5: cannot create harmonic CSV.";return false;}det<<"# Experimental Phase 5 A128 + P/K dynamic/IMD validation\n# pp="<<serialized.pk.pp<<" pn="<<serialized.pk.pn<<" kp="<<serialized.pk.kp<<" kn="<<serialized.pk.kn<<"\n# A_control_db";for(double v:bestG)det<<','<<v;det<<"\nfrequency_hz,input_dbfs,nam_h1_dbfs,clo_h1_dbfs,h1_delta_db";for(int h=2;h<=8;++h)det<<",nam_h"<<h<<"_dbc,clo_h"<<h<<"_dbc,h"<<h<<"_delta_db";det<<",nam_even_dbc,clo_even_dbc,even_delta_db,nam_odd_dbc,clo_odd_dbc,odd_delta_db,nam_thd_dbc,clo_thd_dbc,thd_delta_db\n"<<std::fixed<<std::setprecision(6);
-    for(std::size_t i=0;i<fullCases.size();++i){const auto nh=measureHarmonics(fullNam,fullCases[i]),ch=measureHarmonics(fullClo,fullCases[i]);det<<fullCases[i].frequencyHz<<','<<fullCases[i].inputDbfs<<','<<nh.fundamentalDbfs<<','<<ch.fundamentalDbfs<<','<<(ch.fundamentalDbfs-nh.fundamentalDbfs);for(int h=2;h<=8;++h){const auto hi=static_cast<std::size_t>(h-1);const double nd=ratioDb(nh.amp[hi],nh.amp[0]),cd=ratioDb(ch.amp[hi],ch.amp[0]);det<<','<<nd<<','<<cd<<','<<(cd-nd);}det<<','<<nh.evenDbc<<','<<ch.evenDbc<<','<<(ch.evenDbc-nh.evenDbc)<<','<<nh.oddDbc<<','<<ch.oddDbc<<','<<(ch.oddDbc-nh.oddDbc)<<','<<nh.thdDbc<<','<<ch.thdDbc<<','<<(ch.thdDbc-nh.thdDbc)<<'\n';}
-    report(status,L"Experimental phase 5 CLO: "+outClo.filename().wstring());return static_cast<bool>(det);
-}
-
 bool findOptionalDi(const fs::path&inputNam,fs::path&di){
     const auto dir=inputNam.parent_path();const auto stem=inputNam.stem().wstring();
     const std::array<fs::path,4> c={dir/(stem+L"_DI.wav"),dir/(stem+L"_di.wav"),dir/L"DI.wav",dir/L"di.wav"};std::error_code ec;for(const auto&p:c)if(fs::exists(p,ec)&&!ec){di=p;return true;}return false;
 }
 
-bool writePhase4DiDiagnostic(const fs::path&modelPath,const Model&clo,const fs::path&diPath,const fs::path&outDir,const std::wstring&stem,std::string&error,const StatusCallback&status){
-    std::vector<float>in;std::uint32_t sr=0;if(!readPcmIntegerMonoDiagnostic(diPath,in,sr,error))return false;if(sr!=44100){in=resampleR8Brain24(in,static_cast<double>(sr),44100.0);sr=44100;}if(in.empty()){error="Phase 4: DI WAV is empty.";return false;}
-    std::vector<float>nam,co;if(!renderNamTarget44100(modelPath,in,nam,error,status))return false;renderModel(clo,in,co,true);nam.resize(in.size(),0.0f);co.resize(in.size(),0.0f);
-    const fs::path namW=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_DI_NAM.wav"),cloW=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_DI_PHASE2_CLO.wav"),namM=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_DI_NAM_LEVELMATCH.wav"),cloM=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_DI_PHASE2_LEVELMATCH.wav"),winP=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_DI_WINDOWS.csv"),sumP=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_DI_SUMMARY.csv");
-    if(!writePcm16MonoDiagnostic(namW,nam,44100,error)||!writePcm16MonoDiagnostic(cloW,co,44100,error))return false;
-    const auto ns=signalStats(nam),cs=signalStats(co);const double commonRms=std::min(std::pow(10.0,-18.0/20.0),std::min(ns.rms,cs.rms));std::vector<float>nm=nam,cm=co;const double ng=commonRms/std::max(ns.rms,1.0e-15),cg=commonRms/std::max(cs.rms,1.0e-15);for(auto&v:nm)v=static_cast<float>(v*ng);for(auto&v:cm)v=static_cast<float>(v*cg);if(!writePcm16MonoDiagnostic(namM,nm,44100,error)||!writePcm16MonoDiagnostic(cloM,cm,44100,error))return false;
-    constexpr std::size_t window=441; // 10 ms @ 44.1 kHz
-    std::ofstream wf(winP,std::ios::binary|std::ios::trunc);if(!wf){error="Phase 4: cannot create DI window CSV.";return false;}wf<<"# 10 ms windows. attack=1 when input RMS rises >=3 dB versus preceding active window.\ntime_s,input_rms_dbfs,nam_rms_dbfs,clo_rms_dbfs,nam_peak_dbfs,clo_peak_dbfs,nam_crest_db,clo_crest_db,nam_gain_db,clo_gain_db,gain_delta_db,attack\n"<<std::fixed<<std::setprecision(6);
-    double prevInDb=-300.0;long double nGainActive=0,cGainActive=0,nGainAttack=0,cGainAttack=0,nGainSustain=0,cGainSustain=0;std::size_t active=0,attacks=0,sustain=0;
-    for(std::size_t pos=0;pos<in.size();pos+=window){const std::size_t cnt=std::min(window,in.size()-pos);const auto is=signalStats(in,pos,cnt),a=signalStats(nam,pos,cnt),b=signalStats(co,pos,cnt);const double id=db20(is.rms),ngd=safeGainDb(a.rms,is.rms),cgd=safeGainDb(b.rms,is.rms);const bool on=id>-60.0;const bool attack=on&&prevInDb>-200.0&&(id-prevInDb)>=3.0;wf<<(static_cast<double>(pos)/44100.0)<<','<<id<<','<<db20(a.rms)<<','<<db20(b.rms)<<','<<db20(a.peak)<<','<<db20(b.peak)<<','<<a.crestDb<<','<<b.crestDb<<','<<ngd<<','<<cgd<<','<<(cgd-ngd)<<','<<(attack?1:0)<<'\n';if(on){++active;nGainActive+=ngd;cGainActive+=cgd;if(attack){++attacks;nGainAttack+=ngd;cGainAttack+=cgd;}else{++sustain;nGainSustain+=ngd;cGainSustain+=cgd;}prevInDb=id;}}
-    std::ofstream sf(sumP,std::ios::binary|std::ios::trunc);if(!sf){error="Phase 4: cannot create DI summary CSV.";return false;}const auto is=signalStats(in);sf<<"metric,nam,clo,clo_minus_nam\n"<<std::fixed<<std::setprecision(6);sf<<"total_rms_dbfs,"<<db20(ns.rms)<<','<<db20(cs.rms)<<','<<(db20(cs.rms)-db20(ns.rms))<<'\n';sf<<"total_peak_dbfs,"<<db20(ns.peak)<<','<<db20(cs.peak)<<','<<(db20(cs.peak)-db20(ns.peak))<<'\n';sf<<"total_crest_db,"<<ns.crestDb<<','<<cs.crestDb<<','<<(cs.crestDb-ns.crestDb)<<'\n';sf<<"total_gain_db,"<<safeGainDb(ns.rms,is.rms)<<','<<safeGainDb(cs.rms,is.rms)<<','<<(safeGainDb(cs.rms,is.rms)-safeGainDb(ns.rms,is.rms))<<'\n';if(active)sf<<"active_window_gain_db,"<<static_cast<double>(nGainActive/active)<<','<<static_cast<double>(cGainActive/active)<<','<<static_cast<double>((cGainActive-nGainActive)/active)<<'\n';if(attacks)sf<<"attack_window_gain_db,"<<static_cast<double>(nGainAttack/attacks)<<','<<static_cast<double>(cGainAttack/attacks)<<','<<static_cast<double>((cGainAttack-nGainAttack)/attacks)<<'\n';if(sustain)sf<<"sustain_window_gain_db,"<<static_cast<double>(nGainSustain/sustain)<<','<<static_cast<double>(cGainSustain/sustain)<<','<<static_cast<double>((cGainSustain-nGainSustain)/sustain)<<'\n';sf<<"levelmatch_gain_db,"<<db20(ng)<<','<<db20(cg)<<','<<(db20(cg)-db20(ng))<<'\n';
-    report(status,L"Experimental phase 4 DI NAM WAV: "+namW.filename().wstring());report(status,L"Experimental phase 4 DI Phase2 WAV: "+cloW.filename().wstring());report(status,L"Experimental phase 4 DI summary: "+sumP.filename().wstring());return static_cast<bool>(wf)&&static_cast<bool>(sf);
-}
-
-
 // -----------------------------------------------------------------------------
-// Experimental phase 6 diagnostic: real DI temporal / gain comparison
+// Experimental phase 7: DI-guided direct B1024 spectral fit
 // -----------------------------------------------------------------------------
-// Diagnostic only. No CLO parameter is changed. The same DI is rendered through
-// NAM, frozen Phase 2 and the accepted Phase 5 candidate, then compared in 5 ms
-// windows. This directly tests the perceived "less gain" report on guitar-like
-// material instead of trying to infer it from steady-state sine metrics.
+// Real-DI testing showed that, after level matching, the remaining difference is mainly
+// spectral rather than a large attack/sustain gain difference. Phase 7 keeps
+// the accepted Phase-2 A128/P/K/PRE/POST completely frozen and changes only
+// the serialized GP-200 B1024 FIR.  The target is derived from the SAME real
+// DI rendered by NAM, but NAM is first level-matched to the frozen Phase-2
+// output so the known ~12 dB diagnostic convention cannot be absorbed by B.
+// The fitted correction is shape-only: its geometric mean over 200..6000 Hz
+// is forced to 0 dB, it is smoothed, and each bin is limited to +/-4 dB.
+// This is experimental model fitting, not a reconstructed Valeton algorithm.
 
-struct Phase6WindowAccum{
-    long double namGain=0.0,p2Gain=0.0,p5Gain=0.0;
-    long double p2AbsDelta=0.0,p5AbsDelta=0.0;
-    std::size_t count=0;
-};
-
-void addPhase6Window(Phase6WindowAccum& a,double namGain,double p2Gain,double p5Gain){
-    a.namGain+=namGain;a.p2Gain+=p2Gain;a.p5Gain+=p5Gain;
-    a.p2AbsDelta+=std::fabs(p2Gain-namGain);a.p5AbsDelta+=std::fabs(p5Gain-namGain);++a.count;
+bool writeGp200BVariant(const fs::path&sourcePath,const fs::path&outPath,const std::vector<float>&B,std::string&error){
+    std::vector<std::uint8_t>d;if(!readFileBytes(sourcePath,d,error))return false;
+    if(d.size()<0x1288||std::memcmp(d.data(),"VTSI",4)!=0||B.size()!=1024||le32(d.data()+0x84)!=1024){error="Phase 7: invalid GP-200 source CLO or B1024.";return false;}
+    for(std::size_t i=0;i<1024;++i)putFloat(d,0x88+4*(128+i),B[i]);
+    const auto crc=crc16Official(d.data()+0x0c,d.size()-0x0c);d[8]=static_cast<std::uint8_t>(crc);d[9]=static_cast<std::uint8_t>(crc>>8);
+    return writeFileBytes(outPath,d.data(),d.size(),error);
 }
 
-bool writePhase6DiDiagnostic(const fs::path&modelPath,const fs::path&phase2CloPath,const fs::path&phase5CloPath,
-                             const fs::path&diPath,const fs::path&outDir,const std::wstring&stem,
-                             std::string&error,const StatusCallback&status){
-    Model p2,p5;
-    if(!loadGp200ModelForAnalysis(phase2CloPath,p2,error)){error="Phase 6: cannot load Phase 2 CLO: "+error;return false;}
-    if(!loadGp200ModelForAnalysis(phase5CloPath,p5,error)){error="Phase 6: cannot load Phase 5 CLO: "+error;return false;}
-
-    std::vector<float>in;std::uint32_t sr=0;
-    if(!readPcmIntegerMonoDiagnostic(diPath,in,sr,error))return false;
-    if(sr!=44100){in=resampleR8Brain24(in,static_cast<double>(sr),44100.0);sr=44100;}
-    if(in.empty()){error="Phase 6: DI WAV is empty.";return false;}
-
-    std::vector<float>nam,p2o,p5o;
-    if(!renderNamTarget44100(modelPath,in,nam,error,status))return false;
-    renderModel(p2,in,p2o,true);renderModel(p5,in,p5o,true);
-    nam.resize(in.size(),0.0f);p2o.resize(in.size(),0.0f);p5o.resize(in.size(),0.0f);
-
-    const fs::path namW=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_NAM.wav");
-    const fs::path p2W =uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_PHASE2.wav");
-    const fs::path p5W =uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_PHASE5.wav");
-    const fs::path namM=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_NAM_LEVELMATCH.wav");
-    const fs::path p2M =uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_PHASE2_LEVELMATCH.wav");
-    const fs::path p5M =uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_PHASE5_LEVELMATCH.wav");
-    const fs::path winP=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_WINDOWS.csv");
-    const fs::path sumP=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_SUMMARY.csv");
-
-    if(!writePcm16MonoDiagnostic(namW,nam,44100,error)||!writePcm16MonoDiagnostic(p2W,p2o,44100,error)||!writePcm16MonoDiagnostic(p5W,p5o,44100,error))return false;
-
-    const auto ns=signalStats(nam),s2=signalStats(p2o),s5=signalStats(p5o),isAll=signalStats(in);
-    const double commonRms=std::min(std::pow(10.0,-18.0/20.0),std::min(ns.rms,std::min(s2.rms,s5.rms)));
-    std::vector<float>nm=nam,m2=p2o,m5=p5o;
-    const double gn=commonRms/std::max(ns.rms,1.0e-15),g2=commonRms/std::max(s2.rms,1.0e-15),g5=commonRms/std::max(s5.rms,1.0e-15);
-    for(auto&v:nm)v=static_cast<float>(v*gn);for(auto&v:m2)v=static_cast<float>(v*g2);for(auto&v:m5)v=static_cast<float>(v*g5);
-    if(!writePcm16MonoDiagnostic(namM,nm,44100,error)||!writePcm16MonoDiagnostic(p2M,m2,44100,error)||!writePcm16MonoDiagnostic(p5M,m5,44100,error))return false;
-
-    constexpr std::size_t window=221; // ~5 ms @ 44.1 kHz
-    std::ofstream wf(winP,std::ios::binary|std::ios::trunc);
-    if(!wf){error="Phase 6: cannot create DI window CSV.";return false;}
-    wf<<"# Experimental Phase 6 DI diagnostic. 5 ms windows. Diagnostic only; CLO unchanged.\n";
-    wf<<"# attack=1 when active input rises >=3 dB versus preceding active window; sustain=active and not attack.\n";
-    wf<<"time_s,input_rms_dbfs,nam_rms_dbfs,phase2_rms_dbfs,phase5_rms_dbfs,nam_peak_dbfs,phase2_peak_dbfs,phase5_peak_dbfs,nam_crest_db,phase2_crest_db,phase5_crest_db,nam_gain_db,phase2_gain_db,phase5_gain_db,phase2_minus_nam_gain_db,phase5_minus_nam_gain_db,attack,sustain\n"<<std::fixed<<std::setprecision(6);
-
-    double prevActiveDb=-300.0;
-    Phase6WindowAccum activeAcc,attackAcc,sustainAcc;
-    for(std::size_t pos=0;pos<in.size();pos+=window){
-        const std::size_t cnt=std::min(window,in.size()-pos);
-        const auto si=signalStats(in,pos,cnt),sn=signalStats(nam,pos,cnt),a2=signalStats(p2o,pos,cnt),a5=signalStats(p5o,pos,cnt);
-        const double inDb=db20(si.rms),ng=safeGainDb(sn.rms,si.rms),q2=safeGainDb(a2.rms,si.rms),q5=safeGainDb(a5.rms,si.rms);
-        const bool active=inDb>-60.0;
-        const bool attack=active&&prevActiveDb>-200.0&&(inDb-prevActiveDb)>=3.0;
-        const bool sustain=active&&!attack;
-        wf<<(static_cast<double>(pos)/44100.0)<<','<<inDb<<','<<db20(sn.rms)<<','<<db20(a2.rms)<<','<<db20(a5.rms)
-          <<','<<db20(sn.peak)<<','<<db20(a2.peak)<<','<<db20(a5.peak)
-          <<','<<sn.crestDb<<','<<a2.crestDb<<','<<a5.crestDb
-          <<','<<ng<<','<<q2<<','<<q5<<','<<(q2-ng)<<','<<(q5-ng)<<','<<(attack?1:0)<<','<<(sustain?1:0)<<'\n';
-        if(active){addPhase6Window(activeAcc,ng,q2,q5);if(attack)addPhase6Window(attackAcc,ng,q2,q5);else addPhase6Window(sustainAcc,ng,q2,q5);prevActiveDb=inDb;}
-    }
-    if(!wf){error="Phase 6: failed writing DI window CSV.";return false;}
-
-    std::ofstream sf(sumP,std::ios::binary|std::ios::trunc);
-    if(!sf){error="Phase 6: cannot create DI summary CSV.";return false;}
-    sf<<"# Experimental Phase 6 DI diagnostic. All values are measurements; no CLO parameter is modified.\n";
-    sf<<"metric,nam,phase2,phase5,phase2_minus_nam,phase5_minus_nam\n"<<std::fixed<<std::setprecision(6);
-    sf<<"total_rms_dbfs,"<<db20(ns.rms)<<','<<db20(s2.rms)<<','<<db20(s5.rms)<<','<<(db20(s2.rms)-db20(ns.rms))<<','<<(db20(s5.rms)-db20(ns.rms))<<'\n';
-    sf<<"total_peak_dbfs,"<<db20(ns.peak)<<','<<db20(s2.peak)<<','<<db20(s5.peak)<<','<<(db20(s2.peak)-db20(ns.peak))<<','<<(db20(s5.peak)-db20(ns.peak))<<'\n';
-    sf<<"total_crest_db,"<<ns.crestDb<<','<<s2.crestDb<<','<<s5.crestDb<<','<<(s2.crestDb-ns.crestDb)<<','<<(s5.crestDb-ns.crestDb)<<'\n';
-    const double totalNg=safeGainDb(ns.rms,isAll.rms),total2=safeGainDb(s2.rms,isAll.rms),total5=safeGainDb(s5.rms,isAll.rms);
-    sf<<"total_gain_db,"<<totalNg<<','<<total2<<','<<total5<<','<<(total2-totalNg)<<','<<(total5-totalNg)<<'\n';
-    auto writeAcc=[&](const char*name,const Phase6WindowAccum&a){if(!a.count)return;const double ng=static_cast<double>(a.namGain/a.count),q2=static_cast<double>(a.p2Gain/a.count),q5=static_cast<double>(a.p5Gain/a.count);sf<<name<<","<<ng<<','<<q2<<','<<q5<<','<<(q2-ng)<<','<<(q5-ng)<<'\n';sf<<std::string(name)+"_abs_error_db,"<<0.0<<','<<static_cast<double>(a.p2AbsDelta/a.count)<<','<<static_cast<double>(a.p5AbsDelta/a.count)<<','<<static_cast<double>(a.p2AbsDelta/a.count)<<','<<static_cast<double>(a.p5AbsDelta/a.count)<<'\n';};
-    writeAcc("active_window_gain_db",activeAcc);writeAcc("attack_window_gain_db",attackAcc);writeAcc("sustain_window_gain_db",sustainAcc);
-    sf<<"levelmatch_applied_gain_db,"<<db20(gn)<<','<<db20(g2)<<','<<db20(g5)<<','<<(db20(g2)-db20(gn))<<','<<(db20(g5)-db20(gn))<<'\n';
-    sf<<"window_count,"<<activeAcc.count<<','<<activeAcc.count<<','<<activeAcc.count<<",0,0\n";
-    sf<<"attack_window_count,"<<attackAcc.count<<','<<attackAcc.count<<','<<attackAcc.count<<",0,0\n";
-    sf<<"sustain_window_count,"<<sustainAcc.count<<','<<sustainAcc.count<<','<<sustainAcc.count<<",0,0\n";
-    if(!sf){error="Phase 6: failed writing DI summary CSV.";return false;}
-
-    report(status,L"Experimental phase 6 DI NAM WAV: "+namW.filename().wstring());
-    report(status,L"Experimental phase 6 DI Phase2 WAV: "+p2W.filename().wstring());
-    report(status,L"Experimental phase 6 DI Phase5 WAV: "+p5W.filename().wstring());
-    report(status,L"Experimental phase 6 DI summary: "+sumP.filename().wstring());
-    return true;
+std::vector<float> bPositiveMagnitude2048(const std::vector<float>&b){
+    std::vector<float>x(kFft,0.0f);for(std::size_t i=0;i<std::min<std::size_t>(b.size(),kFft);++i)x[i]=b[i];
+    OouraRfft2048Official fft;std::array<float,kBins>re{},im{};fft.run(x,re,im);
+    std::vector<float>m(kBins,0.0f);for(std::size_t k=0;k<kBins;++k)m[k]=preciseSqrtF(re[k]*re[k]+im[k]*im[k]);return m;
 }
 
-bool runPhase4Diagnostic(const fs::path&inputNam,const fs::path&modelPath,const fs::path&referenceClo,const fs::path&outDir,std::string&error,const StatusCallback&status){
-    Model clo;if(!loadGp200ModelForAnalysis(referenceClo,clo,error))return false;const auto stem=inputNam.stem().wstring();
-    const fs::path levelP=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_LEVEL_CURVE.csv"),imdP=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_IMD.csv");
-    if(!writePhase4LevelCurve(modelPath,clo,levelP,error,status))return false;if(!writePhase4Imd(modelPath,clo,imdP,error,status))return false;report(status,L"Experimental phase 4 level curve: "+levelP.filename().wstring());report(status,L"Experimental phase 4 IMD: "+imdP.filename().wstring());
-    fs::path di;if(findOptionalDi(inputNam,di)){report(status,L"Experimental phase 4: found DI "+di.filename().wstring());if(!writePhase4DiDiagnostic(modelPath,clo,di,outDir,stem,error,status))return false;}else report(status,L"Experimental phase 4: optional DI not found. Put <NAM stem>_DI.wav next to the NAM (mono PCM16/24/32). Sine/IMD diagnostics were still generated.");
-    return true;
+double bandRmsDb(const std::vector<float>&x,double lo,double hi){
+    if(x.size()<1024)return -300.0;
+    constexpr std::size_t N=4096;constexpr std::size_t hop=2048;std::array<int,128>ip{};std::array<double,N/2>w{};ip.fill(0);w.fill(0.0);ip[0]=0;
+    long double p=0.0;std::size_t bins=0,frames=0;
+    for(std::size_t pos=0;pos+N<=x.size();pos+=hop){std::array<double,N>a{};for(std::size_t i=0;i<N;++i)a[i]=static_cast<double>(x[pos+i]);lsx_rdft(static_cast<int>(N),+1,a.data(),ip.data(),w.data());for(std::size_t k=1;k<N/2;++k){const double f=44100.0*static_cast<double>(k)/static_cast<double>(N);if(f<lo||f>=hi)continue;const double re=a[2*k],im=-a[2*k+1];p+=re*re+im*im;++bins;}++frames;}
+    if(!frames||!bins)return -300.0;return 10.0*std::log10(std::max(static_cast<double>(p/static_cast<long double>(bins)),1.0e-30));
+}
+
+bool optimizeB1024FromDiExperimental(const fs::path&modelPath,const fs::path&phase2CloPath,const fs::path&diPath,
+                                      const fs::path&outClo,const fs::path&summaryPath,const fs::path&correctionPath,
+                                      const fs::path&outDir,const std::wstring&stem,std::string&error,const StatusCallback&status){
+    Model base;if(!loadGp200ModelForAnalysis(phase2CloPath,base,error)){error="Phase 7: cannot load Phase 2 CLO: "+error;return false;}
+    std::vector<float>in;std::uint32_t sr=0;if(!readPcmIntegerMonoDiagnostic(diPath,in,sr,error))return false;
+    if(sr!=44100){in=resampleR8Brain24(in,static_cast<double>(sr),44100.0);sr=44100;}if(in.empty()){error="Phase 7: DI WAV is empty.";return false;}
+
+    report(status,L"Experimental phase 7: rendering DI target and frozen Phase 2 pre-B signal...");
+    std::vector<float>nam,baseOut,preB;if(!renderNamTarget44100(modelPath,in,nam,error,status))return false;renderModel(base,in,baseOut,true);renderModel(base,in,preB,false);
+    nam.resize(in.size(),0.0f);baseOut.resize(in.size(),0.0f);preB.resize(in.size(),0.0f);
+    const auto ns=signalStats(nam),bs=signalStats(baseOut);const double targetScale=bs.rms/std::max(ns.rms,1.0e-15);std::vector<float>namMatched=nam;for(auto&v:namMatched)v=static_cast<float>(v*targetScale);
+
+    const auto desiredRaw=ratioSpectrumF(preB,namMatched,44100.0);const auto baseMag=bPositiveMagnitude2048(base.B);const auto freq=fftFrequencyGridF(44100.0);
+    std::vector<float>corr(kBins,1.0f);for(std::size_t k=0;k<kBins;++k)corr[k]=desiredRaw[k]/std::max(baseMag[k],1.0e-12f);
+    // Work in log gain so smoothing and the zero-mean shape constraint behave
+    // symmetrically for boost and cut.
+    std::vector<float>corrDb(kBins,0.0f);for(std::size_t k=0;k<kBins;++k)corrDb[k]=static_cast<float>(20.0*std::log10(std::max(static_cast<double>(corr[k]),1.0e-12)));
+    corrDb=gaussianSmoothExactF(corrDb,17);
+    double meanDb=0.0;std::size_t meanN=0;for(std::size_t k=0;k<kBins;++k)if(freq[k]>=200.0f&&freq[k]<=6000.0f){meanDb+=corrDb[k];++meanN;}if(meanN)meanDb/=static_cast<double>(meanN);
+    for(std::size_t k=0;k<kBins;++k){double db=static_cast<double>(corrDb[k])-meanDb;if(freq[k]<70.0f||freq[k]>12000.0f)db=0.0;db=std::clamp(db,-4.0,4.0);corr[k]=static_cast<float>(std::pow(10.0,db/20.0));corrDb[k]=static_cast<float>(db);}
+
+    std::vector<float>desiredMag(kBins,0.0f);for(std::size_t k=0;k<kBins;++k)desiredMag[k]=std::max(baseMag[k]*corr[k],1.0e-12f);
+    Model cand=base;cand.B=minimumPhaseF(desiredMag,1024);
+    // Preserve the frozen Phase-2 DI RMS exactly.  This prevents minimum-phase
+    // truncation/normalization from introducing a global level change.
+    std::vector<float>candOut;renderModel(cand,in,candOut,true);const auto cs0=signalStats(candOut);const double bg=bs.rms/std::max(cs0.rms,1.0e-15);for(auto&v:cand.B)v=static_cast<float>(v*bg);renderModel(cand,in,candOut,true);const auto cs=signalStats(candOut);
+
+    if(!writeGp200BVariant(phase2CloPath,outClo,cand.B,error))return false;Model serialized;if(!loadGp200ModelForAnalysis(outClo,serialized,error))return false;double bMax=0.0;for(std::size_t i=0;i<1024;++i)bMax=std::max(bMax,std::fabs(static_cast<double>(serialized.B[i])-cand.B[i]));if(bMax>1e-6){error="Phase 7: serialized B1024 verification failed.";return false;}
+
+    std::ofstream cf(correctionPath,std::ios::binary|std::ios::trunc);if(!cf){error="Phase 7: cannot create B correction CSV.";return false;}cf<<"# Phase 7 shape-only B1024 correction. Global DI RMS is preserved vs Phase 2.\nfrequency_hz,correction_db\n"<<std::fixed<<std::setprecision(6);for(std::size_t k=0;k<kBins;++k)cf<<freq[k]<<','<<corrDb[k]<<'\n';
+
+    const double bands[][2]={{80,250},{250,800},{800,2500},{2500,6000},{6000,12000}};const char*names[]={"80_250","250_800","800_2500","2500_6000","6000_12000"};
+    std::ofstream sf(summaryPath,std::ios::binary|std::ios::trunc);if(!sf){error="Phase 7: cannot create summary CSV.";return false;}sf<<"# Experimental Phase 7 DI-guided B1024 fit. Only B changes. NAM target is level-matched to Phase 2 before fitting.\nmetric,nam_levelmatched,phase2,phase7,phase7_minus_nam,phase7_minus_phase2\n"<<std::fixed<<std::setprecision(6);sf<<"total_rms_dbfs,"<<db20(bs.rms)<<','<<db20(bs.rms)<<','<<db20(cs.rms)<<','<<(db20(cs.rms)-db20(bs.rms))<<','<<(db20(cs.rms)-db20(bs.rms))<<'\n';sf<<"b_postfit_gain_db,0,0,"<<db20(bg)<<','<<db20(bg)<<','<<db20(bg)<<'\n';for(std::size_t i=0;i<5;++i){const double n=bandRmsDb(namMatched,bands[i][0],bands[i][1]),b=bandRmsDb(baseOut,bands[i][0],bands[i][1]),c=bandRmsDb(candOut,bands[i][0],bands[i][1]);sf<<"band_"<<names[i]<<"_db,"<<n<<','<<b<<','<<c<<','<<(c-n)<<','<<(c-b)<<'\n';}
+
+    // Audible A/B files: both are independently level-matched to the same RMS.
+    const fs::path nw=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE7_DI_NAM_LEVELMATCH.wav"),bw=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE7_DI_PHASE2_LEVELMATCH.wav"),cw=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE7_DI_B1024_LEVELMATCH.wav");
+    const double common=std::min(std::pow(10.0,-18.0/20.0),std::min(ns.rms,std::min(bs.rms,cs.rms)));std::vector<float>nwm=nam,bwm=baseOut,cwm=candOut;const double ng=common/std::max(ns.rms,1e-15),bmg=common/std::max(bs.rms,1e-15),cmg=common/std::max(cs.rms,1e-15);for(auto&v:nwm)v=static_cast<float>(v*ng);for(auto&v:bwm)v=static_cast<float>(v*bmg);for(auto&v:cwm)v=static_cast<float>(v*cmg);if(!writePcm16MonoDiagnostic(nw,nwm,44100,error)||!writePcm16MonoDiagnostic(bw,bwm,44100,error)||!writePcm16MonoDiagnostic(cw,cwm,44100,error))return false;
+    report(status,L"Experimental phase 7 B1024 CLO: "+outClo.filename().wstring());report(status,L"Experimental phase 7 summary: "+summaryPath.filename().wstring());return static_cast<bool>(sf)&&static_cast<bool>(cf);
 }
 
 fs::path uniqueOutput(const fs::path&dir,const std::wstring&stem,const wchar_t*suffix){fs::path p=dir/(stem+suffix);int i=2;while(fs::exists(p))p=dir/(stem+L"_"+std::to_wstring(i++)+suffix);return p;}
@@ -2759,99 +2088,43 @@ ConversionResult convertNamToBothIndependent(const fs::path& inputNam,const fs::
     fitAB(m,input,target,sr,status);refineB(m,input,target,sr,status);
     r.ampero2048=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_2048.clo");if(!serialize2048(r.ampero2048,m,sr,error)){r.error=error;fs::remove_all(work,ec);return r;}
     const fs::path baselineGp200=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE15_BASELINE_GP200_1024.clo");if(!makeGp200CompactClo(r.ampero2048,baselineGp200,error)){r.error=error;fs::remove_all(work,ec);return r;}
+    // Current experimental path: frozen NATIVE15 -> Phase 2 P/K reference -> Phase 7 B1024 fit from an optional real DI.
+    // Older Phase 1/1B, 3/3B, 4/4B/4C, 5 and 6 experiments were removed from this build.
     const fs::path phase2Clo=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE2_PK_GP200_1024.clo");
-    const fs::path phase2Summary=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE2_PK_SUMMARY.csv");
-    const fs::path phase2Detail=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE2_PK_HARMONICS.csv");
+    const fs::path phase2Summary=work/L"phase2_summary.csv";
+    const fs::path phase2Detail=work/L"phase2_harmonics.csv";
     std::string phase2Error;
     const bool phase2Ok=optimizePkExperimental(modelPath,baselineGp200,phase2Clo,phase2Summary,phase2Detail,phase2Error,status);
-    const fs::path phase3Start=phase2Ok?phase2Clo:baselineGp200;
-    if(phase2Ok){
-        report(status,L"Experimental phase 2 CLO: "+phase2Clo.filename().wstring());
-        report(status,L"Experimental phase 2 summary: "+phase2Summary.filename().wstring());
-    }else{
-        report(status,L"Experimental phase 2 WARNING: "+std::wstring(phase2Error.begin(),phase2Error.end())+L" Phase 3B will start from frozen NATIVE15 baseline.");
-    }
-    {
-        std::string phase4Error;
-        if(!runPhase4Diagnostic(inputNam,modelPath,phase3Start,outputDirectory,phase4Error,status))
-            report(status,L"Experimental phase 4 diagnostic WARNING: "+std::wstring(phase4Error.begin(),phase4Error.end()));
-    }
-    // Phase 4C deliberately starts again from Phase 2. Phase 3/3B are not run
-    // here because listening tests showed reduced perceived gain despite their
-    // harmonic-score improvements.
-    const fs::path phase4cClo=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE4C_PK_DYNAMIC_IMD_GUARDED_GP200_1024.clo");
-    const fs::path phase4cSummary=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE4C_PK_DYNAMIC_IMD_GUARDED_SUMMARY.csv");
-    const fs::path phase4cDetail=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE4C_PK_DYNAMIC_IMD_GUARDED_HARMONICS.csv");
-    std::string phase4cError;
-    if(optimizePkDynamicImdGuardedExperimental(modelPath,phase3Start,phase4cClo,phase4cSummary,phase4cDetail,phase4cError,status)){
-        r.gp2001024=phase4cClo;
-        report(status,L"Experimental phase 4C summary: "+phase4cSummary.filename().wstring());
-        // Final diagnostics MUST evaluate the accepted Phase-4C CLO, not the frozen Phase-2 reference.
-        Model phase4cModel; std::string diagError;
-        if(loadGp200ModelForAnalysis(phase4cClo,phase4cModel,diagError)){
-            const fs::path level4c=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE4C_LEVEL_CURVE.csv");
-            const fs::path imd4c=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE4C_IMD.csv");
-            if(writePhase4LevelCurve(modelPath,phase4cModel,level4c,diagError,status)) report(status,L"Experimental phase 4C level curve: "+level4c.filename().wstring());
-            else report(status,L"Experimental phase 4C level-curve WARNING: "+std::wstring(diagError.begin(),diagError.end()));
-            diagError.clear();
-            if(writePhase4Imd(modelPath,phase4cModel,imd4c,diagError,status)) report(status,L"Experimental phase 4C IMD: "+imd4c.filename().wstring());
-            else report(status,L"Experimental phase 4C IMD WARNING: "+std::wstring(diagError.begin(),diagError.end()));
-        }else report(status,L"Experimental phase 4C diagnostic reload WARNING: "+std::wstring(diagError.begin(),diagError.end()));
-    }else{
-        report(status,L"Experimental phase 4C WARNING: "+std::wstring(phase4cError.begin(),phase4cError.end())+L" Falling back to Phase 2/NATIVE15 result.");
-        r.gp2001024=phase3Start;
-    }
+    const fs::path phase7Base=phase2Ok?phase2Clo:baselineGp200;
+    r.gp2001024=phase7Base;
+    if(phase2Ok)
+        report(status,L"Experimental Phase 2 reference CLO: "+phase2Clo.filename().wstring());
+    else
+        report(status,L"Experimental Phase 2 WARNING: "+std::wstring(phase2Error.begin(),phase2Error.end())+L" Phase 7 will use frozen NATIVE15.");
 
-    // Phase 5 deliberately restarts from Phase 2, using the Phase-4 lessons to
-    // optimize A128 + P/K jointly while B1024/PRE/POST remain frozen.
-    const fs::path phase5Clo=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE5_A_PK_DYNAMIC_IMD_GP200_1024.clo");
-    const fs::path phase5Summary=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE5_A_PK_DYNAMIC_IMD_SUMMARY.csv");
-    const fs::path phase5Detail=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE5_A_PK_DYNAMIC_IMD_HARMONICS.csv");
-    std::string phase5Error;
-    const bool phase5Ok=optimizeAPkDynamicImdExperimental(modelPath,phase3Start,phase5Clo,phase5Summary,phase5Detail,phase5Error,status);
-    if(phase5Ok){
-        r.gp2001024=phase5Clo;
-        report(status,L"Experimental phase 5 summary: "+phase5Summary.filename().wstring());
-        Model phase5Model;std::string diagError;
-        if(loadGp200ModelForAnalysis(phase5Clo,phase5Model,diagError)){
-            const fs::path level5=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE5_LEVEL_CURVE.csv");
-            const fs::path imd5=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE5_IMD.csv");
-            if(writePhase4LevelCurve(modelPath,phase5Model,level5,diagError,status))report(status,L"Experimental phase 5 level curve: "+level5.filename().wstring());
-            diagError.clear();if(writePhase4Imd(modelPath,phase5Model,imd5,diagError,status))report(status,L"Experimental phase 5 IMD: "+imd5.filename().wstring());
+    fs::path di;
+    if(findOptionalDi(inputNam,di)){
+        const fs::path phase7Clo=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE7_DI_B1024_GP200_1024.clo");
+        const fs::path phase7Summary=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE7_DI_B1024_SUMMARY.csv");
+        const fs::path phase7Correction=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE7_DI_B1024_CORRECTION.csv");
+        std::string phase7Error;
+        if(optimizeB1024FromDiExperimental(modelPath,phase7Base,di,phase7Clo,phase7Summary,phase7Correction,outputDirectory,inputNam.stem().wstring(),phase7Error,status)){
+            r.gp2001024=phase7Clo;
+            Model phase7Model;std::string diagError;
+            if(loadGp200ModelForAnalysis(phase7Clo,phase7Model,diagError)){
+                const fs::path level7=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE7_LEVEL_CURVE.csv");
+                const fs::path imd7=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE7_IMD.csv");
+                if(!writeLevelCurveDiagnostic(modelPath,phase7Model,level7,diagError,status))report(status,L"Experimental Phase 7 level-curve WARNING: "+std::wstring(diagError.begin(),diagError.end()));
+                diagError.clear();
+                if(!writeImdDiagnostic(modelPath,phase7Model,imd7,diagError,status))report(status,L"Experimental Phase 7 IMD WARNING: "+std::wstring(diagError.begin(),diagError.end()));
+            }
+        }else{
+            report(status,L"Experimental Phase 7 WARNING: "+std::wstring(phase7Error.begin(),phase7Error.end())+L" Keeping Phase 2/NATIVE15 reference.");
         }
-    }else report(status,L"Experimental phase 5 WARNING: "+std::wstring(phase5Error.begin(),phase5Error.end())+L" Keeping Phase 4C/Phase2 result.");
-
-    // Phase 6 is deliberately diagnostic-only. It compares the same real DI
-    // through NAM, frozen Phase 2 and accepted Phase 5. No model parameter is
-    // optimized here.
-    {
-        fs::path di;
-        if(findOptionalDi(inputNam,di)){
-            if(phase5Ok){
-                std::string phase6Error;
-                if(!writePhase6DiDiagnostic(modelPath,phase3Start,phase5Clo,di,outputDirectory,inputNam.stem().wstring(),phase6Error,status))
-                    report(status,L"Experimental phase 6 DI WARNING: "+std::wstring(phase6Error.begin(),phase6Error.end()));
-            }else report(status,L"Experimental phase 6 DI skipped because Phase 5 did not produce a candidate CLO.");
-        }else report(status,L"Experimental phase 6 DI not run. Put <NAM stem>_DI.wav next to the NAM (mono PCM16/24/32) and convert again.");
+    }else{
+        report(status,L"Experimental Phase 7 not run. Put <NAM stem>_DI.wav next to the NAM (mono PCM16/24/32) to enable DI-guided B1024 fitting.");
     }
 
-    if(trainer.generateHarmonicReport){
-        const fs::path harmonicReport=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_HARMONICS.csv");
-        std::string diagnosticError;
-        if(writeHarmonicFingerprint(modelPath,r.gp2001024,harmonicReport,diagnosticError,status))
-            report(status,L"Experimental phase 1 report: "+harmonicReport.filename().wstring());
-        else
-            report(status,L"Experimental phase 1 WARNING: "+std::wstring(diagnosticError.begin(),diagnosticError.end()));
-
-        const fs::path calibrationReport=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE1B_CALIBRATION.csv");
-        const fs::path bestDetailReport=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE1B_BEST_HARMONICS.csv");
-        diagnosticError.clear();
-        if(writePhase1BCalibration(modelPath,r.gp2001024,calibrationReport,bestDetailReport,diagnosticError,status)){
-            report(status,L"Experimental phase 1B report: "+calibrationReport.filename().wstring());
-            report(status,L"Experimental phase 1B best detail: "+bestDetailReport.filename().wstring());
-        }else
-            report(status,L"Experimental phase 1B WARNING: "+std::wstring(diagnosticError.begin(),diagnosticError.end()));
-    }
     fs::remove_all(work,ec);r.ok=true;report(status,L"Independent / Experimental conversion complete.");return r;
 }
 
