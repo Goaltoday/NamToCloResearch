@@ -8,12 +8,16 @@ The **Convert to CLO** tab converts a single NAM file or every NAM file in a sel
 
 Place `nam_input_wav.wav` in the same folder as `NamToClo.exe`. The original conversion stimulus is always used; no stimulus-profile selection is required.
 
-Generated files:
+Generated file:
 
 ```text
-<name>_NATIVE_2048.clo
 <name>_NATIVE_GP200_1024.clo
-<name>_NATIVE_GP200_1024_REFINED.clo   (when Tone Match is enabled)
+```
+
+When **Tone Match** is enabled, only the Tone Match result is generated:
+
+```text
+<name>_NATIVE_GP200_1024_TONEMATCH.clo
 ```
 
 ### Tail / Reamp
@@ -27,7 +31,7 @@ Optionally apply a corrective IR WAV to the normal CLO output.
 
 ### Tone Match
 
-Optionally refine the GP-200 CLO using Tone Match. A separate refined GP-200 CLO is generated, leaving the normal conversion output available as well.
+Optionally refine the GP-200 CLO using Tone Match. When enabled, the Tone Match CLO is the only output file generated.
 
 An optional reference WAV can be selected for Tone Match; the first 20 seconds are used.
 

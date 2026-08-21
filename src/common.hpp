@@ -64,7 +64,6 @@ std::string hex32(std::uint32_t value);
 std::string hexBytes(const std::vector<std::uint8_t>& bytes);
 CloInfo inspectClo(const fs::path& path, std::size_t prefixBytes = 16);
 void printCloInfo(const fs::path& path, const CloInfo& info);
-bool copyFileCreatingParents(const fs::path& source, const fs::path& destination, std::string& error);
 bool readFileBytes(const fs::path& path, std::vector<std::uint8_t>& data, std::string& error);
 bool writeFileBytes(const fs::path& path, const std::uint8_t* data, std::size_t size, std::string& error);
 bool makeGp200CompactClo(const fs::path& source, const fs::path& destination, std::string& error);

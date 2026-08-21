@@ -1115,12 +1115,8 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         updateBackendUi();
         updateTailControls();
         if (r && r->ok) {
-            std::wstring resultMessage = L"Conversion complete.\r\n\r\nCLO 2048:\r\n" + r->ampero2048.wstring()
-                                      + L"\r\n\r\nGP-200 CLO 1024:\r\n" + r->gp2001024.wstring();
-            if (!r->refinedGp2001024.empty()) {
-                resultMessage += L"\r\n\r\nTone Match GP-200 CLO 1024:\r\n" + r->refinedGp2001024.wstring();
-            }
-            setText(gStatus, r->refinedGp2001024.empty() ? L"Done. Two CLO files were generated successfully." : L"Done. Three CLO files were generated successfully.");
+            const std::wstring resultMessage = L"Conversion complete.\r\n\r\nGP-200 CLO 1024:\r\n" + r->gp2001024.wstring();
+            setText(gStatus, L"Done. CLO file generated successfully.");
             const std::wstring doneTitle = L"NAM to CLO";
             MessageBoxW(hwnd, resultMessage.c_str(), doneTitle.c_str(), MB_ICONINFORMATION | MB_OK);
         } else {
@@ -1192,7 +1188,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     const std::wstring windowTitle = L"NAM to CLO";
     HWND hwnd = CreateWindowExW(0, kClassName, windowTitle.c_str(),
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 945,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 1040, 800,
                                 nullptr, nullptr, instance, nullptr);
     if (!hwnd) { CoUninitialize(); return 1; }
     ShowWindow(hwnd, show);

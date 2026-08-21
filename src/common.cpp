@@ -206,22 +206,6 @@ void printCloInfo(const fs::path& path, const CloInfo& info) {
     }
 }
 
-bool copyFileCreatingParents(const fs::path& source, const fs::path& destination, std::string& error) {
-    std::error_code ec;
-    if (destination.has_parent_path()) {
-        fs::create_directories(destination.parent_path(), ec);
-        if (ec) {
-            error = "Cannot create output directory: " + ec.message();
-            return false;
-        }
-    }
-    fs::copy_file(source, destination, fs::copy_options::overwrite_existing, ec);
-    if (ec) {
-        error = "Cannot copy '" + pathToUtf8(source) + "' to '" + pathToUtf8(destination) + "': " + ec.message();
-        return false;
-    }
-    return true;
-}
 
 
 static std::uint16_t crc16Modbus(const std::uint8_t* data, std::size_t size) {

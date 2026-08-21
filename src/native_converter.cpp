@@ -1669,7 +1669,7 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
 
     const fs::path original2048=work/L"native_original_2048.clo";if(!serialize2048(original2048,m,sr,error)){r.error=error;fs::remove_all(work,ec);return r;}
 
-    fs::path refined2048;
+    fs::path toneMatched2048;
     if(refine.enabled){
         report(status,L"Tone Match: preparing matched NAM target...");
         fs::path refineStimulus=stim;
@@ -1684,8 +1684,8 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
             report(status,L"Tone Match: same refinement stimulus through NAM Full vs original native CLO.");
         }else report(status,L"Tone Match: original conversion stimulus through NAM Full vs original native CLO.");
         const fs::path targetWav=work/L"refine_nam_output.wav";if(!writeMonoFloat32Wav(targetWav,refineTarget44100,44100,error)){r.error=error;fs::remove_all(work,ec);return r;}
-        refined2048=work/L"native_2048_REFINED.clo";
-        if(!refineCloBOnly(original2048,refineStimulus,targetWav,refined2048,refine,error,status)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
+        toneMatched2048=work/L"native_2048_TONEMATCH.clo";
+        if(!refineCloBOnly(original2048,refineStimulus,targetWav,toneMatched2048,refine,error,status)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
     }
 
     fs::path sourceForOutput=original2048;
@@ -1698,12 +1698,13 @@ ConversionResult convertNamToClo(const fs::path& inputNam,const fs::path& output
         sourceForOutput=corrected;
     }
 
-    r.ampero2048=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_2048.clo");if(!copyFileCreatingParents(sourceForOutput,r.ampero2048,error)){r.error=error;fs::remove_all(work,ec);return r;}
-    r.gp2001024=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP200_1024.clo");if(!makeGp200CompactClo(sourceForOutput,r.gp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
     if(refine.enabled){
         report(status,L"Generating Tone Match GP-200 1024 CLO...");
-        r.refinedGp2001024=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP200_1024_REFINED.clo");
-        if(!makeGp200CompactClo(refined2048,r.refinedGp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
+        r.gp2001024=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP200_1024_TONEMATCH.clo");
+        if(!makeGp200CompactClo(toneMatched2048,r.gp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
+    }else{
+        r.gp2001024=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP200_1024.clo");
+        if(!makeGp200CompactClo(sourceForOutput,r.gp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
     }
     fs::remove_all(work,ec);r.ok=true;report(status,L"Conversion complete.");return r;
 }

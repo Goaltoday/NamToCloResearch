@@ -17,9 +17,7 @@ struct ConversionResult {
     bool ok = false;
     std::string error;
     fs::path inputNam;
-    fs::path ampero2048;
     fs::path gp2001024;
-    fs::path refinedGp2001024;
 };
 
 struct BatchConversionResult {
