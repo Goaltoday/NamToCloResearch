@@ -2587,6 +2587,109 @@ bool writePhase4DiDiagnostic(const fs::path&modelPath,const Model&clo,const fs::
     report(status,L"Experimental phase 4 DI NAM WAV: "+namW.filename().wstring());report(status,L"Experimental phase 4 DI Phase2 WAV: "+cloW.filename().wstring());report(status,L"Experimental phase 4 DI summary: "+sumP.filename().wstring());return static_cast<bool>(wf)&&static_cast<bool>(sf);
 }
 
+
+// -----------------------------------------------------------------------------
+// Experimental phase 6 diagnostic: real DI temporal / gain comparison
+// -----------------------------------------------------------------------------
+// Diagnostic only. No CLO parameter is changed. The same DI is rendered through
+// NAM, frozen Phase 2 and the accepted Phase 5 candidate, then compared in 5 ms
+// windows. This directly tests the perceived "less gain" report on guitar-like
+// material instead of trying to infer it from steady-state sine metrics.
+
+struct Phase6WindowAccum{
+    long double namGain=0.0,p2Gain=0.0,p5Gain=0.0;
+    long double p2AbsDelta=0.0,p5AbsDelta=0.0;
+    std::size_t count=0;
+};
+
+void addPhase6Window(Phase6WindowAccum& a,double namGain,double p2Gain,double p5Gain){
+    a.namGain+=namGain;a.p2Gain+=p2Gain;a.p5Gain+=p5Gain;
+    a.p2AbsDelta+=std::fabs(p2Gain-namGain);a.p5AbsDelta+=std::fabs(p5Gain-namGain);++a.count;
+}
+
+bool writePhase6DiDiagnostic(const fs::path&modelPath,const fs::path&phase2CloPath,const fs::path&phase5CloPath,
+                             const fs::path&diPath,const fs::path&outDir,const std::wstring&stem,
+                             std::string&error,const StatusCallback&status){
+    Model p2,p5;
+    if(!loadGp200ModelForAnalysis(phase2CloPath,p2,error)){error="Phase 6: cannot load Phase 2 CLO: "+error;return false;}
+    if(!loadGp200ModelForAnalysis(phase5CloPath,p5,error)){error="Phase 6: cannot load Phase 5 CLO: "+error;return false;}
+
+    std::vector<float>in;std::uint32_t sr=0;
+    if(!readPcm16Mono(diPath,in,sr,error))return false;
+    if(sr!=44100){in=resampleR8Brain24(in,static_cast<double>(sr),44100.0);sr=44100;}
+    if(in.empty()){error="Phase 6: DI WAV is empty.";return false;}
+
+    std::vector<float>nam,p2o,p5o;
+    if(!renderNamTarget44100(modelPath,in,nam,error,status))return false;
+    renderModel(p2,in,p2o,true);renderModel(p5,in,p5o,true);
+    nam.resize(in.size(),0.0f);p2o.resize(in.size(),0.0f);p5o.resize(in.size(),0.0f);
+
+    const fs::path namW=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_NAM.wav");
+    const fs::path p2W =uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_PHASE2.wav");
+    const fs::path p5W =uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_PHASE5.wav");
+    const fs::path namM=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_NAM_LEVELMATCH.wav");
+    const fs::path p2M =uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_PHASE2_LEVELMATCH.wav");
+    const fs::path p5M =uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_PHASE5_LEVELMATCH.wav");
+    const fs::path winP=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_WINDOWS.csv");
+    const fs::path sumP=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE6_DI_SUMMARY.csv");
+
+    if(!writePcm16MonoDiagnostic(namW,nam,44100,error)||!writePcm16MonoDiagnostic(p2W,p2o,44100,error)||!writePcm16MonoDiagnostic(p5W,p5o,44100,error))return false;
+
+    const auto ns=signalStats(nam),s2=signalStats(p2o),s5=signalStats(p5o),isAll=signalStats(in);
+    const double commonRms=std::min(std::pow(10.0,-18.0/20.0),std::min(ns.rms,std::min(s2.rms,s5.rms)));
+    std::vector<float>nm=nam,m2=p2o,m5=p5o;
+    const double gn=commonRms/std::max(ns.rms,1.0e-15),g2=commonRms/std::max(s2.rms,1.0e-15),g5=commonRms/std::max(s5.rms,1.0e-15);
+    for(auto&v:nm)v=static_cast<float>(v*gn);for(auto&v:m2)v=static_cast<float>(v*g2);for(auto&v:m5)v=static_cast<float>(v*g5);
+    if(!writePcm16MonoDiagnostic(namM,nm,44100,error)||!writePcm16MonoDiagnostic(p2M,m2,44100,error)||!writePcm16MonoDiagnostic(p5M,m5,44100,error))return false;
+
+    constexpr std::size_t window=221; // ~5 ms @ 44.1 kHz
+    std::ofstream wf(winP,std::ios::binary|std::ios::trunc);
+    if(!wf){error="Phase 6: cannot create DI window CSV.";return false;}
+    wf<<"# Experimental Phase 6 DI diagnostic. 5 ms windows. Diagnostic only; CLO unchanged.\n";
+    wf<<"# attack=1 when active input rises >=3 dB versus preceding active window; sustain=active and not attack.\n";
+    wf<<"time_s,input_rms_dbfs,nam_rms_dbfs,phase2_rms_dbfs,phase5_rms_dbfs,nam_peak_dbfs,phase2_peak_dbfs,phase5_peak_dbfs,nam_crest_db,phase2_crest_db,phase5_crest_db,nam_gain_db,phase2_gain_db,phase5_gain_db,phase2_minus_nam_gain_db,phase5_minus_nam_gain_db,attack,sustain\n"<<std::fixed<<std::setprecision(6);
+
+    double prevActiveDb=-300.0;
+    Phase6WindowAccum activeAcc,attackAcc,sustainAcc;
+    for(std::size_t pos=0;pos<in.size();pos+=window){
+        const std::size_t cnt=std::min(window,in.size()-pos);
+        const auto si=signalStats(in,pos,cnt),sn=signalStats(nam,pos,cnt),a2=signalStats(p2o,pos,cnt),a5=signalStats(p5o,pos,cnt);
+        const double inDb=db20(si.rms),ng=safeGainDb(sn.rms,si.rms),q2=safeGainDb(a2.rms,si.rms),q5=safeGainDb(a5.rms,si.rms);
+        const bool active=inDb>-60.0;
+        const bool attack=active&&prevActiveDb>-200.0&&(inDb-prevActiveDb)>=3.0;
+        const bool sustain=active&&!attack;
+        wf<<(static_cast<double>(pos)/44100.0)<<','<<inDb<<','<<db20(sn.rms)<<','<<db20(a2.rms)<<','<<db20(a5.rms)
+          <<','<<db20(sn.peak)<<','<<db20(a2.peak)<<','<<db20(a5.peak)
+          <<','<<sn.crestDb<<','<<a2.crestDb<<','<<a5.crestDb
+          <<','<<ng<<','<<q2<<','<<q5<<','<<(q2-ng)<<','<<(q5-ng)<<','<<(attack?1:0)<<','<<(sustain?1:0)<<'\n';
+        if(active){addPhase6Window(activeAcc,ng,q2,q5);if(attack)addPhase6Window(attackAcc,ng,q2,q5);else addPhase6Window(sustainAcc,ng,q2,q5);prevActiveDb=inDb;}
+    }
+    if(!wf){error="Phase 6: failed writing DI window CSV.";return false;}
+
+    std::ofstream sf(sumP,std::ios::binary|std::ios::trunc);
+    if(!sf){error="Phase 6: cannot create DI summary CSV.";return false;}
+    sf<<"# Experimental Phase 6 DI diagnostic. All values are measurements; no CLO parameter is modified.\n";
+    sf<<"metric,nam,phase2,phase5,phase2_minus_nam,phase5_minus_nam\n"<<std::fixed<<std::setprecision(6);
+    sf<<"total_rms_dbfs,"<<db20(ns.rms)<<','<<db20(s2.rms)<<','<<db20(s5.rms)<<','<<(db20(s2.rms)-db20(ns.rms))<<','<<(db20(s5.rms)-db20(ns.rms))<<'\n';
+    sf<<"total_peak_dbfs,"<<db20(ns.peak)<<','<<db20(s2.peak)<<','<<db20(s5.peak)<<','<<(db20(s2.peak)-db20(ns.peak))<<','<<(db20(s5.peak)-db20(ns.peak))<<'\n';
+    sf<<"total_crest_db,"<<ns.crestDb<<','<<s2.crestDb<<','<<s5.crestDb<<','<<(s2.crestDb-ns.crestDb)<<','<<(s5.crestDb-ns.crestDb)<<'\n';
+    const double totalNg=safeGainDb(ns.rms,isAll.rms),total2=safeGainDb(s2.rms,isAll.rms),total5=safeGainDb(s5.rms,isAll.rms);
+    sf<<"total_gain_db,"<<totalNg<<','<<total2<<','<<total5<<','<<(total2-totalNg)<<','<<(total5-totalNg)<<'\n';
+    auto writeAcc=[&](const char*name,const Phase6WindowAccum&a){if(!a.count)return;const double ng=static_cast<double>(a.namGain/a.count),q2=static_cast<double>(a.p2Gain/a.count),q5=static_cast<double>(a.p5Gain/a.count);sf<<name<<","<<ng<<','<<q2<<','<<q5<<','<<(q2-ng)<<','<<(q5-ng)<<'\n';sf<<std::string(name)+"_abs_error_db,"<<0.0<<','<<static_cast<double>(a.p2AbsDelta/a.count)<<','<<static_cast<double>(a.p5AbsDelta/a.count)<<','<<static_cast<double>(a.p2AbsDelta/a.count)<<','<<static_cast<double>(a.p5AbsDelta/a.count)<<'\n';};
+    writeAcc("active_window_gain_db",activeAcc);writeAcc("attack_window_gain_db",attackAcc);writeAcc("sustain_window_gain_db",sustainAcc);
+    sf<<"levelmatch_applied_gain_db,"<<db20(gn)<<','<<db20(g2)<<','<<db20(g5)<<','<<(db20(g2)-db20(gn))<<','<<(db20(g5)-db20(gn))<<'\n';
+    sf<<"window_count,"<<activeAcc.count<<','<<activeAcc.count<<','<<activeAcc.count<<",0,0\n";
+    sf<<"attack_window_count,"<<attackAcc.count<<','<<attackAcc.count<<','<<attackAcc.count<<",0,0\n";
+    sf<<"sustain_window_count,"<<sustainAcc.count<<','<<sustainAcc.count<<','<<sustainAcc.count<<",0,0\n";
+    if(!sf){error="Phase 6: failed writing DI summary CSV.";return false;}
+
+    report(status,L"Experimental phase 6 DI NAM WAV: "+namW.filename().wstring());
+    report(status,L"Experimental phase 6 DI Phase2 WAV: "+p2W.filename().wstring());
+    report(status,L"Experimental phase 6 DI Phase5 WAV: "+p5W.filename().wstring());
+    report(status,L"Experimental phase 6 DI summary: "+sumP.filename().wstring());
+    return true;
+}
+
 bool runPhase4Diagnostic(const fs::path&inputNam,const fs::path&modelPath,const fs::path&referenceClo,const fs::path&outDir,std::string&error,const StatusCallback&status){
     Model clo;if(!loadGp200ModelForAnalysis(referenceClo,clo,error))return false;const auto stem=inputNam.stem().wstring();
     const fs::path levelP=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_LEVEL_CURVE.csv"),imdP=uniqueOutput(outDir,stem,L"_EXPERIMENTAL_PHASE4_IMD.csv");
@@ -2662,7 +2765,8 @@ ConversionResult convertNamToBothIndependent(const fs::path& inputNam,const fs::
     const fs::path phase5Summary=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE5_A_PK_DYNAMIC_IMD_SUMMARY.csv");
     const fs::path phase5Detail=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_PHASE5_A_PK_DYNAMIC_IMD_HARMONICS.csv");
     std::string phase5Error;
-    if(optimizeAPkDynamicImdExperimental(modelPath,phase3Start,phase5Clo,phase5Summary,phase5Detail,phase5Error,status)){
+    const bool phase5Ok=optimizeAPkDynamicImdExperimental(modelPath,phase3Start,phase5Clo,phase5Summary,phase5Detail,phase5Error,status);
+    if(phase5Ok){
         r.gp2001024=phase5Clo;
         report(status,L"Experimental phase 5 summary: "+phase5Summary.filename().wstring());
         Model phase5Model;std::string diagError;
@@ -2673,6 +2777,20 @@ ConversionResult convertNamToBothIndependent(const fs::path& inputNam,const fs::
             diagError.clear();if(writePhase4Imd(modelPath,phase5Model,imd5,diagError,status))report(status,L"Experimental phase 5 IMD: "+imd5.filename().wstring());
         }
     }else report(status,L"Experimental phase 5 WARNING: "+std::wstring(phase5Error.begin(),phase5Error.end())+L" Keeping Phase 4C/Phase2 result.");
+
+    // Phase 6 is deliberately diagnostic-only. It compares the same real DI
+    // through NAM, frozen Phase 2 and accepted Phase 5. No model parameter is
+    // optimized here.
+    {
+        fs::path di;
+        if(findOptionalDi(inputNam,di)){
+            if(phase5Ok){
+                std::string phase6Error;
+                if(!writePhase6DiDiagnostic(modelPath,phase3Start,phase5Clo,di,outputDirectory,inputNam.stem().wstring(),phase6Error,status))
+                    report(status,L"Experimental phase 6 DI WARNING: "+std::wstring(phase6Error.begin(),phase6Error.end()));
+            }else report(status,L"Experimental phase 6 DI skipped because Phase 5 did not produce a candidate CLO.");
+        }else report(status,L"Experimental phase 6 DI not run. Put <NAM stem>_DI.wav next to the NAM (mono PCM16) and convert again.");
+    }
 
     if(trainer.generateHarmonicReport){
         const fs::path harmonicReport=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_EXPERIMENTAL_HARMONICS.csv");
