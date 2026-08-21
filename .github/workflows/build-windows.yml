@@ -13,7 +13,7 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -A x64
       - name: Build
-        run: cmake --build build --config Release --parallel 1 --verbose
+        run: cmake --build build --config Release --parallel
       - name: Stage app
         shell: pwsh
         run: |

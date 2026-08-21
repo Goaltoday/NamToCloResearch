@@ -6,7 +6,6 @@
 #include <windows.h>
 #include <commdlg.h>
 #include <commctrl.h>
-#include <shellapi.h>
 #include <shlobj.h>
 
 #include <filesystem>
@@ -1172,15 +1171,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
-    int argc = 0;
-    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (argv && argc > 1 && std::wstring(argv[1]) == L"--worker") {
-        const int code = ntc::runWorkerCommandLine(argc, argv);
-        LocalFree(argv);
-        return code;
-    }
-    if (argv) LocalFree(argv);
-
     // Prevent Windows DPI virtualization from inflating the whole window on 125%/150% displays.
     SetProcessDPIAware();
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
