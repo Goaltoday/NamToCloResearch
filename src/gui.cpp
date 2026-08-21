@@ -7,6 +7,7 @@
 #include <commdlg.h>
 #include <commctrl.h>
 #include <shlobj.h>
+#include <shellapi.h>
 
 #include <filesystem>
 #include <cwctype>
