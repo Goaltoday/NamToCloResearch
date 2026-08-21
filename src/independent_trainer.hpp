@@ -5,9 +5,8 @@
 namespace ntc {
 
 struct IndependentTrainerConfig {
-    // Reconstructed Valeton baseline constants. Kept explicit so future
-    // experiments can fork this backend without touching the legacy/DLL path.
-    double namTargetScale = 0.31;
+    // Official converter NAM block size. The reconstructed target scale is
+    // fixed in the native implementation and is not user-configurable.
     int blockSize = 1024;
 };
 

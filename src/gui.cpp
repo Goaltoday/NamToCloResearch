@@ -301,7 +301,7 @@ void updateBackendUi() {
         EnableWindow(gBrowseRefineTargetButton, FALSE);
         setText(gInfo,
             L"Independent / Native: NAM is rendered locally and the CLO is trained/serialized in this program. "
-            L"No GP-200.exe or HTUSBTools.dll is loaded. Reconstructed native conversion baseline for comparison.");
+            L"No GP-200.exe or HTUSBTools.dll is loaded. Uses the reconstructed official conversion flow.");
         setText(gStatus, L"Independent / Native backend selected. Ready for conversion.");
     } else {
         setText(gInfo,
