@@ -16,12 +16,16 @@ struct IndependentTrainerConfig {
 ConversionResult convertNamToBothIndependent(const fs::path& inputNam,
                                              const fs::path& outputDirectory,
                                              StimulusConfig stimulus = {},
+                                             CorrectiveIrConfig correction = {},
+                                             CloRefineConfig refine = {},
                                              IndependentTrainerConfig trainer = {},
                                              const StatusCallback& status = {});
 
 BatchConversionResult convertNamFolderIndependent(const fs::path& inputDirectory,
                                                    const fs::path& outputDirectory,
                                                    StimulusConfig stimulus = {},
+                                                   CorrectiveIrConfig correction = {},
+                                                   CloRefineConfig refine = {},
                                                    IndependentTrainerConfig trainer = {},
                                                    const StatusCallback& status = {});
 

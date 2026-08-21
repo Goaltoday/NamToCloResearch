@@ -1608,29 +1608,117 @@ bool serialize2048(const fs::path&path,const Model&m,double trainerRate,std::str
     putDouble(d,0x40,m.post.b0);putDouble(d,0x48,m.post.b1);putDouble(d,0x50,m.post.b2);putDouble(d,0x58,m.post.a1);putDouble(d,0x60,m.post.a2);putFloat(d,0x68,m.pk.pp);putFloat(d,0x6c,m.pk.pn);putFloat(d,0x70,m.pk.kp);putFloat(d,0x74,m.pk.kn);put32(d,0x78,0);put32(d,0x7c,128);put32(d,0x80,128);put32(d,0x84,2048);
     auto A44=resampleFirOfficial(m.A,trainerRate,128);auto Bscaled=m.B;for(auto&v:Bscaled)v*=4.0f;auto B44=resampleFirOfficial(Bscaled,trainerRate,2048);for(std::size_t i=0;i<A44.size();++i)putFloat(d,0x88+4*i,A44[i]);for(std::size_t i=0;i<B44.size();++i)putFloat(d,0x88+4*(128+i),B44[i]);const auto crc=crc16Official(d.data()+0x0c,d.size()-0x0c);d[8]=static_cast<std::uint8_t>(crc);d[9]=static_cast<std::uint8_t>(crc>>8);return writeFileBytes(path,d.data(),d.size(),error);}
 
+
+RuntimePaths resolveNativeStimulusRuntime(){
+    RuntimePaths r;
+    const fs::path exe=executablePath();
+    if(exe.empty())return r;
+    // Native release is self-contained: the official 70 s stimulus sits next
+    // to the EXE. No runtime\\ampero folder or proprietary DLL is required.
+    r.legacyStimulus=exe.parent_path()/L"nam_input_wav.wav";
+    return r;
+}
+
+bool writeMonoFloat32Wav(const fs::path&path,const std::vector<float>&samples,std::uint32_t sampleRate,std::string&error){
+    if(sampleRate==0){error="Cannot write WAV with sample rate 0.";return false;}
+    std::error_code ec;if(path.has_parent_path())fs::create_directories(path.parent_path(),ec);if(ec){error="Cannot create WAV directory: "+ec.message();return false;}
+    std::ofstream o(path,std::ios::binary|std::ios::trunc);if(!o){error="Cannot create WAV: "+pathToUtf8(path);return false;}
+    const std::uint16_t channels=1,bits=32,align=4;const std::uint32_t byteRate=sampleRate*align;
+    if(samples.size()>((std::numeric_limits<std::uint32_t>::max()-36u)/4u)){error="WAV is too large.";return false;}
+    const std::uint32_t dataBytes=static_cast<std::uint32_t>(samples.size()*4u),riffSize=36u+dataBytes;
+    auto w16=[&](std::uint16_t v){char b[2]={static_cast<char>(v&255u),static_cast<char>((v>>8)&255u)};o.write(b,2);};
+    auto w32=[&](std::uint32_t v){char b[4]={static_cast<char>(v&255u),static_cast<char>((v>>8)&255u),static_cast<char>((v>>16)&255u),static_cast<char>((v>>24)&255u)};o.write(b,4);};
+    o.write("RIFF",4);w32(riffSize);o.write("WAVEfmt ",8);w32(16);w16(3);w16(channels);w32(sampleRate);w32(byteRate);w16(align);w16(bits);o.write("data",4);w32(dataBytes);
+    for(float x:samples){if(!std::isfinite(x))x=0.0f;std::uint32_t u=0;std::memcpy(&u,&x,sizeof(u));w32(u);}
+    if(!o){error="Failed while writing WAV: "+pathToUtf8(path);return false;}return true;
+}
+
+
+std::vector<float> prepareToneTarget44100(const std::vector<float>&renderedWithGuard,double sourceRate){
+    const std::size_t n70=static_cast<std::size_t>(static_cast<float>(sourceRate)*70.0f);
+    std::vector<float> source70(n70,0.0f);
+    std::copy_n(renderedWithGuard.begin(),std::min(n70,renderedWithGuard.size()),source70.begin());
+    auto out=resampleR8Brain24(source70,sourceRate,44100.0);
+    out.resize(70u*44100u,0.0f);
+    out.resize(70u*44100u+600u,0.0f);
+    return out;
+}
+
 fs::path uniqueOutput(const fs::path&dir,const std::wstring&stem,const wchar_t*suffix){fs::path p=dir/(stem+suffix);int i=2;while(fs::exists(p))p=dir/(stem+L"_"+std::to_wstring(i++)+suffix);return p;}
 
 } // namespace
 
 ConversionResult convertNamToBothIndependent(const fs::path& inputNam,const fs::path& outputDirectory,
-                                             StimulusConfig stimulus,IndependentTrainerConfig trainer,
-                                             const StatusCallback& status){
-    ConversionResult r;r.inputNam=inputNam;std::string error;std::error_code ec;if(!fs::exists(inputNam,ec)||ec){r.error="Input NAM does not exist.";return r;}fs::create_directories(outputDirectory,ec);if(ec){r.error="Cannot create output directory: "+ec.message();return r;}
-    const auto runtime=resolveDefaultRuntime();const fs::path work=outputDirectory/(L".native_work_"+inputNam.stem().wstring());fs::remove_all(work,ec);fs::create_directories(work,ec);if(ec){r.error="Cannot create independent work directory.";return r;}
-    const fs::path stim=work/L"stimulus_70s.wav";report(status,L"Independent: building stimulus...");if(!buildStimulus(runtime,stimulus,stim,error)){r.error=error;fs::remove_all(work,ec);return r;}
+                                             StimulusConfig stimulus,CorrectiveIrConfig correction,CloRefineConfig refine,
+                                             IndependentTrainerConfig trainer,const StatusCallback& status){
+    ConversionResult r;r.inputNam=inputNam;std::string error;std::error_code ec;
+    if(!fs::exists(inputNam,ec)||ec){r.error="Input NAM does not exist.";return r;}
+    fs::create_directories(outputDirectory,ec);if(ec){r.error="Cannot create output directory: "+ec.message();return r;}
+
+    // Release-native path is intentionally fixed to the official/original base
+    // stimulus. Tail/Reamp selection remains user-configurable.
+    stimulus.mode=StimulusMode::Legacy;
+    stimulus.customStimulus.clear();
+    const auto runtime=resolveNativeStimulusRuntime();
+    if(runtime.legacyStimulus.empty()||!fs::exists(runtime.legacyStimulus,ec)||ec){
+        r.error="Missing nam_input_wav.wav next to the executable.";return r;
+    }
+
+    const fs::path work=outputDirectory/(L".native_work_"+inputNam.stem().wstring());fs::remove_all(work,ec);fs::create_directories(work,ec);if(ec){r.error="Cannot create independent work directory.";return r;}
+    const fs::path stim=work/L"stimulus_70s.wav";report(status,L"Native: building original stimulus + selected Tail/Reamp...");if(!buildStimulus(runtime,stimulus,stim,error)){r.error=error;fs::remove_all(work,ec);return r;}
     std::vector<float>s44;std::uint32_t ssr=0;if(!readPcm16Mono(stim,s44,ssr,error)){r.error=error;fs::remove_all(work,ec);return r;}
     fs::path modelPath;if(!prepareFullA2(inputNam,work,modelPath,error)){r.error=error;fs::remove_all(work,ec);return r;}
+
     std::vector<float>input,target;double sr=48000;if(!renderNam(modelPath,s44,trainer.blockSize,0.31f,input,target,sr,error,status)){r.error=error;fs::remove_all(work,ec);return r;}
-    detrend(target);const auto latency=detectLatency(target,sr);target=alignLeft(target,latency);report(status,L"Independent: detected NAM latency "+std::to_wstring(latency)+L" samples.");
-    Model m;m.A.assign(kA,0);m.A[0]=1;m.B.assign(kB,0);m.B[0]=1;m.pk=fitPk(input,target,sr);m.pre=Biquad{};m.post=postForRate(sr);{std::wostringstream os;os<<L"Independent: P/K = "<<m.pk.pp<<L" / "<<m.pk.pn<<L" / "<<m.pk.kp<<L" / "<<m.pk.kn;report(status,os.str());}
+    // Keep the raw NAM render for Tone Match before trainer detrend/latency alignment.
+    const std::vector<float> toneTarget44100=prepareToneTarget44100(target,sr);
+    detrend(target);const auto latency=detectLatency(target,sr);target=alignLeft(target,latency);report(status,L"Native: detected NAM latency "+std::to_wstring(latency)+L" samples.");
+    Model m;m.A.assign(kA,0);m.A[0]=1;m.B.assign(kB,0);m.B[0]=1;m.pk=fitPk(input,target,sr);m.pre=Biquad{};m.post=postForRate(sr);{std::wostringstream os;os<<L"Native: P/K = "<<m.pk.pp<<L" / "<<m.pk.pn<<L" / "<<m.pk.kp<<L" / "<<m.pk.kn;report(status,os.str());}
     fitAB(m,input,target,sr,status);refineB(m,input,target,sr,status);
-    r.ampero2048=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_2048.clo");if(!serialize2048(r.ampero2048,m,sr,error)){r.error=error;fs::remove_all(work,ec);return r;}
-    r.gp2001024=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP200_1024.clo");if(!makeGp200CompactClo(r.ampero2048,r.gp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
-    fs::remove_all(work,ec);r.ok=true;report(status,L"Independent conversion complete.");return r;
+
+    const fs::path original2048=work/L"native_original_2048.clo";if(!serialize2048(original2048,m,sr,error)){r.error=error;fs::remove_all(work,ec);return r;}
+
+    fs::path refined2048;
+    if(refine.enabled){
+        report(status,L"Native Tone Match: preparing matched NAM target...");
+        fs::path refineStimulus=stim;
+        std::vector<float> refineTarget44100=toneTarget44100;
+        if(!refine.referenceWav.empty()){
+            StimulusConfig refineStimulusConfig=stimulus;refineStimulusConfig.tailMode=TailMode::RecordedAudio;refineStimulusConfig.recordedAudio=refine.referenceWav;
+            refineStimulus=work/L"refine_input_wav.wav";
+            if(!buildStimulus(runtime,refineStimulusConfig,refineStimulus,error)){r.error="Could not prepare refinement test WAV: "+error;fs::remove_all(work,ec);return r;}
+            std::vector<float> refineS44;std::uint32_t refineSr44=0;if(!readPcm16Mono(refineStimulus,refineS44,refineSr44,error)){r.error=error;fs::remove_all(work,ec);return r;}
+            std::vector<float> unusedInput,refineRendered;double refineRate=sr;if(!renderNam(modelPath,refineS44,trainer.blockSize,0.31f,unusedInput,refineRendered,refineRate,error,status)){r.error="Could not render refinement stimulus through NAM: "+error;fs::remove_all(work,ec);return r;}
+            refineTarget44100=prepareToneTarget44100(refineRendered,refineRate);
+            report(status,L"Native Tone Match: same refinement stimulus through NAM Full vs original native CLO.");
+        }else report(status,L"Native Tone Match: original conversion stimulus through NAM Full vs original native CLO.");
+        const fs::path targetWav=work/L"refine_nam_output.wav";if(!writeMonoFloat32Wav(targetWav,refineTarget44100,44100,error)){r.error=error;fs::remove_all(work,ec);return r;}
+        refined2048=work/L"native_2048_REFINED.clo";
+        if(!refineCloBOnly(original2048,refineStimulus,targetWav,refined2048,refine,error,status)){r.error=error.empty()?"CLO refinement failed.":error;fs::remove_all(work,ec);return r;}
+    }
+
+    fs::path sourceForOutput=original2048;
+    if(correction.enabled){
+        if(correction.wav.empty()){r.error="Select a Corrective IR WAV file.";fs::remove_all(work,ec);return r;}
+        report(status,L"Native: applying Corrective IR...");
+        const fs::path corrected=work/L"native_2048_corrected.clo";CorrectiveIrStats stats;
+        if(!applyCorrectiveIrToClo(original2048,correction.wav,corrected,stats,error)){r.error=error.empty()?"Corrective IR failed.":error;fs::remove_all(work,ec);return r;}
+        report(status,L"Corrective IR applied: linear convolution, RMS match, -6 dB post gain. RMS gain "+std::to_wstring(stats.rmsGainDb)+L" dB; total "+std::to_wstring(stats.totalGainDb)+L" dB.");
+        sourceForOutput=corrected;
+    }
+
+    r.ampero2048=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_2048.clo");if(!copyFileCreatingParents(sourceForOutput,r.ampero2048,error)){r.error=error;fs::remove_all(work,ec);return r;}
+    r.gp2001024=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP200_1024.clo");if(!makeGp200CompactClo(sourceForOutput,r.gp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
+    if(refine.enabled){
+        report(status,L"Native: generating Tone Match GP-200 1024 CLO...");
+        r.refinedGp2001024=uniqueOutput(outputDirectory,inputNam.stem().wstring(),L"_NATIVE_GP200_1024_REFINED.clo");
+        if(!makeGp200CompactClo(refined2048,r.refinedGp2001024,error)){r.error=error;fs::remove_all(work,ec);return r;}
+    }
+    fs::remove_all(work,ec);r.ok=true;report(status,L"Native conversion complete.");return r;
 }
 
 BatchConversionResult convertNamFolderIndependent(const fs::path& inputDirectory,const fs::path& outputDirectory,
-                                                   StimulusConfig stimulus,IndependentTrainerConfig trainer,
-                                                   const StatusCallback& status){BatchConversionResult b;std::error_code ec;std::vector<fs::path>files;for(const auto&e:fs::directory_iterator(inputDirectory,ec)){if(ec)break;if(!e.is_regular_file(ec)||ec)continue;auto ext=e.path().extension().wstring();std::transform(ext.begin(),ext.end(),ext.begin(),[](wchar_t c){return static_cast<wchar_t>(std::towlower(c));});if(ext==L".nam")files.push_back(e.path());}std::sort(files.begin(),files.end());b.total=files.size();for(std::size_t i=0;i<files.size();++i){report(status,L"Independent batch "+std::to_wstring(i+1)+L"/"+std::to_wstring(files.size())+L": "+files[i].filename().wstring());auto r=convertNamToBothIndependent(files[i],outputDirectory,stimulus,trainer,status);if(r.ok)++b.succeeded;else ++b.failed;b.items.push_back(std::move(r));}b.ok=b.total>0&&b.failed==0;return b;}
+                                                   StimulusConfig stimulus,CorrectiveIrConfig correction,CloRefineConfig refine,
+                                                   IndependentTrainerConfig trainer,const StatusCallback& status){BatchConversionResult b;std::error_code ec;std::vector<fs::path>files;for(const auto&e:fs::directory_iterator(inputDirectory,ec)){if(ec)break;if(!e.is_regular_file(ec)||ec)continue;auto ext=e.path().extension().wstring();std::transform(ext.begin(),ext.end(),ext.begin(),[](wchar_t c){return static_cast<wchar_t>(std::towlower(c));});if(ext==L".nam")files.push_back(e.path());}std::sort(files.begin(),files.end());b.total=files.size();for(std::size_t i=0;i<files.size();++i){report(status,L"Native batch "+std::to_wstring(i+1)+L"/"+std::to_wstring(files.size())+L": "+files[i].filename().wstring());auto r=convertNamToBothIndependent(files[i],outputDirectory,stimulus,correction,refine,trainer,status);if(r.ok)++b.succeeded;else ++b.failed;b.items.push_back(std::move(r));}b.ok=b.total>0&&b.failed==0;return b;}
 
 } // namespace ntc

@@ -15,21 +15,26 @@ Native output files:
 ```text
 <name>_NATIVE_2048.clo
 <name>_NATIVE_GP200_1024.clo
+<name>_NATIVE_GP200_1024_REFINED.clo   (when Tone Match is enabled)
 ```
+
+Corrective IR and Tone Match are available on the native backend. Corrective IR is applied to the normal native outputs. Tone Match produces the separate refined GP-200 output, matching the established HTUSBTools-branch behavior.
 
 For A2 `SlimmableContainer` NAMs, the embedded submodel with the highest `max_value` (Full) is used before rendering.
 
 ### Current / HTUSBTools
 
-The existing HTUSBTools conversion backend is retained unchanged for compatibility. Corrective IR and CLO refinement remain available only on this backend.
+The existing HTUSBTools conversion backend is retained for compatibility. Corrective IR and CLO refinement remain available here as well.
 
 ### GP-200 Uploader
 
 The uploader tab sends an existing `.clo` file directly to a selected GP-200 SnapTone slot over USB MIDI.
 
-## Stimulus selection
+## Stimulus and Tail / Reamp
 
-The converter keeps the existing Stimulus Profile and Tail selection behavior. The native backend uses the same selected 50-second stimulus profile plus 20-second tail and then applies the reconstructed official trainer preprocessing internally.
+The release UI no longer exposes multiple Stimulus Profiles. Conversion always uses the original/official stimulus. `nam_input_wav.wav` must be placed next to the executable. The native backend does not need `runtime\ampero` or `HTUSBTools.dll`.
+
+Tail / Reamp selection is retained: the original final 20 seconds of `nam_input_wav.wav` can be used, or a user Recorded Audio WAV can be adapted to the 20-second tail.
 
 ## Build
 

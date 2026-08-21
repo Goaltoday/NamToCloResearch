@@ -35,15 +35,12 @@ constexpr int IDC_BROWSE_OUTPUT = 105;
 constexpr int IDC_CONVERT = 106;
 constexpr int IDC_OPEN_OUTPUT = 107;
 constexpr int IDC_STATUS = 108;
-constexpr int IDC_STIMULUS_MODE = 109;
 constexpr int IDC_TAIL_MODE = 110;
 constexpr int IDC_RECORDED_PATH = 111;
 constexpr int IDC_BROWSE_RECORDED = 112;
 constexpr int IDC_VERSION = 113;
 constexpr int IDC_SUBTITLE = 114;
 constexpr int IDC_INFO = 115;
-constexpr int IDC_CUSTOM_STIMULUS_PATH = 116;
-constexpr int IDC_BROWSE_CUSTOM_STIMULUS = 117;
 constexpr int IDC_APPLY_CORRECTIVE_IR = 118;
 constexpr int IDC_CORRECTIVE_IR_PATH = 119;
 constexpr int IDC_BROWSE_CORRECTIVE_IR = 120;
@@ -78,7 +75,6 @@ struct UiMetrics {
     RECT header{};
     RECT sectionInput{};
     RECT sectionOutput{};
-    RECT sectionStimulus{};
     RECT sectionTail{};
     RECT sectionRecorded{};
     RECT sectionCorrective{};
@@ -105,9 +101,6 @@ HWND gBrowseButton = nullptr;
 HWND gConvertButton = nullptr;
 HWND gOpenButton = nullptr;
 HWND gStatus = nullptr;
-HWND gStimulusCombo = nullptr;
-HWND gCustomStimulusEdit = nullptr;
-HWND gBrowseCustomStimulusButton = nullptr;
 HWND gTailCombo = nullptr;
 HWND gRecordedEdit = nullptr;
 HWND gBrowseRecordedButton = nullptr;
@@ -231,13 +224,12 @@ void showControl(HWND h, bool show) {
 void showConversionUi(HWND hwnd, bool show) {
     const HWND controls[] = {
         gInputEdit, gOutEdit, gLoadFileButton, gLoadFolderButton, gBrowseButton,
-        gConvertButton, gOpenButton, gStimulusCombo, gCustomStimulusEdit,
-        gBrowseCustomStimulusButton, gTailCombo, gRecordedEdit, gBrowseRecordedButton,
+        gConvertButton, gOpenButton, gTailCombo, gRecordedEdit, gBrowseRecordedButton,
         gCorrectiveCheck, gCorrectiveEdit, gBrowseCorrectiveButton, gRefineCheck,
         gRefineTargetEdit, gBrowseRefineTargetButton, gInfo
     };
     for (HWND h : controls) showControl(h, show);
-    for (int id : {1002,1003,1004,1005,1006,1007,1008,1009,1010})
+    for (int id : {1002,1003,1005,1006,1008,1009,1010})
         showControl(GetDlgItem(hwnd, id), show);
 }
 
@@ -291,21 +283,16 @@ void updateBackendUi() {
 #endif
     if (gBusy) return;
 
-    const bool allowLegacyExtras = gBackendMode == BackendMode::CurrentDll;
-    EnableWindow(gCorrectiveCheck, allowLegacyExtras ? TRUE : FALSE);
-    EnableWindow(gRefineCheck, allowLegacyExtras ? TRUE : FALSE);
-    if (!allowLegacyExtras) {
-        EnableWindow(gCorrectiveEdit, FALSE);
-        EnableWindow(gBrowseCorrectiveButton, FALSE);
-        EnableWindow(gRefineTargetEdit, FALSE);
-        EnableWindow(gBrowseRefineTargetButton, FALSE);
+    EnableWindow(gCorrectiveCheck, TRUE);
+    EnableWindow(gRefineCheck, TRUE);
+    if (native) {
         setText(gInfo,
-            L"Independent / Native: NAM is rendered locally and the CLO is trained/serialized in this program. "
-            L"No GP-200.exe or HTUSBTools.dll is loaded. Uses the reconstructed official conversion flow.");
+            L"Independent / Native: reconstructed official conversion flow. Uses nam_input_wav.wav next to the EXE; "
+            L"no GP-200.exe or HTUSBTools.dll is required. Corrective IR and Tone Match are available.");
         setText(gStatus, L"Independent / Native backend selected. Ready for conversion.");
     } else {
         setText(gInfo,
-            L"Current backend: existing HTUSBTools conversion path. Corrective IR and Tone Match refinement remain available.");
+            L"Current backend: HTUSBTools conversion path. Corrective IR and Tone Match are available.");
     }
     if (hwnd) InvalidateRect(hwnd, nullptr, TRUE);
 }
@@ -318,17 +305,12 @@ void enableControls(bool enable) {
     EnableWindow(gBrowseButton, enable);
     EnableWindow(gConvertButton, enable);
     EnableWindow(gOpenButton, enable);
-    EnableWindow(gStimulusCombo, enable);
     EnableWindow(gTailCombo, enable);
     EnableWindow(gCorrectiveCheck, enable);
     EnableWindow(gRefineCheck, enable);
     if (!enable) {
         EnableWindow(gRefineTargetEdit, FALSE);
         EnableWindow(gBrowseRefineTargetButton, FALSE);
-    }
-    if (!enable) {
-        EnableWindow(gCustomStimulusEdit, FALSE);
-        EnableWindow(gBrowseCustomStimulusButton, FALSE);
     }
     if (!enable) {
         EnableWindow(gRecordedEdit, FALSE);
@@ -428,28 +410,9 @@ void chooseOutput(HWND owner) {
     if (chooseFolder(owner, L"Select output folder", current, selected)) setText(gOutEdit, selected.wstring());
 }
 
-ntc::StimulusMode selectedStimulusMode() {
-    const LRESULT index = SendMessageW(gStimulusCombo, CB_GETCURSEL, 0, 0);
-    switch (index) {
-    case 1: return ntc::StimulusMode::Clean;
-    case 2: return ntc::StimulusMode::Dist;
-    case 3: return ntc::StimulusMode::Custom;
-    default: return ntc::StimulusMode::Legacy;
-    }
-}
 
-void chooseCustomStimulus(HWND owner) {
-    wchar_t file[32768]{};
-    OPENFILENAMEW ofn{};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = owner;
-    ofn.lpstrFilter = L"WAV audio (*.wav)\0*.wav\0All files (*.*)\0*.*\0";
-    ofn.lpstrFile = file;
-    ofn.nMaxFile = static_cast<DWORD>(std::size(file));
-    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
-    ofn.lpstrDefExt = L"wav";
-    if (GetOpenFileNameW(&ofn)) setText(gCustomStimulusEdit, fs::path(file).wstring());
-}
+
+
 
 void chooseRecordedAudio(HWND owner) {
     wchar_t file[32768]{};
@@ -497,26 +460,21 @@ ntc::TailMode selectedTailMode() {
 }
 
 void updateTailControls() {
-    if (gBusy) return;
-    const ntc::StimulusMode mode = selectedStimulusMode();
-    const bool customStimulus = mode == ntc::StimulusMode::Custom;
-    EnableWindow(gCustomStimulusEdit, customStimulus ? TRUE : FALSE);
-    EnableWindow(gBrowseCustomStimulusButton, customStimulus ? TRUE : FALSE);
-
-    // v1.8: Tail selection applies to every stimulus profile, including Legacy.
+    if (uploaderTabSelected()) return;
+    // Release UI always uses the official/original 50 s stimulus. Tail/Reamp
+    // remains selectable between the original tail and a recorded WAV.
     EnableWindow(gTailCombo, TRUE);
     const bool recorded = selectedTailMode() == ntc::TailMode::RecordedAudio;
     EnableWindow(gRecordedEdit, recorded ? TRUE : FALSE);
     EnableWindow(gBrowseRecordedButton, recorded ? TRUE : FALSE);
 
-    const bool legacyExtras = !nativeBackendSelected();
-    EnableWindow(gCorrectiveCheck, legacyExtras ? TRUE : FALSE);
-    EnableWindow(gRefineCheck, legacyExtras ? TRUE : FALSE);
-    const bool correctiveEnabled = legacyExtras && SendMessageW(gCorrectiveCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    EnableWindow(gCorrectiveCheck, TRUE);
+    const bool correctiveEnabled = SendMessageW(gCorrectiveCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     EnableWindow(gCorrectiveEdit, correctiveEnabled ? TRUE : FALSE);
     EnableWindow(gBrowseCorrectiveButton, correctiveEnabled ? TRUE : FALSE);
 
-    const bool refineEnabled = legacyExtras && SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    EnableWindow(gRefineCheck, TRUE);
+    const bool refineEnabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     EnableWindow(gRefineTargetEdit, refineEnabled ? TRUE : FALSE);
     EnableWindow(gBrowseRefineTargetButton, refineEnabled ? TRUE : FALSE);
 }
@@ -540,14 +498,9 @@ void startConversion(HWND hwnd) {
     }
 
     ntc::StimulusConfig stimulus;
-    stimulus.mode = selectedStimulusMode();
-    stimulus.customStimulus = fs::path(getText(gCustomStimulusEdit));
+    stimulus.mode = ntc::StimulusMode::Legacy;
     stimulus.tailMode = selectedTailMode();
     stimulus.recordedAudio = fs::path(getText(gRecordedEdit));
-    if (stimulus.mode == ntc::StimulusMode::Custom && stimulus.customStimulus.empty()) {
-        MessageBoxW(hwnd, L"Select a Custom Stimulus WAV file.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
-        return;
-    }
     if (stimulus.tailMode == ntc::TailMode::RecordedAudio
         && stimulus.recordedAudio.empty()) {
         MessageBoxW(hwnd, L"Select a Recorded Audio WAV file.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
@@ -557,7 +510,7 @@ void startConversion(HWND hwnd) {
     const BackendMode backend = selectedBackendMode();
 
     ntc::CorrectiveIrConfig correction;
-    correction.enabled = backend == BackendMode::CurrentDll && SendMessageW(gCorrectiveCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    correction.enabled = SendMessageW(gCorrectiveCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     correction.wav = fs::path(getText(gCorrectiveEdit));
     if (correction.enabled && correction.wav.empty()) {
         MessageBoxW(hwnd, L"Select a Corrective IR WAV file.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
@@ -565,7 +518,7 @@ void startConversion(HWND hwnd) {
     }
 
     ntc::CloRefineConfig refine;
-    refine.enabled = backend == BackendMode::CurrentDll && SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    refine.enabled = SendMessageW(gRefineCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
     refine.passes = 4;
     refine.referenceWav = fs::path(getText(gRefineTargetEdit));
 
@@ -575,17 +528,17 @@ void startConversion(HWND hwnd) {
         ntc::IndependentTrainerConfig nativeConfig;
         if (gInputMode == InputMode::SingleNam) {
             setText(gStatus, L"Starting independent/native conversion...");
-            std::thread([hwnd, input, out, stimulus, nativeConfig] {
+            std::thread([hwnd, input, out, stimulus, correction, refine, nativeConfig] {
                 auto result = std::make_unique<ntc::ConversionResult>(
-                    ntc::convertNamToBothIndependent(input, out, stimulus, nativeConfig,
+                    ntc::convertNamToBothIndependent(input, out, stimulus, correction, refine, nativeConfig,
                         [hwnd](const std::wstring& text) { postStatus(hwnd, text); }));
                 PostMessageW(hwnd, WM_APP_DONE_SINGLE, 0, reinterpret_cast<LPARAM>(result.release()));
             }).detach();
         } else {
             setText(gStatus, L"Starting independent/native batch conversion...");
-            std::thread([hwnd, input, out, stimulus, nativeConfig] {
+            std::thread([hwnd, input, out, stimulus, correction, refine, nativeConfig] {
                 auto result = std::make_unique<ntc::BatchConversionResult>(
-                    ntc::convertNamFolderIndependent(input, out, stimulus, nativeConfig,
+                    ntc::convertNamFolderIndependent(input, out, stimulus, correction, refine, nativeConfig,
                         [hwnd](const std::wstring& text) { postStatus(hwnd, text); }));
                 PostMessageW(hwnd, WM_APP_DONE_BATCH, 0, reinterpret_cast<LPARAM>(result.release()));
             }).detach();
@@ -695,7 +648,6 @@ void computeLayout(int clientW, int clientH) {
     int y = 128;
     gUi.sectionInput = RECT{ margin, y, clientW - margin, y + 76 }; y += 76 + gap;
     gUi.sectionOutput = RECT{ margin, y, clientW - margin, y + 70 }; y += 70 + gap;
-    gUi.sectionStimulus = RECT{ margin, y, clientW - margin, y + 105 }; y += 105 + gap;
     gUi.sectionTail = RECT{ margin, y, clientW - margin, y + 66 }; y += 66 + gap;
     gUi.sectionRecorded = RECT{ margin, y, clientW - margin, y + 105 }; y += 105 + gap;
     gUi.sectionCorrective = RECT{ margin, y, clientW - margin, y + 86 }; y += 86 + gap;
@@ -732,14 +684,6 @@ void layoutControls(HWND hwnd) {
     const int outputEditW = (gUi.sectionOutput.right - sectionRightInset) - (contentX + 142);
     moveCtrl(gOutEdit, contentX, gUi.sectionOutput.top + 33, outputEditW, 28);
     moveCtrl(gBrowseButton, gUi.sectionOutput.right - sectionRightInset - 112, gUi.sectionOutput.top + 29, 112, 32);
-
-    moveCtrl(GetDlgItem(hwnd, 1004), contentX, gUi.sectionStimulus.top + 6, 190, 20);
-    moveCtrl(gStimulusCombo, contentX, gUi.sectionStimulus.top + 32, 490, 180);
-    moveCtrl(GetDlgItem(hwnd, 1007), contentX, gUi.sectionStimulus.top + 60, 360, 20);
-    const int customEditW = (gUi.sectionStimulus.right - sectionRightInset) - (contentX + 150);
-    moveCtrl(gCustomStimulusEdit, contentX, gUi.sectionStimulus.top + 80, customEditW, 28);
-    moveCtrl(gBrowseCustomStimulusButton, gUi.sectionStimulus.right - sectionRightInset - 124,
-             gUi.sectionStimulus.top + 76, 124, 32);
 
     moveCtrl(GetDlgItem(hwnd, 1005), contentX, gUi.sectionTail.top + 6, 210, 20);
     moveCtrl(gTailCombo, contentX, gUi.sectionTail.top + 32, 490, 180);
@@ -827,8 +771,6 @@ void createUi(HWND hwnd) {
 
     createSectionLabel(hwnd, 1002, L"Input NAM or folder");
     createSectionLabel(hwnd, 1003, L"Output folder");
-    createSectionLabel(hwnd, 1004, L"Stimulus profile");
-    createSectionLabel(hwnd, 1007, L"Custom stimulus WAV (adapted automatically to 50.000 s)");
     createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
     createSectionLabel(hwnd, 1008, L"Corrective IR");
@@ -848,24 +790,6 @@ void createUi(HWND hwnd) {
     applyFont(gOutEdit);
     gBrowseButton = CreateWindowW(L"BUTTON", L"Browse...", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                   0, 0, 120, 34, hwnd, controlId(IDC_BROWSE_OUTPUT), nullptr, nullptr);
-
-    gStimulusCombo = CreateWindowW(L"COMBOBOX", L"",
-                                   WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                   0, 0, 100, 120, hwnd, controlId(IDC_STIMULUS_MODE), nullptr, nullptr);
-    applyFont(gStimulusCombo);
-    for (const auto mode : { ntc::StimulusMode::Legacy, ntc::StimulusMode::Clean, ntc::StimulusMode::Dist, ntc::StimulusMode::Custom }) {
-        SendMessageW(gStimulusCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(ntc::stimulusModeDisplayName(mode)));
-    }
-    SendMessageW(gStimulusCombo, CB_SETCURSEL, 0, 0);
-
-    gCustomStimulusEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
-        0, 0, 100, 30, hwnd, controlId(IDC_CUSTOM_STIMULUS_PATH), nullptr, nullptr);
-    applyFont(gCustomStimulusEdit);
-    gBrowseCustomStimulusButton = CreateWindowW(L"BUTTON", L"Browse WAV...",
-        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-        0, 0, 120, 34, hwnd, controlId(IDC_BROWSE_CUSTOM_STIMULUS), nullptr, nullptr);
 
     gTailCombo = CreateWindowW(L"COMBOBOX", L"",
                                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
@@ -1043,7 +967,6 @@ void paintBackground(HWND hwnd, HDC hdc) {
     } else {
         drawSectionCard(hdc, gUi.sectionInput, 0);
         drawSectionCard(hdc, gUi.sectionOutput, 1);
-        drawSectionCard(hdc, gUi.sectionStimulus, 2);
         drawSectionCard(hdc, gUi.sectionTail, 3);
         drawSectionCard(hdc, gUi.sectionRecorded, 4);
         drawSectionCard(hdc, gUi.sectionCorrective, 4);
@@ -1185,7 +1108,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_LOAD_FOLDER: chooseNamFolder(hwnd); return 0;
         case IDC_BROWSE_OUTPUT: chooseOutput(hwnd); return 0;
         case IDC_BROWSE_RECORDED: chooseRecordedAudio(hwnd); return 0;
-        case IDC_BROWSE_CUSTOM_STIMULUS: chooseCustomStimulus(hwnd); return 0;
         case IDC_BROWSE_CORRECTIVE_IR: chooseCorrectiveIr(hwnd); return 0;
         case IDC_BROWSE_REFINE_TARGET: chooseRefineTarget(hwnd); return 0;
         case IDC_APPLY_CORRECTIVE_IR:
@@ -1193,9 +1115,6 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         case IDC_REFINE_CLO:
             if (HIWORD(wParam) == BN_CLICKED) updateTailControls();
-            return 0;
-        case IDC_STIMULUS_MODE:
-            if (HIWORD(wParam) == CBN_SELCHANGE) updateTailControls();
             return 0;
         case IDC_TAIL_MODE:
             if (HIWORD(wParam) == CBN_SELCHANGE) updateTailControls();
