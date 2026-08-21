@@ -2030,6 +2030,8 @@ double bandRmsDb(const std::vector<float>&x,double lo,double hi){
     if(!frames||!bins)return -300.0;return 10.0*std::log10(std::max(static_cast<double>(p/static_cast<long double>(bins)),1.0e-30));
 }
 
+fs::path uniqueOutput(const fs::path&dir,const std::wstring&stem,const wchar_t*suffix);
+
 bool optimizeB1024FromDiExperimental(const fs::path&modelPath,const fs::path&phase2CloPath,const fs::path&diPath,
                                       const fs::path&outClo,const fs::path&summaryPath,const fs::path&correctionPath,
                                       const fs::path&outDir,const std::wstring&stem,std::string&error,const StatusCallback&status){
