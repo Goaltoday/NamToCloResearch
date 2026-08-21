@@ -143,8 +143,12 @@ target_sources(NamToClo PRIVATE
 target_include_directories(NamToClo PRIVATE "${_ntc_ooura_dir}/src")
 # r8brain releases before v7 are not fully header-only; the historical
 # template-era branch used by the official converter ships r8bbase.cpp.
+# Build that third-party translation unit separately so our /W4 policy does
+# not turn third-party optimizer diagnostics into a failure of NamToClo.
 if(EXISTS "${_ntc_r8brain_dir}/r8bbase.cpp")
-    target_sources(NamToClo PRIVATE "${_ntc_r8brain_dir}/r8bbase.cpp")
+    add_library(ntc_r8brain_base OBJECT "${_ntc_r8brain_dir}/r8bbase.cpp")
+    target_include_directories(ntc_r8brain_base PRIVATE "${_ntc_r8brain_dir}")
+    target_sources(NamToClo PRIVATE $<TARGET_OBJECTS:ntc_r8brain_base>)
 endif()
 target_include_directories(NamToClo PRIVATE "${_ntc_r8brain_dir}")
 target_link_libraries(NamToClo PRIVATE ntc_namcore)
@@ -170,11 +174,16 @@ elseif(EXISTS "${_ntc_r8brain_dir}/License.txt")
 endif()
 
 if(MSVC)
-    target_compile_options(NamToClo PRIVATE /W4 /permissive- /EHsc /utf-8 /fp:precise)
+    # Explicit /WX- makes the release independent of runner/global warning-as-error settings.
+    target_compile_options(NamToClo PRIVATE /W4 /WX- /permissive- /EHsc /utf-8 /fp:precise)
     set_property(TARGET NamToClo PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     if(TARGET ntc_namcore)
-        target_compile_options(ntc_namcore PRIVATE /W3 /permissive- /EHsc /utf-8 /fp:precise)
+        target_compile_options(ntc_namcore PRIVATE /W3 /WX- /permissive- /EHsc /utf-8 /fp:precise)
         set_property(TARGET ntc_namcore PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+    if(TARGET ntc_r8brain_base)
+        target_compile_options(ntc_r8brain_base PRIVATE /W0 /WX- /permissive- /EHsc /utf-8 /fp:precise)
+        set_property(TARGET ntc_r8brain_base PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     endif()
 endif()
 
