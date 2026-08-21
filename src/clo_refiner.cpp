@@ -197,7 +197,7 @@ std::vector<float> hannWindow(std::size_t n){
 }
 
 namespace {
-// Current SOURCE_latest_19-style CAB Tone Match analysis on final 20 s.
+// Tone Match analysis on the final 20 s.
 // No band guards, no confidence masking, no artificial HF freeze and no global-level removal.
 // The generated 2048-sample minimum-phase IR is applied directly in memory to Block B.
 // This avoids creating a temporary diagnostic WAV without changing the correction itself.

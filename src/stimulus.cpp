@@ -1,5 +1,4 @@
 #include "stimulus.hpp"
-#include "conversion.hpp"
 #include "common.hpp"
 
 #include <algorithm>
@@ -392,16 +391,6 @@ bool existsFile(const fs::path& p) {
 
 } // namespace
 
-const wchar_t* stimulusModeDisplayName(const StimulusMode mode) {
-    switch (mode) {
-    case StimulusMode::Legacy: return L"Original / Legacy";
-    case StimulusMode::Clean:  return L"Clean";
-    case StimulusMode::Dist:   return L"Dist";
-    case StimulusMode::Custom: return L"Custom WAV";
-    }
-    return L"Unknown";
-}
-
 const wchar_t* tailModeDisplayName(const TailMode mode) {
     switch (mode) {
     case TailMode::PresetAudio:   return L"Original Preset Audio";
@@ -410,64 +399,29 @@ const wchar_t* tailModeDisplayName(const TailMode mode) {
     return L"Unknown";
 }
 
-bool buildStimulus(const RuntimePaths& runtime,
+bool buildStimulus(const fs::path& originalStimulus,
                    const StimulusConfig& config,
                    const fs::path& destination,
                    std::string& error) {
-    Pcm16MonoWav base;
-    Pcm16MonoWav tail;
-
-    if (config.mode == StimulusMode::Legacy) {
-        // v1.8: Legacy is now a base-stimulus profile like Clean and Dist.
-        // Only the first 50.000 seconds of nam_input_wav.wav are used here;
-        // the selected Tail / Reamp source is appended below through the same
-        // common path used by every other stimulus mode.
-        if (!existsFile(runtime.legacyStimulus)) {
-            error = "Missing runtime\\ampero\\nam_input_wav.wav";
-            return false;
-        }
-        if (!readAdaptedAudio(runtime.legacyStimulus, kBaseFrames, "Legacy stimulus", base, error)) return false;
-    } else if (config.mode == StimulusMode::Custom) {
-        if (!existsFile(config.customStimulus)) {
-            error = "Select a valid Custom Stimulus WAV file.";
-            return false;
-        }
-        if (!readAdaptedAudio(config.customStimulus, kBaseFrames, "Custom stimulus", base, error)) return false;
-    } else {
-        const bool clean = config.mode == StimulusMode::Clean;
-        const fs::path& basePath = clean ? runtime.cleanStimulus : runtime.distStimulus;
-        if (!existsFile(basePath)) {
-            error = clean
-                ? "Missing runtime\\ampero\\inputSignalCleanSW.wav"
-                : "Missing runtime\\ampero\\inputSignalDistSW.wav";
-            return false;
-        }
-        if (!readPcm16Mono44100(basePath, kBaseFrames, base, error)) return false;
+    if (!existsFile(originalStimulus)) {
+        error = "Missing nam_input_wav.wav next to the executable.";
+        return false;
     }
 
+    Pcm16MonoWav base;
+    if (!readAdaptedAudio(originalStimulus, kBaseFrames, "Original stimulus", base, error)) return false;
+
+    Pcm16MonoWav tail;
     if (config.tailMode == TailMode::PresetAudio) {
-        if (config.mode == StimulusMode::Legacy) {
-            // Exact official default while keeping Stimulus Profile and Tail
-            // conceptually independent: Legacy contributes samples 0..50 s
-            // and Original Preset Audio contributes samples 50..70 s from the
-            // same official nam_input_wav.wav.  No PresetAudio.wav export is
-            // required for this combination.
-            Pcm16MonoWav fullLegacy;
-            if (!readAdaptedAudio(runtime.legacyStimulus, kBaseFrames + kTailFrames,
-                                  "Legacy stimulus/tail", fullLegacy, error)) return false;
-            if (fullLegacy.samples.size() < kBaseFrames + kTailFrames) {
-                error = "Legacy stimulus is shorter than the required 70.000 seconds.";
-                return false;
-            }
-            tail.samples.assign(fullLegacy.samples.begin() + static_cast<std::ptrdiff_t>(kBaseFrames),
-                                fullLegacy.samples.begin() + static_cast<std::ptrdiff_t>(kBaseFrames + kTailFrames));
-        } else {
-            if (!existsFile(runtime.presetAudio)) {
-                error = "Missing runtime\\ampero\\PresetAudio.wav";
-                return false;
-            }
-            if (!readPcm16Mono44100(runtime.presetAudio, kTailFrames, tail, error)) return false;
+        Pcm16MonoWav full;
+        if (!readAdaptedAudio(originalStimulus, kBaseFrames + kTailFrames,
+                              "Original stimulus/tail", full, error)) return false;
+        if (full.samples.size() < kBaseFrames + kTailFrames) {
+            error = "nam_input_wav.wav is shorter than the required 70.000 seconds.";
+            return false;
         }
+        tail.samples.assign(full.samples.begin() + static_cast<std::ptrdiff_t>(kBaseFrames),
+                            full.samples.begin() + static_cast<std::ptrdiff_t>(kBaseFrames + kTailFrames));
     } else {
         if (!existsFile(config.recordedAudio)) {
             error = "Select a valid Recorded Audio WAV file.";
@@ -481,7 +435,6 @@ bool buildStimulus(const RuntimePaths& runtime,
     combined.insert(combined.end(), base.samples.begin(), base.samples.end());
     combined.insert(combined.end(), tail.samples.begin(), tail.samples.end());
     combined.insert(combined.end(), kSoundClonePaddingFrames, static_cast<std::int16_t>(0));
-
     return writePcm16Wav(destination, combined, error);
 }
 

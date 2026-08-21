@@ -1,10 +1,7 @@
-#include "conversion.hpp"
+#include "native_converter.hpp"
 #include "common.hpp"
 #include "gp200_midi.hpp"
 #include "resource.h"
-#if NTC_HAS_INDEPENDENT_TRAINER
-#include "independent_trainer.hpp"
-#endif
 
 #include <windows.h>
 #include <commdlg.h>
@@ -69,7 +66,6 @@ constexpr COLORREF kColorStatusOk = RGB(73, 193, 89);
 constexpr COLORREF kColorDisabled = RGB(203, 210, 220);
 
 enum class InputMode { None, SingleNam, Folder };
-enum class BackendMode { CurrentDll, IndependentNative };
 
 struct UiMetrics {
     RECT header{};
@@ -127,7 +123,6 @@ HBITMAP gSectionIcons[5] = { nullptr, nullptr, nullptr, nullptr, nullptr };
 UiMetrics gUi{};
 bool gBusy = false;
 InputMode gInputMode = InputMode::None;
-BackendMode gBackendMode = BackendMode::CurrentDll;
 bool gUploadBusy = false;
 
 struct UploadProgressMessage {
@@ -214,7 +209,7 @@ void applyFont(HWND h, HFONT font) {
 void applyFont(HWND h) { applyFont(h, gFont); }
 
 bool uploaderTabSelected() {
-    return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 2;
+    return gBackendTabs && TabCtrl_GetCurSel(gBackendTabs) == 1;
 }
 
 void showControl(HWND h, bool show) {
@@ -250,49 +245,21 @@ void refreshUploaderDetection() {
         EnableWindow(gUploaderUploadButton, d.inputFound && d.outputFound ? TRUE : FALSE);
 }
 
-BackendMode selectedBackendMode() {
-    if (!gBackendTabs) return BackendMode::CurrentDll;
-    const int index = TabCtrl_GetCurSel(gBackendTabs);
-    return index == 1 ? BackendMode::IndependentNative : BackendMode::CurrentDll;
-}
-
-bool nativeBackendSelected() {
-    return selectedBackendMode() == BackendMode::IndependentNative;
-}
-
 void updateBackendUi() {
-    gBackendMode = selectedBackendMode();
     HWND hwnd = gBackendTabs ? GetParent(gBackendTabs) : nullptr;
     const bool uploader = uploaderTabSelected();
     showConversionUi(hwnd, !uploader);
     showUploaderUi(hwnd, uploader);
     if (uploader) {
-        setText(gSubtitle, L"Upload Sound Clone (.clo) files directly to a GP-200 SnapTone slot via USB MIDI.");
+        setText(gSubtitle, L"Upload CLO files directly to a GP-200 SnapTone slot via USB MIDI.");
         refreshUploaderDetection();
-        setText(gStatus, L"GP-200 Uploader ready.");
-        if (hwnd) InvalidateRect(hwnd, nullptr, TRUE);
-        return;
-    }
-    setText(gSubtitle, L"Convert one NAM or batch-convert every NAM in a selected folder.");
-    const bool native = gBackendMode == BackendMode::IndependentNative;
-#if !NTC_HAS_INDEPENDENT_TRAINER
-    if (native) {
-        TabCtrl_SetCurSel(gBackendTabs, 0);
-        gBackendMode = BackendMode::CurrentDll;
-    }
-#endif
-    if (gBusy) return;
-
-    EnableWindow(gCorrectiveCheck, TRUE);
-    EnableWindow(gRefineCheck, TRUE);
-    if (native) {
-        setText(gInfo,
-            L"Independent / Native: reconstructed official conversion flow. Uses nam_input_wav.wav next to the EXE; "
-            L"no GP-200.exe or HTUSBTools.dll is required. Corrective IR and Tone Match are available.");
-        setText(gStatus, L"Independent / Native backend selected. Ready for conversion.");
+        if (!gUploadBusy) setText(gStatus, L"GP-200 Uploader ready.");
     } else {
+        setText(gSubtitle, L"Convert one NAM or batch-convert every NAM in a selected folder.");
         setText(gInfo,
-            L"Current backend: HTUSBTools conversion path. Corrective IR and Tone Match are available.");
+            L"Place nam_input_wav.wav next to NamToClo.exe. The original stimulus is always used.\r\n"
+            L"Tail / Reamp, Corrective IR and Tone Match are optional.");
+        if (!gBusy) setText(gStatus, L"Ready to convert.");
     }
     if (hwnd) InvalidateRect(hwnd, nullptr, TRUE);
 }
@@ -498,7 +465,6 @@ void startConversion(HWND hwnd) {
     }
 
     ntc::StimulusConfig stimulus;
-    stimulus.mode = ntc::StimulusMode::Legacy;
     stimulus.tailMode = selectedTailMode();
     stimulus.recordedAudio = fs::path(getText(gRecordedEdit));
     if (stimulus.tailMode == ntc::TailMode::RecordedAudio
@@ -506,8 +472,6 @@ void startConversion(HWND hwnd) {
         MessageBoxW(hwnd, L"Select a Recorded Audio WAV file.", L"NAM to CLO", MB_ICONINFORMATION | MB_OK);
         return;
     }
-
-    const BackendMode backend = selectedBackendMode();
 
     ntc::CorrectiveIrConfig correction;
     correction.enabled = SendMessageW(gCorrectiveCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -523,48 +487,25 @@ void startConversion(HWND hwnd) {
     refine.referenceWav = fs::path(getText(gRefineTargetEdit));
 
     enableControls(false);
-    if (backend == BackendMode::IndependentNative) {
-#if NTC_HAS_INDEPENDENT_TRAINER
-        ntc::IndependentTrainerConfig nativeConfig;
-        if (gInputMode == InputMode::SingleNam) {
-            setText(gStatus, L"Starting independent/native conversion...");
-            std::thread([hwnd, input, out, stimulus, correction, refine, nativeConfig] {
-                auto result = std::make_unique<ntc::ConversionResult>(
-                    ntc::convertNamToBothIndependent(input, out, stimulus, correction, refine, nativeConfig,
-                        [hwnd](const std::wstring& text) { postStatus(hwnd, text); }));
-                PostMessageW(hwnd, WM_APP_DONE_SINGLE, 0, reinterpret_cast<LPARAM>(result.release()));
-            }).detach();
-        } else {
-            setText(gStatus, L"Starting independent/native batch conversion...");
-            std::thread([hwnd, input, out, stimulus, correction, refine, nativeConfig] {
-                auto result = std::make_unique<ntc::BatchConversionResult>(
-                    ntc::convertNamFolderIndependent(input, out, stimulus, correction, refine, nativeConfig,
-                        [hwnd](const std::wstring& text) { postStatus(hwnd, text); }));
-                PostMessageW(hwnd, WM_APP_DONE_BATCH, 0, reinterpret_cast<LPARAM>(result.release()));
-            }).detach();
-        }
-#else
-        enableControls(true);
-        MessageBoxW(hwnd, L"This build does not include the independent trainer.", L"NAM to CLO", MB_ICONERROR | MB_OK);
-#endif
-        return;
-    }
-
+    ntc::NativeConverterConfig nativeConfig;
     if (gInputMode == InputMode::SingleNam) {
-        setText(gStatus, L"Starting current/HTUSBTools conversion...");
-        std::thread([hwnd, input, out, stimulus, correction, refine] {
+        setText(gStatus, L"Starting conversion...");
+        std::thread([hwnd, input, out, stimulus, correction, refine, nativeConfig] {
             auto result = std::make_unique<ntc::ConversionResult>(
-                ntc::convertNamToBoth(input, out, stimulus, correction, refine, [hwnd](const std::wstring& text) { postStatus(hwnd, text); }));
+                ntc::convertNamToClo(input, out, stimulus, correction, refine, nativeConfig,
+                    [hwnd](const std::wstring& text) { postStatus(hwnd, text); }));
             PostMessageW(hwnd, WM_APP_DONE_SINGLE, 0, reinterpret_cast<LPARAM>(result.release()));
         }).detach();
     } else {
-        setText(gStatus, L"Starting current/HTUSBTools batch conversion...");
-        std::thread([hwnd, input, out, stimulus, correction, refine] {
+        setText(gStatus, L"Starting batch conversion...");
+        std::thread([hwnd, input, out, stimulus, correction, refine, nativeConfig] {
             auto result = std::make_unique<ntc::BatchConversionResult>(
-                ntc::convertNamFolder(input, out, stimulus, correction, refine, [hwnd](const std::wstring& text) { postStatus(hwnd, text); }));
+                ntc::convertNamFolderToClo(input, out, stimulus, correction, refine, nativeConfig,
+                    [hwnd](const std::wstring& text) { postStatus(hwnd, text); }));
             PostMessageW(hwnd, WM_APP_DONE_BATCH, 0, reinterpret_cast<LPARAM>(result.release()));
         }).detach();
     }
+
 }
 
 void openOutputFolder(HWND hwnd) {
@@ -740,7 +681,7 @@ void createSectionLabel(HWND hwnd, int id, const wchar_t* text) {
 void createUi(HWND hwnd) {
     createResources();
 
-    const std::wstring appHeader = std::wstring(L"NAM to CLO ") + ntc::kVersion;
+    const std::wstring appHeader = L"NAM to CLO";
     HWND title = CreateWindowW(L"STATIC", appHeader.c_str(), WS_CHILD | WS_VISIBLE,
                                0, 0, 100, 30, hwnd, controlId(1001), nullptr, nullptr);
     applyFont(title, gTitleFont);
@@ -754,19 +695,13 @@ void createUi(HWND hwnd) {
                                     WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TCS_FIXEDWIDTH,
                                     0, 0, 100, 32, hwnd, controlId(IDC_BACKEND_TABS), nullptr, nullptr);
     applyFont(gBackendTabs);
-    SendMessageW(gBackendTabs, TCM_SETITEMSIZE, 0, MAKELPARAM(250, 25));
+    SendMessageW(gBackendTabs, TCM_SETITEMSIZE, 0, MAKELPARAM(220, 25));
     TCITEMW tab{};
     tab.mask = TCIF_TEXT;
-    tab.pszText = const_cast<LPWSTR>(L"Current / HTUSBTools");
+    tab.pszText = const_cast<LPWSTR>(L"Convert to CLO");
     TabCtrl_InsertItem(gBackendTabs, 0, &tab);
-#if NTC_HAS_INDEPENDENT_TRAINER
-    tab.pszText = const_cast<LPWSTR>(L"Independent / Native");
-#else
-    tab.pszText = const_cast<LPWSTR>(L"Independent / Native (not built)");
-#endif
-    TabCtrl_InsertItem(gBackendTabs, 1, &tab);
     tab.pszText = const_cast<LPWSTR>(L"GP-200 Uploader");
-    TabCtrl_InsertItem(gBackendTabs, 2, &tab);
+    TabCtrl_InsertItem(gBackendTabs, 1, &tab);
     TabCtrl_SetCurSel(gBackendTabs, 0);
 
     createSectionLabel(hwnd, 1002, L"Input NAM or folder");
@@ -774,8 +709,8 @@ void createUi(HWND hwnd) {
     createSectionLabel(hwnd, 1005, L"Tail / Reamp source");
     createSectionLabel(hwnd, 1006, L"Recorded WAV (adapted automatically to 20.000 s)");
     createSectionLabel(hwnd, 1008, L"Corrective IR");
-    createSectionLabel(hwnd, 1009, L"CLO refinement (VST-style Tone Match - matched input)");
-    createSectionLabel(hwnd, 1010, L"Refinement test WAV (optional; first 20 s used)");
+    createSectionLabel(hwnd, 1009, L"Tone Match");
+    createSectionLabel(hwnd, 1010, L"Tone Match reference WAV (optional; first 20 s used)");
 
     gInputEdit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_READONLY,
                                  0, 0, 100, 30, hwnd, controlId(IDC_INPUT_PATH), nullptr, nullptr);
@@ -819,7 +754,7 @@ void createUi(HWND hwnd) {
                                              WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                              0, 0, 120, 34, hwnd, controlId(IDC_BROWSE_CORRECTIVE_IR), nullptr, nullptr);
 
-    gRefineCheck = CreateWindowW(L"BUTTON", L"Refine Block B spectrum with Tone Match (slow)",
+    gRefineCheck = CreateWindowW(L"BUTTON", L"Apply Tone Match (slow)",
                                  WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
                                  0, 0, 520, 24, hwnd, controlId(IDC_REFINE_CLO), nullptr, nullptr);
     applyFont(gRefineCheck);
@@ -880,7 +815,7 @@ void createUi(HWND hwnd) {
                                 0, 0, 180, 42, hwnd, controlId(IDC_OPEN_OUTPUT), nullptr, nullptr);
     applyFont(gOpenButton);
 
-    gStatus = CreateWindowW(L"STATIC", L"Checking runtime...", WS_CHILD | WS_VISIBLE,
+    gStatus = CreateWindowW(L"STATIC", L"Ready to convert.", WS_CHILD | WS_VISIBLE,
                             0, 0, 100, 22, hwnd, controlId(IDC_STATUS), nullptr, nullptr);
     applyFont(gStatus);
 
@@ -1037,17 +972,7 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
         createUi(hwnd);
-        std::string error;
-        const auto rt = ntc::resolveDefaultRuntime();
-        if (ntc::validateRuntime(rt, error)) {
-            setText(gStatus, L"Ready. Current/HTUSBTools, Independent/Native and GP-200 Uploader tabs are available.");
-        } else {
-#if NTC_HAS_INDEPENDENT_TRAINER
-            setText(gStatus, L"Independent/Native ready. Current/HTUSBTools runtime unavailable: " + ntc::fromUtf8(error));
-#else
-            setText(gStatus, L"Current runtime missing: " + ntc::fromUtf8(error));
-#endif
-        }
+        setText(gStatus, L"Ready to convert.");
         return 0;
     }
     case WM_SIZE:
@@ -1190,13 +1115,13 @@ LRESULT CALLBACK wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         updateBackendUi();
         updateTailControls();
         if (r && r->ok) {
-            std::wstring resultMessage = L"Conversion complete.\r\n\r\nAmpero 2048:\r\n" + r->ampero2048.wstring()
-                                      + L"\r\n\r\nGP-200 1024:\r\n" + r->gp2001024.wstring();
+            std::wstring resultMessage = L"Conversion complete.\r\n\r\nCLO 2048:\r\n" + r->ampero2048.wstring()
+                                      + L"\r\n\r\nGP-200 CLO 1024:\r\n" + r->gp2001024.wstring();
             if (!r->refinedGp2001024.empty()) {
-                resultMessage += L"\r\n\r\nRefined GP-200 1024:\r\n" + r->refinedGp2001024.wstring();
+                resultMessage += L"\r\n\r\nTone Match GP-200 CLO 1024:\r\n" + r->refinedGp2001024.wstring();
             }
             setText(gStatus, r->refinedGp2001024.empty() ? L"Done. Two CLO files were generated successfully." : L"Done. Three CLO files were generated successfully.");
-            const std::wstring doneTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;
+            const std::wstring doneTitle = L"NAM to CLO";
             MessageBoxW(hwnd, resultMessage.c_str(), doneTitle.c_str(), MB_ICONINFORMATION | MB_OK);
         } else {
             const std::wstring err = r ? ntc::fromUtf8(r->error) : L"Unknown conversion error.";
@@ -1273,7 +1198,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = nullptr;
     RegisterClassExW(&wc);
 
-    const std::wstring windowTitle = std::wstring(L"NAM to CLO ") + ntc::kVersion;
+    const std::wstring windowTitle = L"NAM to CLO";
     HWND hwnd = CreateWindowExW(0, kClassName, windowTitle.c_str(),
                                 WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                                 CW_USEDEFAULT, CW_USEDEFAULT, 1040, 945,

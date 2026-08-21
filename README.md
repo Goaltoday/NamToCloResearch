@@ -2,15 +2,13 @@
 
 Windows x64 application for converting Neural Amp Modeler (`.nam`) models to CLO files and uploading GP-200 CLO files over USB MIDI.
 
-## Conversion backends
+## Convert to CLO
 
-### Independent / Native
+The **Convert to CLO** tab converts a single NAM file or every NAM file in a selected folder.
 
-The native backend is the reconstructed GP-200/Valeton conversion path. It does **not** load or execute `GP-200.exe` or `HTUSBTools.dll`. NAM inference is provided by NeuralAmpModelerCore and the CLO identification/serialization pipeline is implemented in this project.
+Place `nam_input_wav.wav` in the same folder as `NamToClo.exe`. The original conversion stimulus is always used; no stimulus-profile selection is required.
 
-The retained native flow includes the reconstructed official behavior used by the release build: 70-second stimulus handling, the 600-sample post-render guard, fixed NAM target scale, target detrend/latency preprocessing, P/K estimation, A/B factorization and optimizer phases, final B refinement, r8brain FIR sample-rate conversion, B2048 serialization and GP-200 B1024 compact output.
-
-Native output files:
+Generated files:
 
 ```text
 <name>_NATIVE_2048.clo
@@ -18,45 +16,36 @@ Native output files:
 <name>_NATIVE_GP200_1024_REFINED.clo   (when Tone Match is enabled)
 ```
 
-Corrective IR and Tone Match are available on the native backend. Corrective IR is applied to the normal native outputs. Tone Match produces the separate refined GP-200 output, matching the established HTUSBTools-branch behavior.
+### Tail / Reamp
 
-For A2 `SlimmableContainer` NAMs, the embedded submodel with the highest `max_value` (Full) is used before rendering.
+- **Original Preset Audio** uses the original final 20 seconds of `nam_input_wav.wav`.
+- **Recorded Audio** lets you select a WAV file for the final 20-second tail. The audio is adapted automatically to the required format and duration.
 
-### Current / HTUSBTools
+### Corrective IR
 
-The existing HTUSBTools conversion backend is retained for compatibility. Corrective IR and CLO refinement remain available here as well.
+Optionally apply a corrective IR WAV to the normal CLO output.
 
-### GP-200 Uploader
+### Tone Match
 
-The uploader tab sends an existing `.clo` file directly to a selected GP-200 SnapTone slot over USB MIDI.
+Optionally refine the GP-200 CLO using Tone Match. A separate refined GP-200 CLO is generated, leaving the normal conversion output available as well.
 
-## Stimulus and Tail / Reamp
+An optional reference WAV can be selected for Tone Match; the first 20 seconds are used.
 
-The release UI no longer exposes multiple Stimulus Profiles. Conversion always uses the original/official stimulus. `nam_input_wav.wav` must be placed next to the executable. The native backend does not need `runtime\ampero` or `HTUSBTools.dll`.
+## GP-200 Uploader
 
-Tail / Reamp selection is retained: the original final 20 seconds of `nam_input_wav.wav` can be used, or a user Recorded Audio WAV can be adapted to the 20-second tail.
+The **GP-200 Uploader** tab sends an existing `.clo` file directly to a selected GP-200 SnapTone slot over USB MIDI.
 
 ## Build
 
-Requirements: Windows x64, CMake 3.24+, Visual Studio/MSVC.
+Requirements: Windows x64, CMake 3.24+ and Visual Studio/MSVC.
 
 ```powershell
 cmake --preset windows-x64
 cmake --build build --config Release --parallel
 ```
 
-The default native build fetches:
-
-- NeuralAmpModelerCore v0.5.4
-- r8brain-free-src `version-3.7`
-- Ooura FFT4G source from SoXR 0.1.3
-
-Local source trees can be supplied with `NAM_CORE_SOURCE_DIR`, `R8BRAIN_SOURCE_DIR`, and `NTC_OOURA_SOURCE_DIR`.
-
-## Release scope
-
-This release intentionally contains the reconstructed native converter only as a production conversion path. The later experimental NAM→CLO improvement phases, their diagnostic WAV/CSV generation, harmonic/IMD fitting experiments, DI-guided B fitting, and associated research result files are not part of this branch.
-
 ## Licensing
 
-See `LICENSE` and `THIRD_PARTY.md`. This is an independent research/reimplementation project and is not affiliated with or endorsed by Valeton or Hotone.
+See `LICENSE` and `THIRD_PARTY.md`.
+
+This is an independent research/reimplementation project and is not affiliated with or endorsed by Valeton or Hotone.

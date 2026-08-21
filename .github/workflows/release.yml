@@ -19,10 +19,8 @@ jobs:
       - name: Stage release
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force release/NamToClo/runtime/ampero | Out-Null
+          New-Item -ItemType Directory -Force release/NamToClo | Out-Null
           Copy-Item build/Release/NamToClo.exe release/NamToClo/NamToClo.exe
-          Copy-Item runtime/README.md release/NamToClo/runtime/README.md
-          Copy-Item runtime/ampero/README.md release/NamToClo/runtime/ampero/README.md
           Copy-Item README.md,LICENSE,THIRD_PARTY.md release/NamToClo/
           Compress-Archive -Path release/NamToClo -DestinationPath release/NamToClo-Windows-x64.zip
       - uses: softprops/action-gh-release@v2
